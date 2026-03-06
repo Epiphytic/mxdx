@@ -1,3 +1,14 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LauncherIdentityEvent {
+    pub launcher_id: String,
+    pub accounts: Vec<String>,
+    pub primary: String,
+    pub capabilities: Vec<String>,
+    pub version: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

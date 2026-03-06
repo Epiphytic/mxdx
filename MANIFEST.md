@@ -49,10 +49,16 @@ _No public symbols._
 |:---|:---|:---|
 | `ResultEvent` | struct | `crates/mxdx-types/src/events/result.rs` |
 | `ResultStatus` | enum | `crates/mxdx-types/src/events/result.rs` |
+| `LauncherIdentityEvent` | struct | `crates/mxdx-types/src/events/launcher.rs` |
 | `CommandEvent` | struct | `crates/mxdx-types/src/events/command.rs` |
 | `CommandAction` | enum | `crates/mxdx-types/src/events/command.rs` |
 | `SecretRequestEvent` | struct | `crates/mxdx-types/src/events/secret.rs` |
 | `SecretResponseEvent` | struct | `crates/mxdx-types/src/events/secret.rs` |
+| `TerminalDataEvent` | struct | `crates/mxdx-types/src/events/terminal.rs` |
+| `TerminalResizeEvent` | struct | `crates/mxdx-types/src/events/terminal.rs` |
+| `TerminalSessionRequestEvent` | struct | `crates/mxdx-types/src/events/terminal.rs` |
+| `TerminalSessionResponseEvent` | struct | `crates/mxdx-types/src/events/terminal.rs` |
+| `TerminalRetransmitEvent` | struct | `crates/mxdx-types/src/events/terminal.rs` |
 | `HostTelemetryEvent` | struct | `crates/mxdx-types/src/events/telemetry.rs` |
 | `CpuInfo` | struct | `crates/mxdx-types/src/events/telemetry.rs` |
 | `MemoryInfo` | struct | `crates/mxdx-types/src/events/telemetry.rs` |

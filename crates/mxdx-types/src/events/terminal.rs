@@ -1,8 +1,45 @@
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TerminalDataEvent {
+    pub data: String,
+    pub encoding: String,
+    pub seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TerminalResizeEvent {
+    pub cols: u32,
+    pub rows: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TerminalSessionRequestEvent {
+    pub uuid: String,
+    pub command: String,
+    pub env: HashMap<String, String>,
+    pub cols: u32,
+    pub rows: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TerminalSessionResponseEvent {
+    pub uuid: String,
+    pub status: String,
+    pub room_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TerminalRetransmitEvent {
+    pub from_seq: u64,
+    pub to_seq: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json;
-    use std::collections::HashMap;
 
     // TerminalDataEvent tests
 
