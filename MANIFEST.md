@@ -80,6 +80,16 @@
 | `CommandResult` | struct | `crates/mxdx-launcher/src/executor.rs` |
 | `execute_command` | fn | `crates/mxdx-launcher/src/executor.rs` |
 | `validate_command` | fn | `crates/mxdx-launcher/src/executor.rs` |
+| `FailoverState` | enum | `crates/mxdx-launcher/src/multi_hs.rs` |
+| `MultiHsLauncher` | struct | `crates/mxdx-launcher/src/multi_hs.rs` |
+| `MultiHsLauncher::start` | method | `crates/mxdx-launcher/src/multi_hs.rs` |
+| `MultiHsLauncher::primary` | method | `crates/mxdx-launcher/src/multi_hs.rs` |
+| `MultiHsLauncher::connected_count` | method | `crates/mxdx-launcher/src/multi_hs.rs` |
+| `MultiHsLauncher::clients` | method | `crates/mxdx-launcher/src/multi_hs.rs` |
+| `MultiHsLauncher::state` | method | `crates/mxdx-launcher/src/multi_hs.rs` |
+| `MultiHsLauncher::primary_port` | method | `crates/mxdx-launcher/src/multi_hs.rs` |
+| `MultiHsLauncher::health_check` | method | `crates/mxdx-launcher/src/multi_hs.rs` |
+| `MultiHsLauncher::failover` | method | `crates/mxdx-launcher/src/multi_hs.rs` |
 
 ### mxdx-matrix
 
