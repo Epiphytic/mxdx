@@ -16,3 +16,4 @@ reqwest = { workspace = true }
 
 [dev-dependencies]
 mxdx-test-helpers = { path = "../../tests/helpers" }
+uuid = { workspace = true }
