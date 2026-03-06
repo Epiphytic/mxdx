@@ -2392,12 +2392,16 @@ dependencies = [
 name = "mxdx-launcher"
 version = "0.1.0"
 dependencies = [
+ "age",
  "anyhow",
  "base64 0.22.1",
  "flate2",
  "mxdx-matrix",
+ "mxdx-policy",
+ "mxdx-secrets",
  "mxdx-test-helpers",
  "mxdx-types",
+ "reqwest",
  "serde",
  "serde_json",
  "sysinfo",

@@ -11,11 +11,15 @@ path = "src/main.rs"
 name = "mxdx_launcher"
 path = "src/lib.rs"
 
+[features]
+default = ["native"]
+native = ["dep:mxdx-matrix", "dep:tokio"]
+
 [dependencies]
 mxdx-types = { path = "../mxdx-types" }
-mxdx-matrix = { path = "../mxdx-matrix" }
+mxdx-matrix = { path = "../mxdx-matrix", optional = true }
 anyhow = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, optional = true }
 tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -27,4 +31,9 @@ flate2 = { workspace = true }
 
 [dev-dependencies]
 mxdx-test-helpers = { path = "../../tests/helpers" }
+mxdx-secrets = { path = "../mxdx-secrets" }
+mxdx-policy = { path = "../mxdx-policy" }
 tempfile = { workspace = true }
+age = { workspace = true }
+base64 = { workspace = true }
+reqwest = { workspace = true }

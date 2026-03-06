@@ -1,0 +1,68 @@
+name: Security Report
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  security-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install system deps
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev tmux
+
+      - name: Install tuwunel
+        run: |
+          curl -fsSL -o /tmp/tuwunel.deb \
+            "https://github.com/matrix-construct/tuwunel/releases/download/v1.5.0/v1.5.0-release-all-x86_64-v1-linux-gnu-tuwunel.deb"
+          sudo dpkg -i /tmp/tuwunel.deb
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Run security tests
+        run: |
+          mkdir -p report
+          cargo test --workspace -- test_security_ 2>&1 | tee report/security-tests.txt
+
+      - name: Cargo audit
+        run: cargo audit 2>&1 | tee report/cargo-audit.txt || true
+
+      - name: npm audit
+        run: |
+          cd client && npm ci
+          npm audit 2>&1 | tee ../report/npm-audit.txt || true
+
+      - name: Collect security review docs
+        run: cp -r docs/reviews/security/ report/reviews/
+
+      - name: Copy security test matrix
+        run: cp docs/reports/security/security-test-matrix.md report/
+
+      - name: Upload security report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-report-${{ github.ref_name }}
+          path: report/
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            report/security-tests.txt
+            report/cargo-audit.txt
+            report/npm-audit.txt
+            report/security-test-matrix.md
