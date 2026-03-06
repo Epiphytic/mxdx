@@ -3,6 +3,14 @@ name = "mxdx-launcher"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "mxdx-launcher"
+path = "src/main.rs"
+
+[lib]
+name = "mxdx_launcher"
+path = "src/lib.rs"
+
 [dependencies]
 mxdx-types = { path = "../mxdx-types" }
 mxdx-matrix = { path = "../mxdx-matrix" }
