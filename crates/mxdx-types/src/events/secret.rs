@@ -1,3 +1,21 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SecretRequestEvent {
+    pub request_id: String,
+    pub scope: String,
+    pub ttl_seconds: u64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SecretResponseEvent {
+    pub request_id: String,
+    pub granted: bool,
+    pub value: Option<String>,
+    pub error: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

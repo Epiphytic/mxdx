@@ -45,7 +45,21 @@ _No public symbols._
 
 ### mxdx-types
 
-_No public symbols._
+| Symbol | Kind | File |
+|:---|:---|:---|
+| `ResultEvent` | struct | `crates/mxdx-types/src/events/result.rs` |
+| `ResultStatus` | enum | `crates/mxdx-types/src/events/result.rs` |
+| `CommandEvent` | struct | `crates/mxdx-types/src/events/command.rs` |
+| `CommandAction` | enum | `crates/mxdx-types/src/events/command.rs` |
+| `SecretRequestEvent` | struct | `crates/mxdx-types/src/events/secret.rs` |
+| `SecretResponseEvent` | struct | `crates/mxdx-types/src/events/secret.rs` |
+| `HostTelemetryEvent` | struct | `crates/mxdx-types/src/events/telemetry.rs` |
+| `CpuInfo` | struct | `crates/mxdx-types/src/events/telemetry.rs` |
+| `MemoryInfo` | struct | `crates/mxdx-types/src/events/telemetry.rs` |
+| `DiskInfo` | struct | `crates/mxdx-types/src/events/telemetry.rs` |
+| `NetworkInfo` | struct | `crates/mxdx-types/src/events/telemetry.rs` |
+| `OutputEvent` | struct | `crates/mxdx-types/src/events/output.rs` |
+| `OutputStream` | enum | `crates/mxdx-types/src/events/output.rs` |
 
 ### mxdx-web
 

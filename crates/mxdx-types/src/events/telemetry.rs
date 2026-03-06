@@ -1,3 +1,45 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HostTelemetryEvent {
+    pub timestamp: String,
+    pub hostname: String,
+    pub os: String,
+    pub arch: String,
+    pub uptime_seconds: u64,
+    pub load_avg: [f64; 3],
+    pub cpu: CpuInfo,
+    pub memory: MemoryInfo,
+    pub disk: DiskInfo,
+    pub network: Option<NetworkInfo>,
+    pub services: Option<serde_json::Value>,
+    pub devices: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CpuInfo {
+    pub cores: u32,
+    pub usage_percent: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MemoryInfo {
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DiskInfo {
+    pub total_bytes: u64,
+    pub used_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct NetworkInfo {
+    pub rx_bytes: u64,
+    pub tx_bytes: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

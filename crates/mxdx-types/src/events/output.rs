@@ -1,3 +1,21 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OutputEvent {
+    pub uuid: String,
+    pub stream: OutputStream,
+    pub data: String,
+    pub encoding: String,
+    pub seq: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

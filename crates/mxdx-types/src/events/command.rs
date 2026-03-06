@@ -1,3 +1,25 @@
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CommandEvent {
+    pub uuid: String,
+    pub action: CommandAction,
+    pub cmd: String,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub cwd: Option<String>,
+    pub timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandAction {
+    Exec,
+    Kill,
+    Signal,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

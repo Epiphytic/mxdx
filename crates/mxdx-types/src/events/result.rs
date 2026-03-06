@@ -1,3 +1,22 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResultEvent {
+    pub uuid: String,
+    pub status: ResultStatus,
+    pub exit_code: Option<i32>,
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ResultStatus {
+    Exit,
+    Error,
+    Timeout,
+    Killed,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
