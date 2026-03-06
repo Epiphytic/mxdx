@@ -4,6 +4,7 @@ import {
   getLauncherStatus,
   type DiscoveredLauncher,
 } from "./discovery.js";
+import { TerminalSocket, type TerminalMatrixClient } from "./terminal.js";
 
 export interface MatrixClient {
   fetchJson<T>(path: string, init?: RequestInit): Promise<T>;
@@ -12,11 +13,6 @@ export interface MatrixClient {
 export interface TerminalSessionHandle {
   sessionId: string;
   roomId: string | null;
-}
-
-export interface TerminalSocket {
-  readonly sessionId: string;
-  readonly roomId: string;
 }
 
 export class MxdxClient {
@@ -82,10 +78,13 @@ export class MxdxClient {
     return { sessionId: uuid, roomId: null };
   }
 
-  async attachTerminalSession(
-    _sessionId: string,
-    _roomId: string,
-  ): Promise<TerminalSocket> {
-    throw new Error("Not implemented: TerminalSocket will be added in Task 7.3");
+  attachTerminalSession(
+    matrixClient: TerminalMatrixClient,
+    roomId: string,
+  ): TerminalSocket {
+    if (!this.connected) {
+      throw new Error("Not connected. Call connect() first.");
+    }
+    return new TerminalSocket(matrixClient, roomId);
   }
 }

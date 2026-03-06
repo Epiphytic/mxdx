@@ -4,7 +4,6 @@ export {
   MxdxClient,
   type MatrixClient,
   type TerminalSessionHandle,
-  type TerminalSocket as TerminalSocketInterface,
 } from "./client.js";
 export {
   TerminalSocket,

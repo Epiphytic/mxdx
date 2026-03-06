@@ -198,9 +198,15 @@ describe("createTerminalSession", () => {
     expect(body.uuid).toBe(handle.sessionId);
   });
 
-  it("attachTerminalSession throws not-implemented error", async () => {
-    await expect(
-      client.attachTerminalSession("sess-1", "!room:example.com"),
-    ).rejects.toThrow("Not implemented");
+  it("attachTerminalSession returns a TerminalSocket", () => {
+    const mockMatrixClient = {
+      sendEvent: async () => {},
+      onRoomEvent: () => () => {},
+    };
+    const socket = client.attachTerminalSession(mockMatrixClient, "!room:example.com");
+    expect(socket).toBeDefined();
+    expect(socket.roomId).toBe("!room:example.com");
+    expect(socket.connected).toBe(true);
+    socket.close();
   });
 });
