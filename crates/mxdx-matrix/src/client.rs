@@ -25,19 +25,30 @@ pub struct MatrixClient {
 impl MatrixClient {
     /// Login to an existing account on the homeserver with E2EE enabled.
     /// Use this for public Matrix servers where accounts are pre-registered.
+    ///
+    /// The `server_name_or_url` can be either:
+    /// - A server name like `matrix.org` (triggers .well-known discovery)
+    /// - A full URL like `https://matrix-client.matrix.org` (used directly)
     pub async fn login_and_connect(
-        homeserver_url: &str,
+        server_name_or_url: &str,
         username: &str,
         password: &str,
     ) -> Result<Self> {
         let store_dir =
             tempfile::TempDir::new().map_err(|e| MatrixClientError::Other(e.into()))?;
 
-        let client = Client::builder()
-            .homeserver_url(homeserver_url)
-            .sqlite_store(store_dir.path(), None)
-            .build()
-            .await?;
+        let builder = Client::builder()
+            .sqlite_store(store_dir.path(), None);
+
+        // If it looks like a URL (has ://), use it directly.
+        // Otherwise treat it as a server name and let the SDK do .well-known discovery.
+        let client = if server_name_or_url.contains("://") {
+            builder.homeserver_url(server_name_or_url)
+        } else {
+            builder.server_name_or_homeserver_url(server_name_or_url)
+        }
+        .build()
+        .await?;
 
         client
             .matrix_auth()
