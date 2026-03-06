@@ -1,0 +1,22 @@
+# mxdx-policy Appservice Registration Template
+#
+# This template is used to register the mxdx-policy appservice with a
+# Tuwunel homeserver. Replace the placeholder values before use.
+#
+# Registration method (Tuwunel):
+#   1. Via admin room: Send "!admin appservices register" followed by the YAML
+#   2. Via CLI: tuwunel -c config.toml --execute "appservices register <yaml>"
+#
+# See: docs/adr/2026-03-05-tuwunel-ground-truth.md (Section 7)
+
+id: mxdx-policy
+url: "http://127.0.0.1:${APPSERVICE_PORT}"
+as_token: "${AS_TOKEN}"
+hs_token: "${HS_TOKEN}"
+sender_localpart: "mxdx-policy"
+namespaces:
+  users:
+    - exclusive: true
+      regex: "@agent-.*:${SERVER_NAME}"
+  rooms: []
+  aliases: []
