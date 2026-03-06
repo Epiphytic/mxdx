@@ -27,3 +27,4 @@ flate2 = { workspace = true }
 
 [dev-dependencies]
 mxdx-test-helpers = { path = "../../tests/helpers" }
+tempfile = { workspace = true }
