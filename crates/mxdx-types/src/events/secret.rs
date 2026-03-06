@@ -6,13 +6,19 @@ pub struct SecretRequestEvent {
     pub scope: String,
     pub ttl_seconds: u64,
     pub reason: String,
+    /// One-time age x25519 public key for double encryption (mxdx-adr2).
+    /// The coordinator encrypts the secret to this key so that even if the
+    /// Megolm session is compromised, the plaintext remains protected.
+    pub ephemeral_public_key: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SecretResponseEvent {
     pub request_id: String,
     pub granted: bool,
-    pub value: Option<String>,
+    /// When granted, contains the secret value encrypted with the requester's
+    /// ephemeral age public key (base64-encoded ciphertext).
+    pub encrypted_value: Option<String>,
     pub error: Option<String>,
 }
 
@@ -28,6 +34,7 @@ mod tests {
             scope: "github.token".into(),
             ttl_seconds: 3600,
             reason: "CI deployment".into(),
+            ephemeral_public_key: "age1testpublickey".into(),
         };
         let json = serde_json::to_string(&req).unwrap();
         let parsed: SecretRequestEvent = serde_json::from_str(&json).unwrap();
@@ -35,6 +42,7 @@ mod tests {
         assert_eq!(parsed.scope, "github.token");
         assert_eq!(parsed.ttl_seconds, 3600);
         assert_eq!(parsed.reason, "CI deployment");
+        assert_eq!(parsed.ephemeral_public_key, "age1testpublickey");
     }
 
     #[test]
@@ -42,14 +50,14 @@ mod tests {
         let resp = SecretResponseEvent {
             request_id: "req-001".into(),
             granted: true,
-            value: Some("ghp_secret_token_value".into()),
+            encrypted_value: Some("age-encrypted-ciphertext-base64".into()),
             error: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: SecretResponseEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.request_id, "req-001");
         assert!(parsed.granted);
-        assert_eq!(parsed.value, Some("ghp_secret_token_value".into()));
+        assert_eq!(parsed.encrypted_value, Some("age-encrypted-ciphertext-base64".into()));
         assert!(parsed.error.is_none());
     }
 
@@ -58,13 +66,13 @@ mod tests {
         let resp = SecretResponseEvent {
             request_id: "req-002".into(),
             granted: false,
-            value: None,
+            encrypted_value: None,
             error: Some("Unauthorized scope".into()),
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: SecretResponseEvent = serde_json::from_str(&json).unwrap();
         assert!(!parsed.granted);
-        assert!(parsed.value.is_none());
+        assert!(parsed.encrypted_value.is_none());
         assert_eq!(parsed.error, Some("Unauthorized scope".into()));
     }
 

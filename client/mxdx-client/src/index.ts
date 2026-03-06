@@ -4,8 +4,12 @@ export {
   MxdxClient,
   type MatrixClient,
   type TerminalSessionHandle,
-  type TerminalSocket,
+  type TerminalSocket as TerminalSocketInterface,
 } from "./client.js";
+export {
+  TerminalSocket,
+  type TerminalMatrixClient,
+} from "./terminal.js";
 export {
   discoverLaunchers,
   getLauncherStatus,

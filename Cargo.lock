@@ -2441,6 +2441,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "mxdx-matrix",
+ "mxdx-test-helpers",
  "mxdx-types",
  "serde",
  "serde_json",

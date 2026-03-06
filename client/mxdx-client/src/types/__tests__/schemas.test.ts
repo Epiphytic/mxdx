@@ -207,12 +207,14 @@ describe("SecretRequestEvent", () => {
       scope: "github.token",
       ttl_seconds: 3600,
       reason: "CI deployment",
+      ephemeral_public_key: "age1testpublickey",
     };
     const result = SecretRequestEvent.parse(json);
     expect(result.request_id).toBe("req-001");
     expect(result.scope).toBe("github.token");
     expect(result.ttl_seconds).toBe(3600);
     expect(result.reason).toBe("CI deployment");
+    expect(result.ephemeral_public_key).toBe("age1testpublickey");
   });
 
   it("rejects missing fields", () => {
@@ -226,12 +228,12 @@ describe("SecretResponseEvent", () => {
     const json = {
       request_id: "req-001",
       granted: true,
-      value: "ghp_secret_token_value",
+      encrypted_value: "age-encrypted-ciphertext-base64",
       error: null,
     };
     const result = SecretResponseEvent.parse(json);
     expect(result.granted).toBe(true);
-    expect(result.value).toBe("ghp_secret_token_value");
+    expect(result.encrypted_value).toBe("age-encrypted-ciphertext-base64");
     expect(result.error).toBeNull();
   });
 
@@ -239,12 +241,12 @@ describe("SecretResponseEvent", () => {
     const json = {
       request_id: "req-002",
       granted: false,
-      value: null,
+      encrypted_value: null,
       error: "Unauthorized scope",
     };
     const result = SecretResponseEvent.parse(json);
     expect(result.granted).toBe(false);
-    expect(result.value).toBeNull();
+    expect(result.encrypted_value).toBeNull();
     expect(result.error).toBe("Unauthorized scope");
   });
 
