@@ -1,0 +1,19 @@
+{
+  "name": "@mxdx/client",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@matrix-org/matrix-sdk-crypto-wasm": "^17.1.0",
+    "zod": "^3"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "vitest": "^3"
+  }
+}

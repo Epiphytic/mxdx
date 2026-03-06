@@ -1,0 +1,10 @@
+{
+  "name": "@mxdx/workspace",
+  "private": true,
+  "workspaces": ["mxdx-client", "mxdx-web-ui"],
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "build": "npm run build --workspaces"
+  }
+}
