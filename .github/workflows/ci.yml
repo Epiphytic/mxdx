@@ -60,6 +60,22 @@ jobs:
         run: sudo apt-get install -y libsqlite3-dev libssl-dev
       - run: cargo test -p mxdx-types
 
+  integration:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev
+      - name: Install tuwunel
+        run: |
+          curl -fsSL -o /tmp/tuwunel.deb \
+            "https://github.com/matrix-construct/tuwunel/releases/download/v1.5.0/v1.5.0-release-all-x86_64-v1-linux-gnu-tuwunel.deb"
+          sudo dpkg -i /tmp/tuwunel.deb
+      - run: cargo test -p mxdx-test-helpers
+
   client-build:
     needs: preflight
     runs-on: ubuntu-latest
