@@ -118,6 +118,8 @@ export class TerminalSocket {
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private _reconnectDelay = 1000;
   private _connected = true;
+  private _gapTimer: ReturnType<typeof setTimeout> | null = null;
+  private _retransmitTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(client: TerminalMatrixClient, roomId: string) {
     this._client = client;
@@ -169,6 +171,11 @@ export class TerminalSocket {
   }
 
   private _flush(): void {
+    // Cancel gap/retransmit timers if the gap was filled
+    if (this._buffer.length > 0 && this._buffer[0].seq === this._expectedSeq) {
+      this._clearGapTimers();
+    }
+
     while (this._buffer.length > 0 && this._buffer[0].seq === this._expectedSeq) {
       const event = this._buffer.shift()!;
       this._expectedSeq++;
@@ -178,6 +185,54 @@ export class TerminalSocket {
           event.data.byteOffset + event.data.byteLength,
         ) });
       }
+    }
+
+    // After flushing, if there are still buffered events with a gap, start gap detection
+    if (this._buffer.length > 0 && this._buffer[0].seq > this._expectedSeq && !this._gapTimer && !this._retransmitTimer) {
+      this._startGapTimer();
+    }
+  }
+
+  private _startGapTimer(): void {
+    this._gapTimer = setTimeout(() => {
+      this._gapTimer = null;
+      if (this._closed || this._buffer.length === 0) return;
+
+      const firstBuffered = this._buffer[0].seq;
+      if (firstBuffered <= this._expectedSeq) {
+        this._flush();
+        return;
+      }
+
+      // Send retransmit request
+      const from_seq = this._expectedSeq;
+      const to_seq = firstBuffered - 1;
+      this._client.sendEvent(this._roomId, "org.mxdx.terminal.retransmit", { from_seq, to_seq }).catch(() => {});
+
+      // Start retransmit timeout — accept gap if not filled in 500ms
+      this._retransmitTimer = setTimeout(() => {
+        this._retransmitTimer = null;
+        if (this._closed || this._buffer.length === 0) return;
+        this._acceptGap();
+      }, 500);
+    }, 500);
+  }
+
+  private _acceptGap(): void {
+    if (this._buffer.length === 0) return;
+    // Skip ahead to the first buffered seq
+    this._expectedSeq = this._buffer[0].seq;
+    this._flush();
+  }
+
+  private _clearGapTimers(): void {
+    if (this._gapTimer) {
+      clearTimeout(this._gapTimer);
+      this._gapTimer = null;
+    }
+    if (this._retransmitTimer) {
+      clearTimeout(this._retransmitTimer);
+      this._retransmitTimer = null;
     }
   }
 
@@ -232,6 +287,8 @@ export class TerminalSocket {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
     }
+
+    this._clearGapTimers();
 
     if (this.onclose) {
       this.onclose({ code: 1000, reason: "Normal closure" });

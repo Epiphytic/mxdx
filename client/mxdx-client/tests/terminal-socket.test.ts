@@ -266,6 +266,101 @@ describe("TerminalSocket", () => {
     expect(closeCount).toBe(1);
   });
 
+  it("requests retransmit when sequence gap detected", () => {
+    const socket = new TerminalSocket(mockClient, roomId);
+    const received: string[] = [];
+    socket.onmessage = (event) => {
+      received.push(new TextDecoder().decode(new Uint8Array(event.data)));
+    };
+
+    mockClient._simulateEvent(roomId, "org.mxdx.terminal.data", {
+      data: base64Encode(new TextEncoder().encode("a")),
+      encoding: "base64",
+      seq: 0,
+    });
+
+    // Gap at seq=1
+    mockClient._simulateEvent(roomId, "org.mxdx.terminal.data", {
+      data: base64Encode(new TextEncoder().encode("c")),
+      encoding: "base64",
+      seq: 2,
+    });
+
+    // Advance past gap detection timeout (500ms)
+    vi.advanceTimersByTime(600);
+
+    const retransmitEvents = mockClient._sentEvents.filter(
+      (e) => e.eventType === "org.mxdx.terminal.retransmit",
+    );
+    expect(retransmitEvents).toHaveLength(1);
+    expect(retransmitEvents[0].content).toEqual({ from_seq: 1, to_seq: 1 });
+    socket.close();
+  });
+
+  it("fills gap when missing event arrives before timeout", () => {
+    const socket = new TerminalSocket(mockClient, roomId);
+    const received: string[] = [];
+    socket.onmessage = (event) => {
+      received.push(new TextDecoder().decode(new Uint8Array(event.data)));
+    };
+
+    mockClient._simulateEvent(roomId, "org.mxdx.terminal.data", {
+      data: base64Encode(new TextEncoder().encode("a")),
+      encoding: "base64",
+      seq: 0,
+    });
+
+    // Gap at seq=1
+    mockClient._simulateEvent(roomId, "org.mxdx.terminal.data", {
+      data: base64Encode(new TextEncoder().encode("c")),
+      encoding: "base64",
+      seq: 2,
+    });
+
+    // Fill the gap before timeout
+    mockClient._simulateEvent(roomId, "org.mxdx.terminal.data", {
+      data: base64Encode(new TextEncoder().encode("b")),
+      encoding: "base64",
+      seq: 1,
+    });
+
+    // All three delivered in order, no retransmit sent
+    expect(received).toEqual(["a", "b", "c"]);
+    expect(
+      mockClient._sentEvents.filter((e) => e.eventType === "org.mxdx.terminal.retransmit"),
+    ).toHaveLength(0);
+    socket.close();
+  });
+
+  it("accepts gap after retransmit timeout", () => {
+    const socket = new TerminalSocket(mockClient, roomId);
+    const received: string[] = [];
+    socket.onmessage = (event) => {
+      received.push(new TextDecoder().decode(new Uint8Array(event.data)));
+    };
+
+    mockClient._simulateEvent(roomId, "org.mxdx.terminal.data", {
+      data: base64Encode(new TextEncoder().encode("a")),
+      encoding: "base64",
+      seq: 0,
+    });
+
+    // Gap at seq=1
+    mockClient._simulateEvent(roomId, "org.mxdx.terminal.data", {
+      data: base64Encode(new TextEncoder().encode("c")),
+      encoding: "base64",
+      seq: 2,
+    });
+
+    // Wait for gap timer (500ms) + retransmit timeout (500ms)
+    vi.advanceTimersByTime(1100);
+
+    // seq=2 should be delivered even though seq=1 never came
+    expect(received).toContain("a");
+    expect(received).toContain("c");
+    socket.close();
+  });
+
   it("invalid incoming events are silently skipped", () => {
     const socket = new TerminalSocket(mockClient, roomId);
     const received: unknown[] = [];
