@@ -108,11 +108,44 @@
 
 ### mxdx-policy
 
-_No public symbols._
+| Symbol | Kind | File |
+|:---|:---|:---|
+| `PolicyConfig` | struct | `crates/mxdx-policy/src/config.rs` |
+| `PolicyConfig::appservice_url` | method | `crates/mxdx-policy/src/config.rs` |
+| `PolicyConfig::user_namespace_regex` | method | `crates/mxdx-policy/src/config.rs` |
+| `PolicyEngine` | struct | `crates/mxdx-policy/src/policy.rs` |
+| `PolicyEngine::new` | method | `crates/mxdx-policy/src/policy.rs` |
+| `PolicyEngine::with_capacity_and_ttl` | method | `crates/mxdx-policy/src/policy.rs` |
+| `PolicyEngine::authorize_user` | method | `crates/mxdx-policy/src/policy.rs` |
+| `PolicyEngine::revoke_user` | method | `crates/mxdx-policy/src/policy.rs` |
+| `PolicyEngine::check_replay` | method | `crates/mxdx-policy/src/policy.rs` |
+| `PolicyEngine::mark_seen` | method | `crates/mxdx-policy/src/policy.rs` |
+| `PolicyEngine::is_authorized` | method | `crates/mxdx-policy/src/policy.rs` |
+| `PolicyEngine::evaluate` | method | `crates/mxdx-policy/src/policy.rs` |
+| `PolicyRejection` | enum | `crates/mxdx-policy/src/policy.rs` |
+| `AppserviceRegistration` | struct | `crates/mxdx-policy/src/appservice.rs` |
+| `Namespaces` | struct | `crates/mxdx-policy/src/appservice.rs` |
+| `NamespaceEntry` | struct | `crates/mxdx-policy/src/appservice.rs` |
+| `AppserviceRegistration::from_config` | method | `crates/mxdx-policy/src/appservice.rs` |
+| `AppserviceRegistration::to_yaml` | method | `crates/mxdx-policy/src/appservice.rs` |
+| `register_appservice` | fn | `crates/mxdx-policy/src/appservice.rs` |
 
 ### mxdx-secrets
 
-_No public symbols._
+| Symbol | Kind | File |
+|:---|:---|:---|
+| `SecretCoordinator` | struct | `crates/mxdx-secrets/src/coordinator.rs` |
+| `SecretCoordinator::new` | method | `crates/mxdx-secrets/src/coordinator.rs` |
+| `SecretCoordinator::handle_secret_request` | method | `crates/mxdx-secrets/src/coordinator.rs` |
+| `decrypt_with_identity` | fn | `crates/mxdx-secrets/src/coordinator.rs` |
+| `SecretStore` | struct | `crates/mxdx-secrets/src/store.rs` |
+| `SecretStore::new` | method | `crates/mxdx-secrets/src/store.rs` |
+| `SecretStore::new_with_test_key` | method | `crates/mxdx-secrets/src/store.rs` |
+| `SecretStore::add` | method | `crates/mxdx-secrets/src/store.rs` |
+| `SecretStore::get` | method | `crates/mxdx-secrets/src/store.rs` |
+| `SecretStore::serialize` | method | `crates/mxdx-secrets/src/store.rs` |
+| `SecretStore::deserialize` | method | `crates/mxdx-secrets/src/store.rs` |
+| `SecretStore::key` | method | `crates/mxdx-secrets/src/store.rs` |
 
 ### mxdx-types
 
