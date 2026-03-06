@@ -49,6 +49,17 @@ jobs:
       - run: cargo xtask manifest --check
         name: Verify MANIFEST.md is up to date
 
+  types-test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev
+      - run: cargo test -p mxdx-types
+
   client-build:
     needs: preflight
     runs-on: ubuntu-latest
@@ -58,3 +69,13 @@ jobs:
         with:
           node-version: "22"
       - run: cd client && npm ci && npm run build
+
+  client-test:
+    needs: client-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: cd client && npm ci && npm test
