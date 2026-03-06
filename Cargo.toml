@@ -1,0 +1,31 @@
+[workspace]
+members = [
+    "crates/mxdx-types",
+    "crates/mxdx-matrix",
+    "crates/mxdx-policy",
+    "crates/mxdx-secrets",
+    "crates/mxdx-launcher",
+    "crates/mxdx-web",
+    "xtask",
+]
+resolver = "2"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json"] }
+anyhow = "1"
+uuid = { version = "1", features = ["v4"] }
+matrix-sdk = { version = "0.16", features = ["e2e-encryption", "sqlite"] }
+ruma = { version = "0.14", features = ["client-api-c", "events", "appservice-api-c"] }
+toml = "0.8"
+axum = "0.7"
+age = "0.11"
+sysinfo = "0.33"
+reqwest = { version = "0.12", features = ["json"] }
+tempfile = "3"
+base64 = "0.22"
+flate2 = "1"
+lru = "0.12"

@@ -1,0 +1,14 @@
+[package]
+name = "mxdx-secrets"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mxdx-types = { path = "../mxdx-types" }
+mxdx-matrix = { path = "../mxdx-matrix" }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+age = { workspace = true }

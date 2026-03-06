@@ -1,0 +1,18 @@
+[package]
+name = "mxdx-launcher"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mxdx-types = { path = "../mxdx-types" }
+mxdx-matrix = { path = "../mxdx-matrix" }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+sysinfo = { workspace = true }
+uuid = { workspace = true }
+base64 = { workspace = true }
+flate2 = { workspace = true }

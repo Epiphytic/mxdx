@@ -1,0 +1,14 @@
+[package]
+name = "mxdx-matrix"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mxdx-types = { path = "../mxdx-types" }
+matrix-sdk = { workspace = true }
+ruma = { workspace = true }
+anyhow = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
