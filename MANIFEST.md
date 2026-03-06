@@ -173,7 +173,17 @@
 
 ### mxdx-web
 
-_No public symbols._
+| Symbol | Kind | File |
+|:---|:---|:---|
+| `build_router` | fn | `crates/mxdx-web/src/routes/mod.rs` |
+| `routes` | fn | `crates/mxdx-web/src/routes/dashboard.rs` |
+| `routes` | fn | `crates/mxdx-web/src/routes/sse.rs` |
+| `routes` | fn | `crates/mxdx-web/src/routes/static_files.rs` |
+| `LauncherInfo` | struct | `crates/mxdx-web/src/state.rs` |
+| `LauncherStatus` | enum | `crates/mxdx-web/src/state.rs` |
+| `AppState` | struct | `crates/mxdx-web/src/state.rs` |
+| `AppState::new` | method | `crates/mxdx-web/src/state.rs` |
+| `AppState::update_launcher` | method | `crates/mxdx-web/src/state.rs` |
 <!-- END GENERATED SYMBOL TABLES -->
 
 

@@ -5,19 +5,13 @@ pub mod static_files;
 use axum::Router;
 use http::header::HeaderName;
 use http::HeaderValue;
-use http::Method;
-use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::set_header::SetResponseHeaderLayer;
 
 use crate::state::AppState;
 
 pub fn build_router(state: AppState) -> Router {
-    let cors = CorsLayer::new()
-        .allow_methods([Method::GET])
-        .allow_origin(AllowOrigin::exact(
-            "null".parse().expect("valid header value"),
-        ));
-
+    // No CORS layer — browser default same-origin policy applies.
+    // Adding Access-Control-Allow-Origin would weaken security.
     let csp = SetResponseHeaderLayer::overriding(
         HeaderName::from_static("content-security-policy"),
         HeaderValue::from_static(
@@ -30,7 +24,6 @@ pub fn build_router(state: AppState) -> Router {
         .merge(sse::routes())
         .merge(static_files::routes())
         .layer(csp)
-        .layer(cors)
         .with_state(state)
 }
 
