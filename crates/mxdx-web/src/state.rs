@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LauncherInfo {
@@ -33,13 +33,27 @@ impl std::fmt::Display for LauncherStatus {
 #[derive(Clone)]
 pub struct AppState {
     pub launchers: Arc<RwLock<Vec<LauncherInfo>>>,
+    pub launcher_tx: broadcast::Sender<LauncherInfo>,
 }
 
 impl AppState {
     pub fn new() -> Self {
+        let (launcher_tx, _) = broadcast::channel(64);
         Self {
             launchers: Arc::new(RwLock::new(Vec::new())),
+            launcher_tx,
         }
+    }
+
+    pub async fn update_launcher(&self, info: LauncherInfo) {
+        let mut launchers = self.launchers.write().await;
+        if let Some(existing) = launchers.iter_mut().find(|l| l.id == info.id) {
+            *existing = info.clone();
+        } else {
+            launchers.push(info.clone());
+        }
+        // Ignore send error (no active receivers)
+        let _ = self.launcher_tx.send(info);
     }
 }
 
