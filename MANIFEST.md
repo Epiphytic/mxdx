@@ -48,6 +48,11 @@ _No public symbols._
 | `MatrixClient::sync_once` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::sync_and_collect_events` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::inner` | method | `crates/mxdx-matrix/src/client.rs` |
+| `LauncherTopology` | struct | `crates/mxdx-matrix/src/rooms.rs` |
+| `MatrixClient::create_launcher_space` | method | `crates/mxdx-matrix/src/rooms.rs` |
+| `MatrixClient::create_terminal_session_dm` | method | `crates/mxdx-matrix/src/rooms.rs` |
+| `MatrixClient::tombstone_room` | method | `crates/mxdx-matrix/src/rooms.rs` |
+| `MatrixClient::get_room_state` | method | `crates/mxdx-matrix/src/rooms.rs` |
 | `MatrixClientError` | enum | `crates/mxdx-matrix/src/error.rs` |
 | `Result` | type | `crates/mxdx-matrix/src/error.rs` |
 
