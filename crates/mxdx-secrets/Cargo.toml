@@ -3,6 +3,14 @@ name = "mxdx-secrets"
 version = "0.1.0"
 edition = "2021"
 
+[[bin]]
+name = "mxdx-secrets"
+path = "src/main.rs"
+
+[lib]
+name = "mxdx_secrets"
+path = "src/lib.rs"
+
 [dependencies]
 mxdx-types = { path = "../mxdx-types" }
 mxdx-matrix = { path = "../mxdx-matrix" }

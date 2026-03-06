@@ -2387,10 +2387,12 @@ dependencies = [
  "base64 0.22.1",
  "flate2",
  "mxdx-matrix",
+ "mxdx-test-helpers",
  "mxdx-types",
  "serde",
  "serde_json",
  "sysinfo",
+ "tempfile",
  "tokio",
  "toml 0.8.23",
  "tracing",
@@ -2420,12 +2422,15 @@ dependencies = [
  "anyhow",
  "lru",
  "mxdx-matrix",
+ "mxdx-test-helpers",
  "mxdx-types",
+ "reqwest",
  "ruma",
  "serde",
  "serde_json",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
