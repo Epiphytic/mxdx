@@ -50,7 +50,7 @@ impl MatrixClient {
             Some(matrix_sdk::ruma::serde::Raw::new(&creation_content).expect("serialize creation_content"));
         space_request.initial_state = vec![space_topic.to_raw_any()];
 
-        let space_response = self.inner().create_room(space_request).await?;
+        let space_response = self.create_room_with_timeout(space_request).await?;
         let space_id = space_response.room_id().to_owned();
 
         // Create child rooms (with optional delay for rate-limited servers)
@@ -168,7 +168,7 @@ impl MatrixClient {
             topic_event.to_raw_any(),
         ];
 
-        let response = self.inner().create_room(request).await?;
+        let response = self.create_room_with_timeout(request).await?;
         Ok(response.room_id().to_owned())
     }
 
@@ -238,7 +238,7 @@ impl MatrixClient {
         request.invite = invite.to_vec();
         request.initial_state = vec![encryption_event.to_raw_any(), topic_event.to_raw_any()];
 
-        let response = self.inner().create_room(request).await?;
+        let response = self.create_room_with_timeout(request).await?;
         Ok(response.room_id().to_owned())
     }
 
@@ -251,7 +251,7 @@ impl MatrixClient {
         request.name = Some(name.to_string());
         request.initial_state = vec![topic_event.to_raw_any()];
 
-        let response = self.inner().create_room(request).await?;
+        let response = self.create_room_with_timeout(request).await?;
         Ok(response.room_id().to_owned())
     }
 }

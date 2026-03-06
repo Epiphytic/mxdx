@@ -163,7 +163,7 @@ impl MatrixClient {
         request.invite = invite.to_vec();
         request.initial_state = vec![encryption_event.to_raw_any()];
 
-        let response = self.client.create_room(request).await?;
+        let response = self.create_room_with_timeout(request).await?;
         Ok(response.room_id().to_owned())
     }
 
@@ -177,7 +177,7 @@ impl MatrixClient {
         request.is_direct = true;
         request.initial_state = vec![encryption_event.to_raw_any()];
 
-        let response = self.client.create_room(request).await?;
+        let response = self.create_room_with_timeout(request).await?;
         Ok(response.room_id().to_owned())
     }
 
@@ -339,5 +339,25 @@ impl MatrixClient {
     /// Get access to the inner matrix-sdk Client (escape hatch for advanced use).
     pub fn inner(&self) -> &Client {
         &self.client
+    }
+
+    /// Create a room with a 30-second timeout.
+    /// matrix-sdk silently retries on 429 rate-limit responses, which can hang
+    /// indefinitely. This wrapper fails fast with a clear error.
+    pub(crate) async fn create_room_with_timeout(
+        &self,
+        request: CreateRoomRequest,
+    ) -> Result<matrix_sdk::room::Room> {
+        match tokio::time::timeout(
+            Duration::from_secs(30),
+            self.client.create_room(request),
+        )
+        .await
+        {
+            Ok(result) => Ok(result?),
+            Err(_) => Err(MatrixClientError::RoomCreationTimeout(
+                "Room creation timed out after 30s — server may be rate-limiting".into(),
+            )),
+        }
     }
 }
