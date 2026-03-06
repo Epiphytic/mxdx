@@ -56,6 +56,12 @@ impl MatrixClient {
             .initial_device_display_name("mxdx")
             .await?;
 
+        // Initial sync to upload device keys — required before creating encrypted rooms.
+        // Without this, room creation hangs on rate-limited servers (e.g., matrix.org).
+        client
+            .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
+            .await?;
+
         Ok(MatrixClient {
             client,
             _store_dir: store_dir,
@@ -117,6 +123,11 @@ impl MatrixClient {
             .matrix_auth()
             .login_username(username, password)
             .initial_device_display_name("mxdx-test")
+            .await?;
+
+        // Initial sync to upload device keys.
+        client
+            .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
             .await?;
 
         Ok(MatrixClient {
