@@ -60,6 +60,17 @@ jobs:
         run: sudo apt-get install -y libsqlite3-dev libssl-dev
       - run: cargo test -p mxdx-types
 
+  launcher-test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev
+      - run: cargo test -p mxdx-launcher --lib
+
   integration:
     needs: build
     runs-on: ubuntu-latest
@@ -76,6 +87,7 @@ jobs:
           sudo dpkg -i /tmp/tuwunel.deb
       - run: cargo test -p mxdx-test-helpers
       - run: cargo test -p mxdx-matrix
+      - run: cargo test -p mxdx-launcher --test e2e_command
 
   client-build:
     needs: preflight

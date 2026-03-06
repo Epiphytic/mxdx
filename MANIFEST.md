@@ -29,7 +29,22 @@
 
 ### mxdx-launcher
 
-_No public symbols._
+| Symbol | Kind | File |
+|:---|:---|:---|
+| `LauncherConfig` | struct | `crates/mxdx-launcher/src/config.rs` |
+| `GlobalConfig` | struct | `crates/mxdx-launcher/src/config.rs` |
+| `HomeserverConfig` | struct | `crates/mxdx-launcher/src/config.rs` |
+| `CapabilitiesConfig` | struct | `crates/mxdx-launcher/src/config.rs` |
+| `CapabilityMode` | enum | `crates/mxdx-launcher/src/config.rs` |
+| `TelemetryConfig` | struct | `crates/mxdx-launcher/src/config.rs` |
+| `TelemetryDetail` | enum | `crates/mxdx-launcher/src/config.rs` |
+| `validate_config_permissions` | fn | `crates/mxdx-launcher/src/config.rs` |
+| `collect_telemetry` | fn | `crates/mxdx-launcher/src/telemetry/system.rs` |
+| `ExecutorError` | struct | `crates/mxdx-launcher/src/executor.rs` |
+| `ValidatedCommand` | struct | `crates/mxdx-launcher/src/executor.rs` |
+| `CommandResult` | struct | `crates/mxdx-launcher/src/executor.rs` |
+| `execute_command` | fn | `crates/mxdx-launcher/src/executor.rs` |
+| `validate_command` | fn | `crates/mxdx-launcher/src/executor.rs` |
 
 ### mxdx-matrix
 
