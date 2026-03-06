@@ -1,1 +1,1 @@
-// Event schema types
+pub mod events;
