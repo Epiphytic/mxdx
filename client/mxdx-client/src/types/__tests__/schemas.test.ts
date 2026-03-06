@@ -9,6 +9,12 @@ import {
   HostTelemetryEvent,
   SecretRequestEvent,
   SecretResponseEvent,
+  TerminalDataEvent,
+  TerminalResizeEvent,
+  TerminalSessionRequestEvent,
+  TerminalSessionResponseEvent,
+  TerminalRetransmitEvent,
+  LauncherIdentityEvent,
 } from "../index.js";
 
 describe("CommandEvent", () => {
@@ -245,5 +251,133 @@ describe("SecretResponseEvent", () => {
   it("rejects missing fields", () => {
     const json = { request_id: "req-001" };
     expect(() => SecretResponseEvent.parse(json)).toThrow();
+  });
+});
+
+describe("TerminalDataEvent", () => {
+  it("parses a valid terminal data event", () => {
+    const json = { data: "dGVzdA==", encoding: "raw+base64", seq: 42 };
+    const result = TerminalDataEvent.parse(json);
+    expect(result.data).toBe("dGVzdA==");
+    expect(result.encoding).toBe("raw+base64");
+    expect(result.seq).toBe(42);
+  });
+
+  it("rejects missing fields", () => {
+    const json = { data: "dGVzdA==" };
+    expect(() => TerminalDataEvent.parse(json)).toThrow();
+  });
+});
+
+describe("TerminalResizeEvent", () => {
+  it("parses a valid resize event", () => {
+    const json = { cols: 120, rows: 40 };
+    const result = TerminalResizeEvent.parse(json);
+    expect(result.cols).toBe(120);
+    expect(result.rows).toBe(40);
+  });
+
+  it("rejects missing fields", () => {
+    const json = { cols: 80 };
+    expect(() => TerminalResizeEvent.parse(json)).toThrow();
+  });
+});
+
+describe("TerminalSessionRequestEvent", () => {
+  it("parses a valid session request", () => {
+    const json = {
+      uuid: "sess-001",
+      command: "/bin/bash",
+      env: { TERM: "xterm-256color" },
+      cols: 80,
+      rows: 24,
+    };
+    const result = TerminalSessionRequestEvent.parse(json);
+    expect(result.uuid).toBe("sess-001");
+    expect(result.command).toBe("/bin/bash");
+    expect(result.env).toEqual({ TERM: "xterm-256color" });
+    expect(result.cols).toBe(80);
+    expect(result.rows).toBe(24);
+  });
+
+  it("rejects missing fields", () => {
+    const json = { uuid: "x" };
+    expect(() => TerminalSessionRequestEvent.parse(json)).toThrow();
+  });
+});
+
+describe("TerminalSessionResponseEvent", () => {
+  it("parses a response with room_id", () => {
+    const json = {
+      uuid: "sess-001",
+      status: "created",
+      room_id: "!abc:example.com",
+    };
+    const result = TerminalSessionResponseEvent.parse(json);
+    expect(result.uuid).toBe("sess-001");
+    expect(result.status).toBe("created");
+    expect(result.room_id).toBe("!abc:example.com");
+  });
+
+  it("parses a response without room_id", () => {
+    const json = { uuid: "sess-002", status: "error", room_id: null };
+    const result = TerminalSessionResponseEvent.parse(json);
+    expect(result.room_id).toBeNull();
+  });
+
+  it("rejects missing fields", () => {
+    const json = { uuid: "x" };
+    expect(() => TerminalSessionResponseEvent.parse(json)).toThrow();
+  });
+});
+
+describe("TerminalRetransmitEvent", () => {
+  it("parses a valid retransmit event", () => {
+    const json = { from_seq: 100, to_seq: 200 };
+    const result = TerminalRetransmitEvent.parse(json);
+    expect(result.from_seq).toBe(100);
+    expect(result.to_seq).toBe(200);
+  });
+
+  it("rejects missing fields", () => {
+    const json = { from_seq: 0 };
+    expect(() => TerminalRetransmitEvent.parse(json)).toThrow();
+  });
+});
+
+describe("LauncherIdentityEvent", () => {
+  it("parses a valid launcher identity", () => {
+    const json = {
+      launcher_id: "belthanior",
+      accounts: [
+        "@launcher-belthanior:hs1.mxdx.dev",
+        "@launcher-belthanior:hs2.mxdx.dev",
+      ],
+      primary: "@launcher-belthanior:hs1.mxdx.dev",
+      capabilities: ["exec", "terminal", "telemetry"],
+      version: "0.1.0",
+    };
+    const result = LauncherIdentityEvent.parse(json);
+    expect(result.launcher_id).toBe("belthanior");
+    expect(result.accounts).toHaveLength(2);
+    expect(result.primary).toBe("@launcher-belthanior:hs1.mxdx.dev");
+    expect(result.capabilities).toEqual(["exec", "terminal", "telemetry"]);
+    expect(result.version).toBe("0.1.0");
+  });
+
+  it("rejects missing fields", () => {
+    const json = { launcher_id: "x" };
+    expect(() => LauncherIdentityEvent.parse(json)).toThrow();
+  });
+
+  it("rejects invalid types", () => {
+    const json = {
+      launcher_id: 123,
+      accounts: "not-an-array",
+      primary: true,
+      capabilities: null,
+      version: 1,
+    };
+    expect(() => LauncherIdentityEvent.parse(json)).toThrow();
   });
 });

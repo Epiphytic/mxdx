@@ -25,3 +25,15 @@ export {
   SecretRequestEvent,
   SecretResponseEvent,
 } from "./secret.js";
+
+export {
+  TerminalDataEvent,
+  TerminalResizeEvent,
+  TerminalSessionRequestEvent,
+  TerminalSessionResponseEvent,
+  TerminalRetransmitEvent,
+} from "./terminal.js";
+
+export {
+  LauncherIdentityEvent,
+} from "./launcher.js";
