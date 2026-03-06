@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check required tools
+        run: |
+          cargo --version
+          rustc --version
+          node --version
+          npm --version
+
+  build:
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev
+      - run: cargo build --workspace
+
+  manifest:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev
+      - run: cargo xtask manifest --check
+        name: Verify MANIFEST.md is up to date
+
+  client-build:
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: cd client && npm ci && npm run build
