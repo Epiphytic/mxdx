@@ -33,7 +33,23 @@ _No public symbols._
 
 ### mxdx-matrix
 
-_No public symbols._
+| Symbol | Kind | File |
+|:---|:---|:---|
+| `MatrixClient` | struct | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::register_and_connect` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::is_logged_in` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::crypto_enabled` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::user_id` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::create_encrypted_room` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::create_dm` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::join_room` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::send_event` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::send_state_event` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::sync_once` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::sync_and_collect_events` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::inner` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClientError` | enum | `crates/mxdx-matrix/src/error.rs` |
+| `Result` | type | `crates/mxdx-matrix/src/error.rs` |
 
 ### mxdx-policy
 

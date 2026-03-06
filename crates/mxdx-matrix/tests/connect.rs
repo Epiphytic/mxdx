@@ -1,4 +1,4 @@
-use mxdx_test_helpers::TuwunelInstance;
+use mxdx_test_helpers::tuwunel::TuwunelInstance;
 
 #[tokio::test]
 async fn client_connects_and_initializes_crypto() {
@@ -12,7 +12,7 @@ async fn client_connects_and_initializes_crypto() {
     .unwrap();
 
     assert!(client.is_logged_in());
-    assert!(client.crypto_enabled());
+    assert!(client.crypto_enabled().await);
     hs.stop().await;
 }
 
@@ -40,7 +40,10 @@ async fn two_clients_exchange_encrypted_event() {
         .unwrap();
     bob.join_room(&room_id).await.unwrap();
 
-    // Exchange keys via initial syncs
+    // Exchange device keys via multiple sync rounds.
+    // E2EE requires both clients to discover each other's devices and share room keys.
+    alice.sync_once().await.unwrap();
+    bob.sync_once().await.unwrap();
     alice.sync_once().await.unwrap();
     bob.sync_once().await.unwrap();
 

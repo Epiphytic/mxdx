@@ -2403,7 +2403,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "matrix-sdk",
+ "mxdx-test-helpers",
  "mxdx-types",
+ "reqwest",
  "ruma",
  "serde_json",
  "tempfile",
