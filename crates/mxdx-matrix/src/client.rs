@@ -24,9 +24,38 @@ pub struct MatrixClient {
 }
 
 impl MatrixClient {
+    /// Login to an existing account on the homeserver with E2EE enabled.
+    /// Use this for public Matrix servers where accounts are pre-registered.
+    pub async fn login_and_connect(
+        homeserver_url: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<Self> {
+        let store_dir =
+            tempfile::TempDir::new().map_err(|e| MatrixClientError::Other(e.into()))?;
+
+        let client = Client::builder()
+            .homeserver_url(homeserver_url)
+            .sqlite_store(store_dir.path(), None)
+            .build()
+            .await?;
+
+        client
+            .matrix_auth()
+            .login_username(username, password)
+            .initial_device_display_name("mxdx")
+            .await?;
+
+        Ok(MatrixClient {
+            client,
+            _store_dir: store_dir,
+        })
+    }
+
     /// Register a new user on the homeserver and connect with E2EE enabled.
     /// Uses the Matrix register API with registration token auth, then
     /// builds a matrix-sdk Client with sqlite store for crypto state.
+    /// For self-hosted servers with token registration enabled.
     pub async fn register_and_connect(
         homeserver_url: &str,
         username: &str,

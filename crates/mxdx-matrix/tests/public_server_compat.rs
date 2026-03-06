@@ -1,443 +1,321 @@
 //! Public Matrix server compatibility tests.
 //!
-//! These tests verify that mxdx works against public Matrix homeservers
-//! (e.g., matrix.org) rather than just local Tuwunel instances.
+//! These tests verify that mxdx's MatrixClient facade works against public
+//! Matrix homeservers (e.g., matrix.org) rather than just local Tuwunel instances.
 //!
 //! All tests are `#[ignore]` by default since they require real credentials.
 //!
-//! Required environment variables:
-//!   MXDX_PUBLIC_HS_URL    — homeserver URL (e.g., https://matrix-client.matrix.org)
-//!   MXDX_PUBLIC_USERNAME  — existing account username
-//!   MXDX_PUBLIC_PASSWORD  — account password
+//! ## Setup
+//!
+//! 1. Register two accounts on a public Matrix server (e.g., matrix.org)
+//! 2. Create `test-credentials.toml` in the repo root (gitignored):
+//!
+//!    ```toml
+//!    [server]
+//!    url = "https://matrix-client.matrix.org"
+//!
+//!    [account1]
+//!    username = "mxdx-test-user1"
+//!    password = "your-password-here"
+//!
+//!    [account2]
+//!    username = "mxdx-test-user2"
+//!    password = "your-password-here"
+//!    ```
+//!
+//! 3. Or set environment variables:
+//!    - MXDX_PUBLIC_HS_URL
+//!    - MXDX_PUBLIC_USERNAME / MXDX_PUBLIC_PASSWORD
+//!    - MXDX_PUBLIC_USERNAME2 / MXDX_PUBLIC_PASSWORD2
 //!
 //! Run with: cargo test -p mxdx-matrix --test public_server_compat -- --ignored
 
 use std::time::Duration;
+use mxdx_matrix::MatrixClient;
 
-use matrix_sdk::{
-    config::SyncSettings,
-    room::MessagesOptions,
-    ruma::{
-        api::client::room::create_room::v3::Request as CreateRoomRequest,
-        events::{
-            room::encryption::RoomEncryptionEventContent, EmptyStateKey, InitialStateEvent,
-        },
-    },
-    Client,
-};
-use serde_json::Value;
-
-/// Read credentials from environment variables. Panics with a helpful
-/// message if any are missing.
-fn credentials() -> (String, String, String) {
-    let hs_url = std::env::var("MXDX_PUBLIC_HS_URL")
-        .expect("Set MXDX_PUBLIC_HS_URL (e.g., https://matrix-client.matrix.org)");
-    let username = std::env::var("MXDX_PUBLIC_USERNAME")
-        .expect("Set MXDX_PUBLIC_USERNAME to an existing account username");
-    let password = std::env::var("MXDX_PUBLIC_PASSWORD")
-        .expect("Set MXDX_PUBLIC_PASSWORD to the account password");
-    (hs_url, username, password)
+/// Credentials for a single account.
+struct Credentials {
+    hs_url: String,
+    username: String,
+    password: String,
 }
 
-/// Build a matrix-sdk Client with sqlite store, login, and return it.
-async fn connect() -> Client {
-    let (hs_url, username, password) = credentials();
-    let store_dir = tempfile::TempDir::new().unwrap();
+/// Load credentials from test-credentials.toml or environment variables.
+fn load_credentials() -> (Credentials, Option<Credentials>) {
+    // Try TOML file first
+    let toml_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("test-credentials.toml");
 
-    let client = Client::builder()
-        .homeserver_url(&hs_url)
-        .sqlite_store(store_dir.path(), None)
-        .build()
-        .await
-        .expect("Failed to build client");
+    if toml_path.exists() {
+        let content = std::fs::read_to_string(&toml_path)
+            .expect("Failed to read test-credentials.toml");
+        let parsed: toml::Value = content.parse()
+            .expect("Failed to parse test-credentials.toml");
 
-    client
-        .matrix_auth()
-        .login_username(&username, &password)
-        .initial_device_display_name("mxdx-compat-test")
-        .await
-        .expect("Login failed — check credentials");
+        let hs_url = parsed["server"]["url"].as_str()
+            .expect("server.url missing in test-credentials.toml")
+            .to_string();
 
-    // Leak the TempDir so it survives for the duration of the test.
-    // Tests are short-lived, so this is acceptable.
-    std::mem::forget(store_dir);
+        let account1 = Credentials {
+            hs_url: hs_url.clone(),
+            username: parsed["account1"]["username"].as_str()
+                .expect("account1.username missing").to_string(),
+            password: parsed["account1"]["password"].as_str()
+                .expect("account1.password missing").to_string(),
+        };
 
-    client
-}
-
-/// Delete a room by leaving it (best-effort cleanup).
-async fn cleanup_room(client: &Client, room_id: &matrix_sdk::ruma::RoomId) {
-    if let Some(room) = client.get_room(room_id) {
-        let _ = room.leave().await;
-        // On matrix.org, rooms are garbage-collected after all members leave.
-        // We can also try to forget the room.
-        let _ = client.get_room(room_id).map(|r| {
-            tokio::spawn(async move {
-                let _ = r.forget().await;
-            })
+        let account2 = parsed.get("account2").map(|a| Credentials {
+            hs_url: hs_url.clone(),
+            username: a["username"].as_str()
+                .expect("account2.username missing").to_string(),
+            password: a["password"].as_str()
+                .expect("account2.password missing").to_string(),
         });
+
+        return (account1, account2);
     }
+
+    // Fall back to environment variables
+    let hs_url = std::env::var("MXDX_PUBLIC_HS_URL")
+        .expect("Set MXDX_PUBLIC_HS_URL or create test-credentials.toml");
+    let account1 = Credentials {
+        hs_url: hs_url.clone(),
+        username: std::env::var("MXDX_PUBLIC_USERNAME")
+            .expect("Set MXDX_PUBLIC_USERNAME"),
+        password: std::env::var("MXDX_PUBLIC_PASSWORD")
+            .expect("Set MXDX_PUBLIC_PASSWORD"),
+    };
+    let account2 = std::env::var("MXDX_PUBLIC_USERNAME2").ok().map(|u| Credentials {
+        hs_url,
+        username: u,
+        password: std::env::var("MXDX_PUBLIC_PASSWORD2")
+            .expect("Set MXDX_PUBLIC_PASSWORD2 if MXDX_PUBLIC_USERNAME2 is set"),
+    });
+
+    (account1, account2)
 }
 
-// ─── Tests ───────────────────────────────────────────────────────────────────
-
-#[tokio::test]
-#[ignore]
-async fn login_with_password() {
-    let (hs_url, username, password) = credentials();
-    let store_dir = tempfile::TempDir::new().unwrap();
-
-    let client = Client::builder()
-        .homeserver_url(&hs_url)
-        .sqlite_store(store_dir.path(), None)
-        .build()
+/// Connect account1 via MatrixClient::login_and_connect.
+async fn connect_account1() -> MatrixClient {
+    let (creds, _) = load_credentials();
+    MatrixClient::login_and_connect(&creds.hs_url, &creds.username, &creds.password)
         .await
-        .expect("Failed to build client");
+        .expect("Account 1 login failed — check credentials")
+}
 
-    let response = client
-        .matrix_auth()
-        .login_username(&username, &password)
-        .initial_device_display_name("mxdx-compat-test-login")
-        .await;
+/// Connect both accounts.
+async fn connect_both() -> (MatrixClient, MatrixClient) {
+    let (creds1, creds2) = load_credentials();
+    let creds2 = creds2.expect("Account 2 credentials required for this test");
 
-    assert!(response.is_ok(), "Login should succeed: {:?}", response.err());
-    assert!(client.user_id().is_some(), "user_id should be set after login");
+    let client1 = MatrixClient::login_and_connect(&creds1.hs_url, &creds1.username, &creds1.password)
+        .await
+        .expect("Account 1 login failed");
+    let client2 = MatrixClient::login_and_connect(&creds2.hs_url, &creds2.username, &creds2.password)
+        .await
+        .expect("Account 2 login failed");
+
+    (client1, client2)
+}
+
+// ─── Single-account tests ────────────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires test-credentials.toml or env vars"]
+async fn login_and_connect_succeeds() {
+    let client = connect_account1().await;
+    assert!(client.is_logged_in());
+    assert!(client.crypto_enabled().await);
 }
 
 #[tokio::test]
-#[ignore]
-async fn e2ee_crypto_is_enabled() {
-    let client = connect().await;
-    let key = client.encryption().ed25519_key().await;
-    assert!(key.is_some(), "E2EE ed25519 key should be available after login with sqlite store");
-}
-
-#[tokio::test]
-#[ignore]
+#[ignore = "requires test-credentials.toml or env vars"]
 async fn create_encrypted_room() {
-    let client = connect().await;
+    let client = connect_account1().await;
 
-    let encryption_event = InitialStateEvent::new(
-        EmptyStateKey,
-        RoomEncryptionEventContent::with_recommended_defaults(),
-    );
-
-    let mut request = CreateRoomRequest::new();
-    request.initial_state = vec![encryption_event.to_raw_any()];
-
-    let response = client.create_room(request).await;
-    assert!(response.is_ok(), "Room creation should succeed: {:?}", response.err());
-
-    let room_id = response.unwrap().room_id().to_owned();
+    let room_id = client.create_encrypted_room(&[]).await
+        .expect("Should create encrypted room on public server");
     assert!(!room_id.as_str().is_empty());
 
-    cleanup_room(&client, &room_id).await;
+    // Leave room to clean up
+    let _ = client.inner().get_room(&room_id).map(|r| {
+        tokio::spawn(async move { let _ = r.leave().await; })
+    });
 }
 
 #[tokio::test]
-#[ignore]
+#[ignore = "requires test-credentials.toml or env vars"]
 async fn send_custom_event_in_encrypted_room() {
-    let client = connect().await;
+    let client = connect_account1().await;
 
-    // Create encrypted room
-    let encryption_event = InitialStateEvent::new(
-        EmptyStateKey,
-        RoomEncryptionEventContent::with_recommended_defaults(),
-    );
-    let mut request = CreateRoomRequest::new();
-    request.initial_state = vec![encryption_event.to_raw_any()];
-    let room_id = client.create_room(request).await.unwrap().room_id().to_owned();
+    let room_id = client.create_encrypted_room(&[]).await.unwrap();
 
-    // Initial sync so we know about the room
-    client
-        .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
-        .await
-        .expect("Initial sync should succeed");
-
-    let room = client.get_room(&room_id).expect("Room should be in client state");
+    // Sync so we know about the room
+    client.sync_once().await.unwrap();
 
     // Send a custom org.mxdx.command event
-    let content = serde_json::json!({
-        "uuid": "compat-test-001",
-        "action": "exec",
-        "cmd": "echo",
-        "args": ["hello"],
-        "env": {},
-        "timeout_seconds": 10
-    });
-
-    let send_result = room.send_raw("org.mxdx.command", content).await;
-    assert!(
-        send_result.is_ok(),
-        "Sending custom event should succeed: {:?}",
-        send_result.err()
-    );
-
-    cleanup_room(&client, &room_id).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn send_custom_state_event() {
-    let client = connect().await;
-
-    let mut request = CreateRoomRequest::new();
-    let encryption_event = InitialStateEvent::new(
-        EmptyStateKey,
-        RoomEncryptionEventContent::with_recommended_defaults(),
-    );
-    request.initial_state = vec![encryption_event.to_raw_any()];
-    let room_id = client.create_room(request).await.unwrap().room_id().to_owned();
-
-    client
-        .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
-        .await
-        .unwrap();
-
-    let room = client.get_room(&room_id).expect("Room should exist");
-
-    // Send a custom state event (like org.mxdx.launcher.status)
-    let content = serde_json::json!({
-        "status": "online",
-        "version": "0.1.0"
-    });
-
-    let result = room
-        .send_state_event_raw("org.mxdx.launcher.status", "", content)
-        .await;
-    assert!(
-        result.is_ok(),
-        "Sending custom state event should succeed: {:?}",
-        result.err()
-    );
-
-    cleanup_room(&client, &room_id).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn sync_and_receive_own_custom_events() {
-    let client = connect().await;
-
-    // Create encrypted room
-    let encryption_event = InitialStateEvent::new(
-        EmptyStateKey,
-        RoomEncryptionEventContent::with_recommended_defaults(),
-    );
-    let mut request = CreateRoomRequest::new();
-    request.initial_state = vec![encryption_event.to_raw_any()];
-    let room_id = client.create_room(request).await.unwrap().room_id().to_owned();
-
-    // Sync to pick up room
-    client
-        .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
-        .await
-        .unwrap();
-
-    let room = client.get_room(&room_id).expect("Room should exist");
-
-    // Send a custom event
-    let test_uuid = format!("compat-recv-{}", uuid::Uuid::new_v4());
-    let content = serde_json::json!({
-        "uuid": test_uuid,
-        "action": "exec",
-        "cmd": "echo",
-        "args": ["test"],
-        "env": {},
-    });
-    room.send_raw("org.mxdx.command", content).await.unwrap();
-
-    // Sync again to pick up the event
-    client
-        .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
-        .await
-        .unwrap();
-
-    // Use Room::messages() to retrieve decrypted events
-    let messages = room.messages(MessagesOptions::backward()).await;
-    assert!(
-        messages.is_ok(),
-        "Room::messages() should succeed: {:?}",
-        messages.err()
-    );
-
-    let messages = messages.unwrap();
-    let found = messages.chunk.iter().any(|event| {
-        if let Ok(json) = serde_json::to_value(event.raw().json()) {
-            json.get("content")
-                .and_then(|c| c.get("uuid"))
-                .and_then(|u| u.as_str())
-                == Some(&test_uuid)
-        } else {
-            false
+    let payload = serde_json::json!({
+        "type": "org.mxdx.command",
+        "content": {
+            "uuid": "compat-test-001",
+            "action": "exec",
+            "cmd": "echo",
+            "args": ["hello"],
+            "env": {},
+            "timeout_seconds": 10
         }
     });
 
-    assert!(
-        found,
-        "Should find the custom event via Room::messages() after sync"
-    );
+    client.send_event(&room_id, payload).await
+        .expect("Sending custom event should succeed on public server");
 
-    cleanup_room(&client, &room_id).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn create_room_with_custom_initial_state() {
-    let client = connect().await;
-
-    let encryption_event = InitialStateEvent::new(
-        EmptyStateKey,
-        RoomEncryptionEventContent::with_recommended_defaults(),
-    );
-
-    // Create room with custom initial state events (similar to what
-    // create_terminal_session_dm does with history_visibility)
-    use matrix_sdk::ruma::events::room::history_visibility::{
-        HistoryVisibility, RoomHistoryVisibilityEventContent,
-    };
-    let history_event = InitialStateEvent::new(
-        EmptyStateKey,
-        RoomHistoryVisibilityEventContent::new(HistoryVisibility::Joined),
-    );
-
-    let mut request = CreateRoomRequest::new();
-    request.is_direct = true;
-    request.initial_state = vec![
-        encryption_event.to_raw_any(),
-        history_event.to_raw_any(),
-    ];
-
-    let response = client.create_room(request).await;
-    assert!(
-        response.is_ok(),
-        "Room creation with custom initial state should succeed: {:?}",
-        response.err()
-    );
-
-    let room_id = response.unwrap().room_id().to_owned();
-
-    // Verify state via REST API
-    let homeserver = client.homeserver();
-    let access_token = client.access_token().unwrap();
-    let http_client = reqwest::Client::new();
-
-    let url = format!(
-        "{}_matrix/client/v3/rooms/{}/state/m.room.history_visibility",
-        homeserver,
-        room_id
-    );
-    let resp = http_client
-        .get(&url)
-        .bearer_auth(&access_token)
-        .send()
-        .await
-        .unwrap();
-    let body: Value = resp.json().await.unwrap();
-    assert_eq!(
-        body["history_visibility"], "joined",
-        "history_visibility should be 'joined'"
-    );
-
-    cleanup_room(&client, &room_id).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn create_space_with_child_rooms() {
-    use matrix_sdk::ruma::{
-        api::client::room::create_room::v3::CreationContent, room::RoomType,
-    };
-
-    let client = connect().await;
-    let user_id = client.user_id().unwrap();
-    let server_name = user_id.server_name().to_string();
-
-    // Create a space
-    let mut creation_content = CreationContent::new();
-    creation_content.room_type = Some(RoomType::Space);
-
-    let mut space_request = CreateRoomRequest::new();
-    space_request.name = Some("mxdx-compat-space".to_string());
-    space_request.creation_content = Some(
-        matrix_sdk::ruma::serde::Raw::new(&creation_content).expect("serialize creation_content"),
-    );
-
-    let space_response = client.create_room(space_request).await;
-    assert!(
-        space_response.is_ok(),
-        "Space creation should succeed: {:?}",
-        space_response.err()
-    );
-    let space_id = space_response.unwrap().room_id().to_owned();
-
-    // Create a child room
-    let mut child_request = CreateRoomRequest::new();
-    child_request.name = Some("mxdx-compat-child".to_string());
-    let child_id = client
-        .create_room(child_request)
-        .await
-        .unwrap()
-        .room_id()
-        .to_owned();
-
-    // Sync to pick up rooms
-    client
-        .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
-        .await
-        .unwrap();
-
-    // Link child to space via m.space.child state event
-    let space_room = client.get_room(&space_id).expect("Space should exist");
-    let via = serde_json::json!({ "via": [server_name] });
-    let link_result = space_room
-        .send_state_event_raw("m.space.child", child_id.as_str(), via)
-        .await;
-    assert!(
-        link_result.is_ok(),
-        "Linking child to space via m.space.child should succeed: {:?}",
-        link_result.err()
-    );
-
-    cleanup_room(&client, &space_id).await;
-    cleanup_room(&client, &child_id).await;
-}
-
-#[tokio::test]
-#[ignore]
-async fn tombstone_room() {
-    let client = connect().await;
-
-    // Create two rooms
-    let mut req1 = CreateRoomRequest::new();
-    req1.name = Some("mxdx-compat-old".to_string());
-    let old_room_id = client.create_room(req1).await.unwrap().room_id().to_owned();
-
-    let mut req2 = CreateRoomRequest::new();
-    req2.name = Some("mxdx-compat-new".to_string());
-    let new_room_id = client.create_room(req2).await.unwrap().room_id().to_owned();
-
-    client
-        .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
-        .await
-        .unwrap();
-
-    let room = client.get_room(&old_room_id).expect("Old room should exist");
-
-    // Send tombstone state event
-    let content = serde_json::json!({
-        "body": "This room has been replaced",
-        "replacement_room": new_room_id.to_string(),
+    let _ = client.inner().get_room(&room_id).map(|r| {
+        tokio::spawn(async move { let _ = r.leave().await; })
     });
-    let result = room
-        .send_state_event_raw("m.room.tombstone", "", content)
-        .await;
-    assert!(
-        result.is_ok(),
-        "Tombstone state event should succeed: {:?}",
-        result.err()
-    );
+}
 
-    cleanup_room(&client, &old_room_id).await;
-    cleanup_room(&client, &new_room_id).await;
+#[tokio::test]
+#[ignore = "requires test-credentials.toml or env vars"]
+async fn send_custom_state_event() {
+    let client = connect_account1().await;
+
+    let room_id = client.create_encrypted_room(&[]).await.unwrap();
+    client.sync_once().await.unwrap();
+
+    client.send_state_event(
+        &room_id,
+        "org.mxdx.launcher.status",
+        "",
+        serde_json::json!({ "status": "online", "version": "0.1.0" }),
+    ).await.expect("Custom state event should succeed on public server");
+
+    let _ = client.inner().get_room(&room_id).map(|r| {
+        tokio::spawn(async move { let _ = r.leave().await; })
+    });
+}
+
+#[tokio::test]
+#[ignore = "requires test-credentials.toml or env vars"]
+async fn sync_and_receive_own_custom_events() {
+    let client = connect_account1().await;
+
+    let room_id = client.create_encrypted_room(&[]).await.unwrap();
+    client.sync_once().await.unwrap();
+
+    let test_uuid = format!("compat-recv-{}", uuid::Uuid::new_v4());
+    let payload = serde_json::json!({
+        "type": "org.mxdx.command",
+        "content": {
+            "uuid": test_uuid,
+            "action": "exec",
+            "cmd": "echo",
+            "args": ["test"],
+            "env": {}
+        }
+    });
+    client.send_event(&room_id, payload).await.unwrap();
+
+    // Collect events — should find our custom event
+    let events = client.sync_and_collect_events(&room_id, Duration::from_secs(10)).await.unwrap();
+    let found = events.iter().any(|e| {
+        e.get("content")
+            .and_then(|c| c.get("uuid"))
+            .and_then(|u| u.as_str())
+            == Some(&test_uuid)
+    });
+
+    assert!(found, "Should receive custom event back via sync_and_collect_events");
+
+    let _ = client.inner().get_room(&room_id).map(|r| {
+        tokio::spawn(async move { let _ = r.leave().await; })
+    });
+}
+
+// ─── Two-account tests ───────────────────────────────────────────────────────
+
+#[tokio::test]
+#[ignore = "requires two accounts in test-credentials.toml or env vars"]
+async fn two_users_encrypted_room_with_invite() {
+    let (client1, client2) = connect_both().await;
+
+    // Client 1 creates encrypted room and invites client 2
+    let room_id = client1
+        .create_encrypted_room(&[client2.user_id().to_owned()])
+        .await
+        .expect("Should create room with invite on public server");
+
+    // Client 2 joins
+    client2.join_room(&room_id).await
+        .expect("Invited user should join successfully");
+
+    // Both sync to exchange keys
+    client1.sync_once().await.unwrap();
+    client2.sync_once().await.unwrap();
+    client1.sync_once().await.unwrap();
+    client2.sync_once().await.unwrap();
+
+    // Client 1 sends a custom event
+    let test_uuid = format!("two-user-{}", uuid::Uuid::new_v4());
+    let payload = serde_json::json!({
+        "type": "org.mxdx.command",
+        "content": {
+            "uuid": test_uuid,
+            "action": "exec",
+            "cmd": "echo",
+            "args": ["cross-user-test"],
+            "env": {}
+        }
+    });
+    client1.send_event(&room_id, payload).await
+        .expect("Sender should send custom event");
+
+    // Client 2 receives it
+    let events = client2.sync_and_collect_events(&room_id, Duration::from_secs(15)).await.unwrap();
+    let found = events.iter().any(|e| {
+        e.get("content")
+            .and_then(|c| c.get("uuid"))
+            .and_then(|u| u.as_str())
+            == Some(&test_uuid)
+    });
+
+    assert!(found, "Second user should receive the E2EE custom event from first user");
+
+    // Cleanup
+    let _ = client1.inner().get_room(&room_id).map(|r| {
+        tokio::spawn(async move { let _ = r.leave().await; })
+    });
+    let _ = client2.inner().get_room(&room_id).map(|r| {
+        tokio::spawn(async move { let _ = r.leave().await; })
+    });
+}
+
+#[tokio::test]
+#[ignore = "requires two accounts in test-credentials.toml or env vars"]
+async fn terminal_dm_with_history_visibility() {
+    let (client1, client2) = connect_both().await;
+
+    // Client 1 creates a terminal session DM (encrypted, direct, history_visibility=joined)
+    let room_id = client1
+        .create_terminal_session_dm(client2.user_id())
+        .await
+        .expect("Should create terminal DM on public server");
+
+    client2.join_room(&room_id).await.unwrap();
+    client1.sync_once().await.unwrap();
+
+    // Verify history_visibility via get_room_state
+    let state = client1.get_room_state(&room_id, "m.room.history_visibility").await.unwrap();
+    assert_eq!(state["history_visibility"], "joined");
+
+    // Cleanup
+    let _ = client1.inner().get_room(&room_id).map(|r| {
+        tokio::spawn(async move { let _ = r.leave().await; })
+    });
+    let _ = client2.inner().get_room(&room_id).map(|r| {
+        tokio::spawn(async move { let _ = r.leave().await; })
+    });
 }

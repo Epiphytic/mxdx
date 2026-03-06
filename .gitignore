@@ -1,4 +1,11 @@
+target/
+node_modules/
 
 # Dolt database files (added by bd init)
 .dolt/
 *.db
+
+# Local credentials for public server testing (never commit)
+.env.local
+.env.test
+test-credentials.toml
