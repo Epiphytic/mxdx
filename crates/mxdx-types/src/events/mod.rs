@@ -1,5 +1,7 @@
 pub mod command;
+pub mod launcher;
 pub mod output;
 pub mod result;
-pub mod telemetry;
 pub mod secret;
+pub mod telemetry;
+pub mod terminal;
