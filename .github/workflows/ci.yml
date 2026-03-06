@@ -79,7 +79,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Install system deps
-        run: sudo apt-get install -y libsqlite3-dev libssl-dev
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev tmux
       - name: Install tuwunel
         run: |
           curl -fsSL -o /tmp/tuwunel.deb \
@@ -88,6 +88,7 @@ jobs:
       - run: cargo test -p mxdx-test-helpers
       - run: cargo test -p mxdx-matrix
       - run: cargo test -p mxdx-launcher --test e2e_command
+      - run: cargo test -p mxdx-launcher --test e2e_terminal_session
 
   client-build:
     needs: preflight
