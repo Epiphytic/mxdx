@@ -1,5 +1,8 @@
 use crate::config::{CapabilitiesConfig, CapabilityMode};
 use std::fmt;
+use std::process::Stdio;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::Command as TokioCommand;
 
 #[derive(Debug)]
 pub struct ExecutorError(String);
@@ -17,6 +20,92 @@ pub struct ValidatedCommand {
     pub cmd: String,
     pub args: Vec<String>,
     pub cwd: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct CommandResult {
+    pub exit_code: Option<i32>,
+    pub stdout_lines: Vec<String>,
+    pub stderr_lines: Vec<String>,
+    pub total_seq: u64,
+}
+
+/// Execute a validated command, streaming stdout/stderr line by line.
+/// Returns (exit_code, stdout_lines, stderr_lines) for now.
+/// In full integration, this will send OutputEvents over Matrix.
+pub async fn execute_command(
+    validated: &ValidatedCommand,
+) -> Result<CommandResult, ExecutorError> {
+    let mut cmd = TokioCommand::new(&validated.cmd);
+    cmd.args(&validated.args);
+    if let Some(ref cwd) = validated.cwd {
+        cmd.current_dir(cwd);
+    }
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| ExecutorError(format!("spawn failed: {e}")))?;
+
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+
+    let mut stdout_reader = BufReader::new(stdout).lines();
+    let mut stderr_reader = BufReader::new(stderr).lines();
+
+    let mut stdout_lines: Vec<String> = Vec::new();
+    let mut stderr_lines: Vec<String> = Vec::new();
+    let mut seq: u64 = 0;
+
+    loop {
+        tokio::select! {
+            line = stdout_reader.next_line() => {
+                match line {
+                    Ok(Some(l)) => {
+                        stdout_lines.push(l);
+                        seq += 1;
+                    }
+                    Ok(None) => {
+                        while let Ok(Some(l)) = stderr_reader.next_line().await {
+                            stderr_lines.push(l);
+                            seq += 1;
+                        }
+                        break;
+                    }
+                    Err(e) => return Err(ExecutorError(format!("stdout read error: {e}"))),
+                }
+            }
+            line = stderr_reader.next_line() => {
+                match line {
+                    Ok(Some(l)) => {
+                        stderr_lines.push(l);
+                        seq += 1;
+                    }
+                    Ok(None) => {
+                        while let Ok(Some(l)) = stdout_reader.next_line().await {
+                            stdout_lines.push(l);
+                            seq += 1;
+                        }
+                        break;
+                    }
+                    Err(e) => return Err(ExecutorError(format!("stderr read error: {e}"))),
+                }
+            }
+        }
+    }
+
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| ExecutorError(format!("wait failed: {e}")))?;
+
+    Ok(CommandResult {
+        exit_code: status.code(),
+        stdout_lines,
+        stderr_lines,
+        total_seq: seq,
+    })
 }
 
 /// Normalize a path by resolving `.` and `..` components without touching the filesystem.
