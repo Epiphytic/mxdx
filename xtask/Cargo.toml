@@ -2,3 +2,12 @@
 name = "xtask"
 version = "0.1.0"
 edition = "2021"
+
+[[bin]]
+name = "xtask"
+path = "src/main.rs"
+
+[dependencies]
+syn = { version = "2", features = ["full", "visit"] }
+walkdir = "2"
+anyhow = "1"
