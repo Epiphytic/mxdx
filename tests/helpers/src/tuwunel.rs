@@ -13,6 +13,7 @@ const HEALTH_CHECK_INTERVAL: Duration = Duration::from_millis(100);
 pub struct TuwunelInstance {
     pub port: u16,
     pub server_name: String,
+    pub tls: bool,
     process: Child,
     _data_dir: tempfile::TempDir,
 }
@@ -59,6 +60,7 @@ new_user_displayname_suffix = ""
         let instance = TuwunelInstance {
             port,
             server_name,
+            tls: false,
             process,
             _data_dir: data_dir,
         };
@@ -68,10 +70,89 @@ new_user_displayname_suffix = ""
         Ok(instance)
     }
 
+    /// Start a tuwunel instance configured for federation with TLS.
+    /// Uses OS-assigned port (mxdx-ji1). Server name includes port so
+    /// federation goes directly to the right address without DNS SRV.
+    /// Uses `allow_invalid_tls_certificates` to accept self-signed certs.
+    pub(crate) async fn start_federated(
+        base_name: &str,
+        cert_path: &std::path::Path,
+        key_path: &std::path::Path,
+    ) -> Result<Self> {
+        let port = pick_free_port()?;
+        let data_dir = tempfile::TempDir::new().context("Failed to create temp dir")?;
+        let db_path = data_dir.path().join("db");
+        std::fs::create_dir_all(&db_path)?;
+
+        // Include port in server_name so federation resolves directly
+        let server_name = format!("{base_name}:{port}");
+
+        let config_path = data_dir.path().join("tuwunel.toml");
+        let config = format!(
+            r#"[global]
+server_name = "{server_name}"
+database_path = "{db_path}"
+address = ["127.0.0.1"]
+port = {port}
+allow_registration = true
+registration_token = "{REGISTRATION_TOKEN}"
+log = "error"
+new_user_displayname_suffix = ""
+allow_federation = true
+allow_invalid_tls_certificates = true
+
+[global.tls]
+certs = "{cert_path}"
+key = "{key_path}"
+dual_protocol = true
+"#,
+            server_name = server_name,
+            db_path = db_path.display(),
+            port = port,
+            cert_path = cert_path.display(),
+            key_path = key_path.display(),
+        );
+        let mut f = std::fs::File::create(&config_path)?;
+        f.write_all(config.as_bytes())?;
+
+        let tuwunel_bin = find_tuwunel_binary()?;
+        let process = Command::new(&tuwunel_bin)
+            .arg("-c")
+            .arg(&config_path)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .with_context(|| format!("Failed to spawn tuwunel at {}", tuwunel_bin))?;
+
+        let instance = TuwunelInstance {
+            port,
+            server_name,
+            tls: true,
+            process,
+            _data_dir: data_dir,
+        };
+
+        instance.wait_for_health().await?;
+
+        Ok(instance)
+    }
+
+    fn base_url(&self) -> String {
+        let scheme = if self.tls { "https" } else { "http" };
+        format!("{}://127.0.0.1:{}", scheme, self.port)
+    }
+
+    fn http_client(&self) -> reqwest::Client {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .expect("Failed to build HTTP client")
+    }
+
     /// Wait for tuwunel to respond to health checks.
     async fn wait_for_health(&self) -> Result<()> {
-        let url = format!("http://127.0.0.1:{}/_matrix/client/versions", self.port);
-        let client = reqwest::Client::new();
+        let url = format!("{}/_matrix/client/versions", self.base_url());
+        let client = self.http_client();
         let deadline = tokio::time::Instant::now() + HEALTH_CHECK_TIMEOUT;
 
         loop {
@@ -92,11 +173,8 @@ new_user_displayname_suffix = ""
 
     /// Register a user on this tuwunel instance.
     pub async fn register_user(&self, username: &str, password: &str) -> Result<TestMatrixClient> {
-        let url = format!(
-            "http://127.0.0.1:{}/_matrix/client/v3/register",
-            self.port
-        );
-        let client = reqwest::Client::new();
+        let url = format!("{}/_matrix/client/v3/register", self.base_url());
+        let client = self.http_client();
         let body = serde_json::json!({
             "username": username,
             "password": password,
@@ -140,7 +218,7 @@ new_user_displayname_suffix = ""
                 .as_str()
                 .context("Missing device_id")?
                 .to_string(),
-            homeserver_url: format!("http://127.0.0.1:{}", self.port),
+            homeserver_url: self.base_url(),
         })
     }
 
