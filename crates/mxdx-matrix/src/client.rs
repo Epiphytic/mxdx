@@ -16,11 +16,10 @@ use serde_json::Value;
 
 use crate::error::{MatrixClientError, Result};
 
-const REGISTRATION_TOKEN: &str = "mxdx-test-token";
-
 pub struct MatrixClient {
     client: Client,
     _store_dir: tempfile::TempDir,
+    room_creation_delay: Option<Duration>,
 }
 
 impl MatrixClient {
@@ -49,6 +48,7 @@ impl MatrixClient {
         Ok(MatrixClient {
             client,
             _store_dir: store_dir,
+            room_creation_delay: None,
         })
     }
 
@@ -60,6 +60,7 @@ impl MatrixClient {
         homeserver_url: &str,
         username: &str,
         password: &str,
+        registration_token: &str,
     ) -> Result<Self> {
         // Register user via REST API (same approach as TuwunelInstance::register_user)
         let http_client = reqwest::Client::new();
@@ -69,7 +70,7 @@ impl MatrixClient {
             "password": password,
             "auth": {
                 "type": "m.login.registration_token",
-                "token": REGISTRATION_TOKEN
+                "token": registration_token
             }
         });
 
@@ -110,6 +111,7 @@ impl MatrixClient {
         Ok(MatrixClient {
             client,
             _store_dir: store_dir,
+            room_creation_delay: None,
         })
     }
 
@@ -250,6 +252,66 @@ impl MatrixClient {
         }
 
         Ok(Vec::new())
+    }
+
+    /// Wait until E2EE key exchange completes for a room, with timeout.
+    /// Syncs in a loop until the room has encryption keys for all members.
+    pub async fn wait_for_key_exchange(
+        &self,
+        room_id: &RoomId,
+        timeout: Duration,
+    ) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        while tokio::time::Instant::now() < deadline {
+            self.sync_once().await?;
+
+            let room = match self.client.get_room(room_id) {
+                Some(r) => r,
+                None => continue,
+            };
+
+            if !room.encryption_state().is_encrypted() {
+                continue;
+            }
+
+            let members = room.members(matrix_sdk::RoomMemberships::ACTIVE).await
+                .map_err(|e| MatrixClientError::Other(e.into()))?;
+
+            let mut all_keys_available = true;
+            for member in &members {
+                let user_id = member.user_id();
+                let devices = self
+                    .client
+                    .encryption()
+                    .get_user_devices(user_id)
+                    .await
+                    .map_err(|e| MatrixClientError::Other(e.into()))?;
+
+                if devices.devices().count() == 0 {
+                    all_keys_available = false;
+                    break;
+                }
+            }
+
+            if all_keys_available && !members.is_empty() {
+                return Ok(());
+            }
+        }
+
+        Err(MatrixClientError::KeyExchangeTimeout(format!(
+            "Timed out waiting for key exchange in room {room_id}"
+        )))
+    }
+
+    /// Set an optional delay between room creation calls (for rate-limited servers).
+    pub fn set_room_creation_delay(&mut self, delay: Option<Duration>) {
+        self.room_creation_delay = delay;
+    }
+
+    /// Get the configured room creation delay.
+    pub fn room_creation_delay(&self) -> Option<Duration> {
+        self.room_creation_delay
     }
 
     /// Get access to the inner matrix-sdk Client (escape hatch for advanced use).

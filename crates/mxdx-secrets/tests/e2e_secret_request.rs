@@ -17,10 +17,10 @@ async fn worker_requests_secret_with_double_encryption() {
     let base_url = format!("http://127.0.0.1:{}", hs.port);
 
     let coordinator_client =
-        MatrixClient::register_and_connect(&base_url, "coordinator", "pass")
+        MatrixClient::register_and_connect(&base_url, "coordinator", "pass", "mxdx-test-token")
             .await
             .unwrap();
-    let worker_client = MatrixClient::register_and_connect(&base_url, "worker", "pass")
+    let worker_client = MatrixClient::register_and_connect(&base_url, "worker", "pass", "mxdx-test-token")
         .await
         .unwrap();
 
@@ -132,10 +132,10 @@ async fn unauthorized_worker_cannot_get_secret() {
     let base_url = format!("http://127.0.0.1:{}", hs.port);
 
     let coordinator_client =
-        MatrixClient::register_and_connect(&base_url, "coord2", "pass")
+        MatrixClient::register_and_connect(&base_url, "coord2", "pass", "mxdx-test-token")
             .await
             .unwrap();
-    let worker_client = MatrixClient::register_and_connect(&base_url, "worker2", "pass")
+    let worker_client = MatrixClient::register_and_connect(&base_url, "worker2", "pass", "mxdx-test-token")
         .await
         .unwrap();
 

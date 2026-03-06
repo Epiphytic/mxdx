@@ -7,6 +7,7 @@ async fn create_launcher_space_creates_space_with_child_rooms() {
         &format!("http://127.0.0.1:{}", hs.port),
         "launcher",
         "pass",
+        "mxdx-test-token",
     )
     .await
     .unwrap();
@@ -47,6 +48,7 @@ async fn terminal_dm_has_joined_history_visibility_from_creation() {
         &format!("http://127.0.0.1:{}", hs.port),
         "launcher",
         "pass",
+        "mxdx-test-token",
     )
     .await
     .unwrap();
@@ -54,6 +56,7 @@ async fn terminal_dm_has_joined_history_visibility_from_creation() {
         &format!("http://127.0.0.1:{}", hs.port),
         "user",
         "pass",
+        "mxdx-test-token",
     )
     .await
     .unwrap();
@@ -84,6 +87,7 @@ async fn tombstone_room_marks_room_replaced() {
         &format!("http://127.0.0.1:{}", hs.port),
         "testbot",
         "pass",
+        "mxdx-test-token",
     )
     .await
     .unwrap();

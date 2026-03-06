@@ -1,9 +1,70 @@
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 use crate::config::PolicyConfig;
 
 /// Appservice registration ID used for Tuwunel.
 const APPSERVICE_ID: &str = "mxdx-policy";
+
+/// Trait for registering an appservice with a Matrix homeserver.
+/// Implementations handle the server-specific mechanism (admin commands, file-based, etc.).
+pub trait AppserviceRegistrar: Send + Sync {
+    fn register(
+        &self,
+        registration: &AppserviceRegistration,
+    ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
+}
+
+/// Registers an appservice with Tuwunel by sending the YAML via the admin room.
+pub struct TuwunelRegistrar {
+    pub homeserver_url: String,
+    pub admin_access_token: String,
+}
+
+impl AppserviceRegistrar for TuwunelRegistrar {
+    async fn register(&self, registration: &AppserviceRegistration) -> anyhow::Result<()> {
+        register_appservice_tuwunel(&self.homeserver_url, &self.admin_access_token, registration)
+            .await
+    }
+}
+
+/// For servers where the appservice is already registered out-of-band.
+/// Validates that the registration YAML file exists and contains required fields.
+pub struct ManualRegistrar {
+    pub registration_path: std::path::PathBuf,
+}
+
+impl AppserviceRegistrar for ManualRegistrar {
+    async fn register(&self, _registration: &AppserviceRegistration) -> anyhow::Result<()> {
+        let path = &self.registration_path;
+        if !path.exists() {
+            anyhow::bail!(
+                "Manual registration file not found: {}",
+                path.display()
+            );
+        }
+
+        let content = std::fs::read_to_string(path)?;
+        validate_registration_yaml(&content, path)?;
+
+        Ok(())
+    }
+}
+
+/// Check that a registration YAML string contains the required fields.
+fn validate_registration_yaml(content: &str, path: &Path) -> anyhow::Result<()> {
+    for field in ["id:", "as_token:", "hs_token:"] {
+        if !content.contains(field) {
+            anyhow::bail!(
+                "Registration file {} missing required field '{}'",
+                path.display(),
+                field.trim_end_matches(':')
+            );
+        }
+    }
+    Ok(())
+}
 
 /// Matrix appservice registration document.
 /// Serializes to the YAML format expected by Tuwunel's `appservices register` command.
@@ -78,12 +139,25 @@ impl AppserviceRegistration {
     }
 }
 
+/// Convenience wrapper: registers via `TuwunelRegistrar` for backward compatibility.
+pub async fn register_appservice(
+    homeserver_url: &str,
+    admin_access_token: &str,
+    registration: &AppserviceRegistration,
+) -> anyhow::Result<()> {
+    let registrar = TuwunelRegistrar {
+        homeserver_url: homeserver_url.to_string(),
+        admin_access_token: admin_access_token.to_string(),
+    };
+    registrar.register(registration).await
+}
+
 /// Register the appservice with a Tuwunel instance by sending the YAML to the admin room.
 /// The `admin_client` must be the first registered user (server admin) with a valid access token.
 ///
 /// This sends the `!admin appservices register` command followed by the YAML content
 /// to the `#admins` room.
-pub async fn register_appservice(
+async fn register_appservice_tuwunel(
     homeserver_url: &str,
     admin_access_token: &str,
     registration: &AppserviceRegistration,

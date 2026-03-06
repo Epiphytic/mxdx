@@ -66,6 +66,7 @@ async fn orchestrator_sends_command_launcher_receives_over_matrix() {
         &format!("http://127.0.0.1:{}", hs.port),
         "orchestrator",
         "pass",
+        "mxdx-test-token",
     )
     .await
     .unwrap();
@@ -73,6 +74,7 @@ async fn orchestrator_sends_command_launcher_receives_over_matrix() {
         &format!("http://127.0.0.1:{}", hs.port),
         "launcher",
         "pass",
+        "mxdx-test-token",
     )
     .await
     .unwrap();

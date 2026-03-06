@@ -10,6 +10,7 @@ async fn launcher_creates_terminal_dm_on_session_request() {
         &format!("http://127.0.0.1:{}", hs.port),
         "user",
         "pass",
+        "mxdx-test-token",
     )
     .await
     .unwrap();
@@ -17,6 +18,7 @@ async fn launcher_creates_terminal_dm_on_session_request() {
         &format!("http://127.0.0.1:{}", hs.port),
         "launcher",
         "pass",
+        "mxdx-test-token",
     )
     .await
     .unwrap();

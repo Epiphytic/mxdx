@@ -35,10 +35,10 @@ async fn full_system_e2e() {
     // ── 2. Register users ─────────────────────────────────────────────
     let admin = hs.register_user("admin", "adminpass").await.unwrap();
 
-    let orchestrator = MatrixClient::register_and_connect(&base_url, "orchestrator", "pass")
+    let orchestrator = MatrixClient::register_and_connect(&base_url, "orchestrator", "pass", "mxdx-test-token")
         .await
         .unwrap();
-    let launcher = MatrixClient::register_and_connect(&base_url, "launcher", "pass")
+    let launcher = MatrixClient::register_and_connect(&base_url, "launcher", "pass", "mxdx-test-token")
         .await
         .unwrap();
 
@@ -211,10 +211,10 @@ async fn full_system_e2e() {
     );
 
     // ── 13. Secret request with double encryption over Matrix ─────────
-    let coord_client = MatrixClient::register_and_connect(&base_url, "coordinator", "pass")
+    let coord_client = MatrixClient::register_and_connect(&base_url, "coordinator", "pass", "mxdx-test-token")
         .await
         .unwrap();
-    let worker_client = MatrixClient::register_and_connect(&base_url, "worker", "pass")
+    let worker_client = MatrixClient::register_and_connect(&base_url, "worker", "pass", "mxdx-test-token")
         .await
         .unwrap();
 

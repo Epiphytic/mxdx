@@ -7,6 +7,7 @@ async fn client_connects_and_initializes_crypto() {
         &format!("http://127.0.0.1:{}", hs.port),
         "testbot",
         "password123",
+        "mxdx-test-token",
     )
     .await
     .unwrap();
@@ -23,6 +24,7 @@ async fn two_clients_exchange_encrypted_event() {
         &format!("http://127.0.0.1:{}", hs.port),
         "alice",
         "pass",
+        "mxdx-test-token",
     )
     .await
     .unwrap();
@@ -30,6 +32,7 @@ async fn two_clients_exchange_encrypted_event() {
         &format!("http://127.0.0.1:{}", hs.port),
         "bob",
         "pass",
+        "mxdx-test-token",
     )
     .await
     .unwrap();

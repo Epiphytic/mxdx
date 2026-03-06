@@ -45,9 +45,17 @@ impl MatrixClient {
         let space_response = self.inner().create_room(space_request).await?;
         let space_id = space_response.room_id().to_owned();
 
-        // Create child rooms
+        // Create child rooms (with optional delay for rate-limited servers)
+        let delay = self.room_creation_delay();
+
         let exec_room_id = self.create_encrypted_room(&[]).await?;
+        if let Some(d) = delay {
+            tokio::time::sleep(d).await;
+        }
         let status_room_id = self.create_unencrypted_room(None).await?;
+        if let Some(d) = delay {
+            tokio::time::sleep(d).await;
+        }
         let logs_room_id = self.create_unencrypted_room(None).await?;
 
         // Link child rooms to space via m.space.child state events

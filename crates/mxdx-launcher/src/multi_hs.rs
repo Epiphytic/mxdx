@@ -35,7 +35,7 @@ pub struct MultiHsLauncher {
 impl MultiHsLauncher {
     /// Connect to all homeservers concurrently, measure sync latency,
     /// and select the lowest-latency server as primary.
-    pub async fn start(homeserver_urls: &[String]) -> Result<Self> {
+    pub async fn start(homeserver_urls: &[String], registration_token: &str) -> Result<Self> {
         anyhow::ensure!(
             !homeserver_urls.is_empty(),
             "At least one homeserver URL is required"
@@ -45,10 +45,11 @@ impl MultiHsLauncher {
         let mut handles = tokio::task::JoinSet::new();
         for (i, url) in homeserver_urls.iter().enumerate() {
             let url = url.clone();
+            let token = registration_token.to_owned();
             handles.spawn(async move {
                 let username = format!("launcher-{}", Uuid::new_v4().as_simple());
                 let password = Uuid::new_v4().to_string();
-                let client = MatrixClient::register_and_connect(&url, &username, &password)
+                let client = MatrixClient::register_and_connect(&url, &username, &password, &token)
                     .await
                     .with_context(|| format!("Failed to connect to homeserver {}", url))?;
                 debug!(url = %url, "Connected to homeserver");
@@ -223,7 +224,7 @@ mod tests {
         let instance = TuwunelInstance::start().await.unwrap();
         let url = format!("http://127.0.0.1:{}", instance.port);
 
-        let launcher = MultiHsLauncher::start(&[url]).await.unwrap();
+        let launcher = MultiHsLauncher::start(&[url], "mxdx-test-token").await.unwrap();
 
         assert!(launcher.primary().is_some());
         assert_eq!(launcher.connected_count(), 1);
@@ -238,7 +239,7 @@ mod tests {
         let launcher = MultiHsLauncher::start(&[
             format!("http://127.0.0.1:{}", instance_a.port),
             format!("http://127.0.0.1:{}", instance_b.port),
-        ])
+        ], "mxdx-test-token")
         .await
         .unwrap();
 
@@ -252,7 +253,7 @@ mod tests {
 
     #[tokio::test]
     async fn multi_hs_launcher_requires_at_least_one_url() {
-        let result = MultiHsLauncher::start(&[]).await;
+        let result = MultiHsLauncher::start(&[], "mxdx-test-token").await;
         assert!(result.is_err());
     }
 
@@ -261,7 +262,7 @@ mod tests {
         let instance = TuwunelInstance::start().await.unwrap();
         let url = format!("http://127.0.0.1:{}", instance.port);
 
-        let mut launcher = MultiHsLauncher::start(&[url]).await.unwrap();
+        let mut launcher = MultiHsLauncher::start(&[url], "mxdx-test-token").await.unwrap();
 
         let state = launcher.health_check().await;
         assert_eq!(state, FailoverState::Active);
@@ -279,7 +280,7 @@ mod tests {
         let mut launcher = MultiHsLauncher::start(&[
             format!("http://127.0.0.1:{}", port_a),
             format!("http://127.0.0.1:{}", port_b),
-        ])
+        ], "mxdx-test-token")
         .await
         .unwrap();
 
@@ -316,7 +317,7 @@ mod tests {
         let mut launcher = MultiHsLauncher::start(&[
             format!("http://127.0.0.1:{}", instance_a.port),
             format!("http://127.0.0.1:{}", instance_b.port),
-        ])
+        ], "mxdx-test-token")
         .await
         .unwrap();
 
@@ -340,7 +341,7 @@ mod tests {
         let instance = TuwunelInstance::start().await.unwrap();
         let url = format!("http://127.0.0.1:{}", instance.port);
 
-        let launcher = MultiHsLauncher::start(&[url.clone()]).await.unwrap();
+        let launcher = MultiHsLauncher::start(&[url.clone()], "mxdx-test-token").await.unwrap();
         let launcher_client = launcher.primary().unwrap();
 
         // Create a room as the launcher
@@ -350,7 +351,7 @@ mod tests {
             .unwrap();
 
         // Register a separate non-launcher user
-        let non_launcher = MatrixClient::register_and_connect(&url, "intruder", "password123")
+        let non_launcher = MatrixClient::register_and_connect(&url, "intruder", "password123", "mxdx-test-token")
             .await
             .unwrap();
 

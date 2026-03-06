@@ -6,6 +6,7 @@ pub enum MatrixClientError {
     Http(matrix_sdk::HttpError),
     Registration(String),
     RoomNotFound(String),
+    KeyExchangeTimeout(String),
     Other(anyhow::Error),
 }
 
@@ -16,6 +17,7 @@ impl fmt::Display for MatrixClientError {
             Self::Http(e) => write!(f, "Matrix HTTP error: {e}"),
             Self::Registration(e) => write!(f, "Registration error: {e}"),
             Self::RoomNotFound(id) => write!(f, "Room not found: {id}"),
+            Self::KeyExchangeTimeout(msg) => write!(f, "Key exchange timeout: {msg}"),
             Self::Other(e) => write!(f, "{e}"),
         }
     }
