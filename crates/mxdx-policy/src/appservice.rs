@@ -123,20 +123,9 @@ pub async fn register_appservice(
 
     // Wait for Tuwunel to process the admin command, then verify it succeeded
     // by syncing and checking for a confirmation response from the admin bot.
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
     let mut since: Option<String> = None;
-
-    // Get initial sync token
     let sync_url = format!("{homeserver_url}/_matrix/client/v3/sync");
-    let sync_resp = http_client
-        .get(&sync_url)
-        .bearer_auth(admin_access_token)
-        .query(&[("timeout", "1000")])
-        .send()
-        .await?;
-    if let Ok(body) = sync_resp.json::<serde_json::Value>().await {
-        since = body["next_batch"].as_str().map(|s| s.to_string());
-    }
 
     while tokio::time::Instant::now() < deadline {
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;

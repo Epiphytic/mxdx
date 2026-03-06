@@ -115,6 +115,7 @@ jobs:
       - run: cargo test -p mxdx-policy --test appservice_registration
       - run: cargo test -p mxdx-policy --test policy_enforcement
       - run: cargo test -p mxdx-secrets --test e2e_secret_request
+      - run: cargo test -p mxdx-launcher --test e2e_full_system
 
   federation:
     needs: build

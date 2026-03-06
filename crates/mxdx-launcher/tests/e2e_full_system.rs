@@ -1,7 +1,6 @@
 //! Full system E2E test exercising all mxdx subsystems together.
 //!
-//! Tests are marked #[ignore] because they require a running Tuwunel instance
-//! and tmux. Run with: cargo test --test e2e_full_system -- --ignored
+//! Requires Tuwunel and tmux (installed in CI integration job).
 
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -28,7 +27,6 @@ use mxdx_types::events::secret::{SecretRequestEvent, SecretResponseEvent};
 /// verifies the round-trip. Also tests telemetry, policy, terminal DM creation,
 /// and secret store round-trip.
 #[tokio::test]
-#[ignore = "system test -- requires tuwunel and tmux"]
 async fn full_system_e2e() {
     // ── 1. Start Tuwunel ──────────────────────────────────────────────
     let mut hs = TuwunelInstance::start().await.unwrap();
