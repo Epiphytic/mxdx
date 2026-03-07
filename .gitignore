@@ -9,3 +9,6 @@ node_modules/
 .env.local
 .env.test
 test-credentials.toml
+
+# Git worktrees
+.worktrees/
