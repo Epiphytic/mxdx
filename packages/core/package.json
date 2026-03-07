@@ -6,7 +6,9 @@
   "type": "module",
   "files": [
     "wasm/",
-    "index.js"
+    "index.js",
+    "credentials.js",
+    "session.js"
   ],
   "dependencies": {
     "fake-indexeddb": "^6.2.5"

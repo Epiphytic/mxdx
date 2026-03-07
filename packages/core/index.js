@@ -2,3 +2,5 @@
 import 'fake-indexeddb/auto';
 
 export * from './wasm/mxdx_core_wasm.js';
+export { CredentialStore } from './credentials.js';
+export { connectWithSession } from './session.js';
