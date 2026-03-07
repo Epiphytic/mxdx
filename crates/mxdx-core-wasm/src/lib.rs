@@ -15,6 +15,7 @@ use matrix_sdk::{
             EmptyStateKey, InitialStateEvent,
         },
         room::RoomType,
+        OwnedUserId,
     },
     Client,
 };
@@ -311,6 +312,60 @@ impl WasmMatrixClient {
     #[wasm_bindgen(js_name = "deviceId")]
     pub fn device_id(&self) -> Option<String> {
         self.client.device_id().map(|d| d.to_string())
+    }
+
+    /// Verify another user's identity by signing their master key with our
+    /// user-signing key. Both users must have bootstrapped cross-signing first.
+    /// This is a one-way operation — the other user must also call this to
+    /// verify us back.
+    #[wasm_bindgen(js_name = "verifyUser")]
+    pub async fn verify_user(&self, user_id_str: &str) -> Result<(), JsValue> {
+        let user_id: OwnedUserId = user_id_str.try_into()
+            .map_err(|e| to_js_err(format!("Invalid user ID '{user_id_str}': {e}")))?;
+
+        let encryption = self.client.encryption();
+
+        let identity = encryption.get_user_identity(&user_id).await
+            .map_err(|e| to_js_err(format!("Failed to get user identity: {e}")))?
+            .ok_or_else(|| to_js_err(format!("No identity found for {user_id_str} — they may not have bootstrapped cross-signing")))?;
+
+        identity.verify().await
+            .map_err(|e| to_js_err(format!("Failed to verify {user_id_str}: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Verify our own user identity (marks it as locally verified).
+    /// This is needed before verifying other users — our own identity must
+    /// be verified first.
+    #[wasm_bindgen(js_name = "verifyOwnIdentity")]
+    pub async fn verify_own_identity(&self) -> Result<(), JsValue> {
+        let user_id = self.client.user_id()
+            .ok_or_else(|| to_js_err("Not logged in"))?
+            .to_owned();
+
+        let encryption = self.client.encryption();
+
+        let identity = encryption.get_user_identity(&user_id).await
+            .map_err(|e| to_js_err(format!("Failed to get own identity: {e}")))?
+            .ok_or_else(|| to_js_err("No identity found — bootstrap cross-signing first"))?;
+
+        identity.verify().await
+            .map_err(|e| to_js_err(format!("Failed to verify own identity: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Check if a user's identity is verified from our perspective.
+    #[wasm_bindgen(js_name = "isUserVerified")]
+    pub async fn is_user_verified(&self, user_id_str: &str) -> Result<bool, JsValue> {
+        let user_id: OwnedUserId = user_id_str.try_into()
+            .map_err(|e| to_js_err(format!("Invalid user ID '{user_id_str}': {e}")))?;
+
+        let identity = self.client.encryption().get_user_identity(&user_id).await
+            .map_err(|e| to_js_err(format!("Failed to get user identity: {e}")))?;
+
+        Ok(identity.map(|i| i.is_verified()).unwrap_or(false))
     }
 
     /// Create a launcher space with exec, status, and logs child rooms.

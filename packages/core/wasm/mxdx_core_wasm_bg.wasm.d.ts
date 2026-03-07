@@ -14,6 +14,7 @@ export const wasmmatrixclient_getOrCreateLauncherSpace: (a: number, b: number, c
 export const wasmmatrixclient_inviteUser: (a: number, b: number, c: number, d: number, e: number) => any;
 export const wasmmatrixclient_invitedRoomIds: (a: number) => [number, number];
 export const wasmmatrixclient_isLoggedIn: (a: number) => number;
+export const wasmmatrixclient_isUserVerified: (a: number, b: number, c: number) => any;
 export const wasmmatrixclient_joinRoom: (a: number, b: number, c: number) => any;
 export const wasmmatrixclient_login: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
 export const wasmmatrixclient_register: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => any;
@@ -22,6 +23,8 @@ export const wasmmatrixclient_sendEvent: (a: number, b: number, c: number, d: nu
 export const wasmmatrixclient_sendStateEvent: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => any;
 export const wasmmatrixclient_syncOnce: (a: number) => any;
 export const wasmmatrixclient_userId: (a: number) => [number, number];
+export const wasmmatrixclient_verifyOwnIdentity: (a: number) => any;
+export const wasmmatrixclient_verifyUser: (a: number, b: number, c: number) => any;
 export const init: () => void;
 export const wasm_bindgen__closure__destroy__h1b2e119846aa4fe7: (a: number, b: number) => void;
 export const wasm_bindgen__closure__destroy__h013a009d16441bb5: (a: number, b: number) => void;

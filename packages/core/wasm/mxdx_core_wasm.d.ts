@@ -89,6 +89,10 @@ export class WasmMatrixClient {
     invitedRoomIds(): string[];
     isLoggedIn(): boolean;
     /**
+     * Check if a user's identity is verified from our perspective.
+     */
+    isUserVerified(user_id_str: string): Promise<boolean>;
+    /**
      * Accept a pending room invitation.
      */
     joinRoom(room_id: string): Promise<void>;
@@ -116,6 +120,19 @@ export class WasmMatrixClient {
     sendStateEvent(room_id: string, event_type: string, state_key: string, content_json: string): Promise<void>;
     syncOnce(): Promise<void>;
     userId(): string | undefined;
+    /**
+     * Verify our own user identity (marks it as locally verified).
+     * This is needed before verifying other users — our own identity must
+     * be verified first.
+     */
+    verifyOwnIdentity(): Promise<void>;
+    /**
+     * Verify another user's identity by signing their master key with our
+     * user-signing key. Both users must have bootstrapped cross-signing first.
+     * This is a one-way operation — the other user must also call this to
+     * verify us back.
+     */
+    verifyUser(user_id_str: string): Promise<void>;
 }
 
 export function init(): void;
