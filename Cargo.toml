@@ -6,6 +6,7 @@ members = [
     "crates/mxdx-secrets",
     "crates/mxdx-launcher",
     "crates/mxdx-web",
+    "crates/mxdx-core-wasm",
     "xtask",
     "tests/helpers",
 ]
