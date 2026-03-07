@@ -72,9 +72,26 @@ program
   .action(async () => {
     const opts = program.opts();
     const { client } = await connect(opts);
-    await client.syncOnce();
-    console.log('Use: mxdx-client exec <launcher-name> <command>');
-    console.log('Launcher names match the --username used at launcher startup.');
+
+    const launchersJson = await client.listLauncherSpaces();
+    const launchers = JSON.parse(launchersJson);
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(launchers, null, 2));
+      return;
+    }
+
+    if (launchers.length === 0) {
+      console.log('No launchers discovered.');
+      return;
+    }
+
+    for (const l of launchers) {
+      console.log(`  ${l.launcher_id}`);
+      console.log(`    Space: ${l.space_id}`);
+      console.log(`    Exec:  ${l.exec_room_id}`);
+      console.log(`    Logs:  ${l.logs_room_id}`);
+    }
   });
 
 program
@@ -90,17 +107,21 @@ program
       process.exit(1);
     }
 
-    // Read telemetry state event
+    // Read telemetry state event from exec room
     const events = JSON.parse(await client.collectRoomEvents(topology.exec_room_id, 3));
     if (events && events.length > 0) {
       for (const event of events) {
         if (event.type === 'org.mxdx.host_telemetry') {
           const t = event.content;
-          console.log(`  Hostname:  ${t.hostname}`);
-          console.log(`  Platform:  ${t.platform} (${t.arch})`);
-          console.log(`  CPUs:      ${t.cpus}`);
-          console.log(`  Memory:    ${t.free_memory_mb}MB free / ${t.total_memory_mb}MB total`);
-          console.log(`  Uptime:    ${Math.floor(t.uptime_secs / 3600)}h`);
+          if (opts.format === 'json') {
+            console.log(JSON.stringify(t, null, 2));
+          } else {
+            console.log(`  Hostname:  ${t.hostname}`);
+            console.log(`  Platform:  ${t.platform} (${t.arch})`);
+            if (t.cpus != null) console.log(`  CPUs:      ${t.cpus}`);
+            if (t.total_memory_mb != null) console.log(`  Memory:    ${t.free_memory_mb}MB free / ${t.total_memory_mb}MB total`);
+            if (t.uptime_secs != null) console.log(`  Uptime:    ${Math.floor(t.uptime_secs / 3600)}h`);
+          }
           return;
         }
       }

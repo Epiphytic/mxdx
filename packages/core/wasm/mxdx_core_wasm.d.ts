@@ -100,6 +100,11 @@ export class WasmMatrixClient {
      */
     joinRoom(room_id: string): Promise<void>;
     /**
+     * List all launcher spaces by scanning joined rooms for matching topic patterns.
+     * Returns JSON string: array of { space_id, exec_room_id, logs_room_id, launcher_id }.
+     */
+    listLauncherSpaces(): Promise<string>;
+    /**
      * Login to a Matrix server.
      */
     static login(server_name: string, username: string, password: string): Promise<WasmMatrixClient>;

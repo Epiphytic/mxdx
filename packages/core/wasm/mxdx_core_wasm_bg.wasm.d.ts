@@ -16,6 +16,7 @@ export const wasmmatrixclient_invitedRoomIds: (a: number) => [number, number];
 export const wasmmatrixclient_isLoggedIn: (a: number) => number;
 export const wasmmatrixclient_isUserVerified: (a: number, b: number, c: number) => any;
 export const wasmmatrixclient_joinRoom: (a: number, b: number, c: number) => any;
+export const wasmmatrixclient_listLauncherSpaces: (a: number) => any;
 export const wasmmatrixclient_login: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
 export const wasmmatrixclient_register: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => any;
 export const wasmmatrixclient_restoreSession: (a: number, b: number) => any;

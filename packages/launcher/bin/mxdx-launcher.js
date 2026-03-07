@@ -17,6 +17,7 @@ program
   .option('--telemetry <full|summary>', 'Telemetry detail level', 'full')
   .option('--max-sessions <n>', 'Max concurrent sessions', '5')
   .option('--password <pass>', 'Password (first run only — stored in keyring)')
+  .option('--log-format <json|text>', 'Log output format', 'json')
   .parse();
 
 const opts = program.opts();
@@ -50,6 +51,9 @@ async function main() {
   if (opts.registrationToken) {
     config.registrationToken = opts.registrationToken;
   }
+
+  // Log format from CLI
+  config.logFormat = opts.logFormat || 'json';
 
   const runtime = new LauncherRuntime(config);
 

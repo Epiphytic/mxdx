@@ -2,6 +2,36 @@ import { connectWithSession } from '@mxdx/core';
 import { executeCommand } from './process-bridge.js';
 
 /**
+ * Structured logger with JSON and text output modes.
+ */
+class Logger {
+  #format;
+
+  constructor(format = 'json') {
+    this.#format = format;
+  }
+
+  info(msg, data) { this.#log('info', msg, data); }
+  warn(msg, data) { this.#log('warn', msg, data); }
+  error(msg, data) { this.#log('error', msg, data); }
+  debug(msg, data) { this.#log('debug', msg, data); }
+
+  #log(level, msg, data) {
+    if (this.#format === 'json') {
+      const entry = { level, msg, ts: new Date().toISOString(), ...data };
+      const stream = level === 'error' ? process.stderr : process.stdout;
+      stream.write(JSON.stringify(entry) + '\n');
+    } else {
+      const ts = new Date().toISOString();
+      const prefix = `[${level}] [${ts}]`;
+      const extra = data ? ' ' + JSON.stringify(data) : '';
+      const stream = level === 'error' ? process.stderr : process.stdout;
+      stream.write(`${prefix} ${msg}${extra}\n`);
+    }
+  }
+}
+
+/**
  * The launcher runtime: connects to Matrix, creates rooms, listens for commands.
  */
 export class LauncherRuntime {
@@ -10,15 +40,21 @@ export class LauncherRuntime {
   #topology;
   #running = false;
   #processedEvents = new Set();
+  #activeSessions = 0;
+  #maxSessions;
+  #backoffMs = 0;
+  #log;
 
   constructor(config) {
     this.#config = config;
+    this.#maxSessions = config.maxSessions || 10;
+    this.#log = new Logger(config.logFormat || 'json');
   }
 
   async start() {
     const server = this.#config.servers[0];
     const username = this.#config.username;
-    const log = (msg) => console.log(`[launcher] ${msg}`);
+    const log = (msg) => this.#log.info(msg);
 
     // ── 1. Connect with session persistence + cross-signing ─────
     const { client, freshLogin, password } = await connectWithSession({
@@ -92,8 +128,11 @@ export class LauncherRuntime {
       try {
         await this.#client.syncOnce();
         await this.#processCommands();
+        this.#backoffMs = 0;
       } catch (err) {
-        console.error(`[launcher] Sync error:`, err);
+        this.#backoffMs = Math.min(Math.max(1000, this.#backoffMs * 2 || 1000), 30000);
+        this.#log.error('Sync error', { error: err.message, backoff_ms: this.#backoffMs });
+        await new Promise((r) => setTimeout(r, this.#backoffMs));
       }
     }
   }
@@ -121,11 +160,11 @@ export class LauncherRuntime {
       const cwd = content.cwd || '/tmp';
       const requestId = content.request_id || eventId;
 
-      console.log(`[launcher] Received command: ${command} ${args.join(' ')}`);
+      this.#log.info(`Received command: ${command} ${args.join(' ')}`, { request_id: requestId });
 
       // Validate command against allowlist
       if (!this.#isCommandAllowed(command)) {
-        console.log(`[launcher] Command rejected: ${command} not in allowlist`);
+        this.#log.warn(`Command rejected: ${command} not in allowlist`, { request_id: requestId });
         await this.#sendResult(requestId, {
           exit_code: 1,
           error: `Command '${command}' is not allowed`,
@@ -135,7 +174,7 @@ export class LauncherRuntime {
 
       // Validate cwd
       if (!this.#isCwdAllowed(cwd)) {
-        console.log(`[launcher] CWD rejected: ${cwd} not in allowed paths`);
+        this.#log.warn(`CWD rejected: ${cwd}`, { request_id: requestId });
         await this.#sendResult(requestId, {
           exit_code: 1,
           error: `Working directory '${cwd}' is not allowed`,
@@ -143,7 +182,18 @@ export class LauncherRuntime {
         continue;
       }
 
+      // Check session limit
+      if (this.#activeSessions >= this.#maxSessions) {
+        this.#log.warn('Session limit reached', { active: this.#activeSessions, max: this.#maxSessions, request_id: requestId });
+        await this.#sendResult(requestId, {
+          exit_code: 1,
+          error: `Session limit reached (${this.#maxSessions} max)`,
+        });
+        continue;
+      }
+
       // Execute command
+      this.#activeSessions++;
       try {
         const result = await executeCommand(command, args, {
           cwd,
@@ -165,6 +215,8 @@ export class LauncherRuntime {
           exit_code: 1,
           error: err.message,
         });
+      } finally {
+        this.#activeSessions--;
       }
     }
   }
@@ -207,15 +259,20 @@ export class LauncherRuntime {
 
   async #postTelemetry() {
     const os = await import('node:os');
+    const level = this.#config.telemetry || 'full';
+
     const telemetry = {
       hostname: os.hostname(),
       platform: os.platform(),
       arch: os.arch(),
-      cpus: os.cpus().length,
-      total_memory_mb: Math.floor(os.totalmem() / (1024 * 1024)),
-      free_memory_mb: Math.floor(os.freemem() / (1024 * 1024)),
-      uptime_secs: Math.floor(os.uptime()),
     };
+
+    if (level === 'full') {
+      telemetry.cpus = os.cpus().length;
+      telemetry.total_memory_mb = Math.floor(os.totalmem() / (1024 * 1024));
+      telemetry.free_memory_mb = Math.floor(os.freemem() / (1024 * 1024));
+      telemetry.uptime_secs = Math.floor(os.uptime());
+    }
 
     await this.#client.sendStateEvent(
       this.#topology.exec_room_id,

@@ -466,6 +466,49 @@ impl WasmMatrixClient {
         self.create_launcher_space(launcher_id).await
     }
 
+    /// List all launcher spaces by scanning joined rooms for matching topic patterns.
+    /// Returns JSON string: array of { space_id, exec_room_id, logs_room_id, launcher_id }.
+    #[wasm_bindgen(js_name = "listLauncherSpaces")]
+    pub async fn list_launcher_spaces(&self) -> Result<String, JsValue> {
+        self.sync_once().await?;
+
+        let space_prefix = "org.mxdx.launcher.space:";
+        let exec_prefix = "org.mxdx.launcher.exec:";
+        let logs_prefix = "org.mxdx.launcher.logs:";
+
+        // Collect all rooms by topic prefix
+        let mut spaces: Vec<(String, String)> = Vec::new(); // (launcher_id, room_id)
+        let mut exec_rooms: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut logs_rooms: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+        for room in self.client.joined_rooms() {
+            let topic = room.topic().unwrap_or_default();
+            let rid = room.room_id().to_string();
+
+            if let Some(id) = topic.strip_prefix(space_prefix) {
+                spaces.push((id.to_string(), rid));
+            } else if let Some(id) = topic.strip_prefix(exec_prefix) {
+                exec_rooms.insert(id.to_string(), rid);
+            } else if let Some(id) = topic.strip_prefix(logs_prefix) {
+                logs_rooms.insert(id.to_string(), rid);
+            }
+        }
+
+        let mut result: Vec<serde_json::Value> = Vec::new();
+        for (launcher_id, space_id) in &spaces {
+            if let (Some(exec_id), Some(logs_id)) = (exec_rooms.get(launcher_id), logs_rooms.get(launcher_id)) {
+                result.push(serde_json::json!({
+                    "launcher_id": launcher_id,
+                    "space_id": space_id,
+                    "exec_room_id": exec_id,
+                    "logs_room_id": logs_id,
+                }));
+            }
+        }
+
+        serde_json::to_string(&result).map_err(to_js_err)
+    }
+
     /// Send a custom event to a room.
     #[wasm_bindgen(js_name = "sendEvent")]
     pub async fn send_event(
