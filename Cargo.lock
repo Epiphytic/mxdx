@@ -2445,6 +2445,7 @@ dependencies = [
  "js-sys",
  "matrix-sdk",
  "mxdx-types",
+ "reqwest",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
