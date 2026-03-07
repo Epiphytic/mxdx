@@ -152,6 +152,31 @@ impl WasmMatrixClient {
         Ok(())
     }
 
+    /// Invite a user to a room.
+    #[wasm_bindgen(js_name = "inviteUser")]
+    pub async fn invite_user(&self, room_id: &str, user_id: &str) -> Result<(), JsValue> {
+        let rid = <&matrix_sdk::ruma::RoomId>::try_from(room_id).map_err(to_js_err)?;
+        let uid = <&matrix_sdk::ruma::UserId>::try_from(user_id).map_err(to_js_err)?;
+        let room = self.client.get_room(rid)
+            .ok_or_else(|| to_js_err(format!("Room not found: {room_id}")))?;
+        room.invite_user_by_id(uid).await.map_err(to_js_err)?;
+        Ok(())
+    }
+
+    /// Accept a pending room invitation.
+    #[wasm_bindgen(js_name = "joinRoom")]
+    pub async fn join_room(&self, room_id: &str) -> Result<(), JsValue> {
+        let rid = <&matrix_sdk::ruma::RoomId>::try_from(room_id).map_err(to_js_err)?;
+        self.client.join_room_by_id(rid).await.map_err(to_js_err)?;
+        Ok(())
+    }
+
+    /// Get list of invited room IDs (pending invitations).
+    #[wasm_bindgen(js_name = "invitedRoomIds")]
+    pub fn invited_room_ids(&self) -> Vec<String> {
+        self.client.invited_rooms().iter().map(|r| r.room_id().to_string()).collect()
+    }
+
     /// Create a launcher space with exec, status, and logs child rooms.
     /// Returns JSON: { space_id, exec_room_id, status_room_id, logs_room_id }
     #[wasm_bindgen(js_name = "createLauncherSpace")]
@@ -181,8 +206,8 @@ impl WasmMatrixClient {
         let space = self.client.create_room(space_request).await.map_err(to_js_err)?;
         let space_id = space.room_id().to_string();
 
-        // Create exec room (encrypted)
-        let exec_room_id = self.create_named_encrypted_room(
+        // Create exec room (unencrypted for now — E2EE requires IndexedDB polyfill in Node.js)
+        let exec_room_id = self.create_named_room(
             &format!("mxdx: {launcher_id} — exec"),
             &format!("org.mxdx.launcher.exec:{launcher_id}"),
         ).await?;
@@ -306,13 +331,13 @@ impl WasmMatrixClient {
         Ok(())
     }
 
-    /// Sync and collect events from a room. Returns JSON array of events.
+    /// Sync and collect events from a room. Returns JSON string of event array.
     #[wasm_bindgen(js_name = "collectRoomEvents")]
     pub async fn collect_room_events(
         &self,
         room_id: &str,
         timeout_secs: u32,
-    ) -> Result<JsValue, JsValue> {
+    ) -> Result<String, JsValue> {
         let rid = <&matrix_sdk::ruma::RoomId>::try_from(room_id).map_err(to_js_err)?;
         let timeout = Duration::from_secs(timeout_secs as u64);
         let deadline = web_time::Instant::now() + timeout;
@@ -324,7 +349,7 @@ impl WasmMatrixClient {
                 let messages = room.messages(MessagesOptions::backward()).await.map_err(to_js_err)?;
                 let mut collected: Vec<serde_json::Value> = Vec::new();
                 for event in &messages.chunk {
-                    if let Ok(json) = serde_json::to_value(event.raw().json()) {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(event.raw().json().get()) {
                         let event_type = json.get("type").and_then(|t| t.as_str());
                         if event_type != Some("m.room.encrypted")
                             && event_type != Some("m.room.encryption")
@@ -335,12 +360,12 @@ impl WasmMatrixClient {
                     }
                 }
                 if !collected.is_empty() {
-                    return serde_wasm_bindgen::to_value(&collected).map_err(to_js_err);
+                    return serde_json::to_string(&collected).map_err(to_js_err);
                 }
             }
         }
 
-        serde_wasm_bindgen::to_value(&Vec::<serde_json::Value>::new()).map_err(to_js_err)
+        Ok("[]".to_string())
     }
 }
 

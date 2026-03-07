@@ -56,10 +56,10 @@ class WasmMatrixClient {
         wasm.__wbg_wasmmatrixclient_free(ptr, 0);
     }
     /**
-     * Sync and collect events from a room. Returns JSON array of events.
+     * Sync and collect events from a room. Returns JSON string of event array.
      * @param {string} room_id
      * @param {number} timeout_secs
-     * @returns {Promise<any>}
+     * @returns {Promise<string>}
      */
     collectRoomEvents(room_id, timeout_secs) {
         const ptr0 = passStringToWasm0(room_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -103,11 +103,46 @@ class WasmMatrixClient {
         return ret;
     }
     /**
+     * Invite a user to a room.
+     * @param {string} room_id
+     * @param {string} user_id
+     * @returns {Promise<void>}
+     */
+    inviteUser(room_id, user_id) {
+        const ptr0 = passStringToWasm0(room_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(user_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmatrixclient_inviteUser(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        return ret;
+    }
+    /**
+     * Get list of invited room IDs (pending invitations).
+     * @returns {string[]}
+     */
+    invitedRoomIds() {
+        const ret = wasm.wasmmatrixclient_invitedRoomIds(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
      * @returns {boolean}
      */
     isLoggedIn() {
         const ret = wasm.wasmmatrixclient_isLoggedIn(this.__wbg_ptr);
         return ret !== 0;
+    }
+    /**
+     * Accept a pending room invitation.
+     * @param {string} room_id
+     * @returns {Promise<void>}
+     */
+    joinRoom(room_id) {
+        const ptr0 = passStringToWasm0(room_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmatrixclient_joinRoom(this.__wbg_ptr, ptr0, len0);
+        return ret;
     }
     /**
      * Login to a Matrix server.
@@ -725,10 +760,6 @@ function __wbg_get_imports() {
             const ret = new Error();
             return ret;
         },
-        __wbg_new_49d5571bd3f0c4d4: function() {
-            const ret = new Map();
-            return ret;
-        },
         __wbg_new_5f486cdf45a04d78: function(arg0) {
             const ret = new Uint8Array(arg0);
             return ret;
@@ -910,10 +941,6 @@ function __wbg_get_imports() {
         __wbg_set_6be42768c690e380: function(arg0, arg1, arg2) {
             arg0[arg1] = arg2;
         },
-        __wbg_set_bf7251625df30a02: function(arg0, arg1, arg2) {
-            const ret = arg0.set(arg1, arg2);
-            return ret;
-        },
         __wbg_set_body_a3d856b097dfda04: function(arg0, arg1) {
             arg0.body = arg1;
         },
@@ -1067,32 +1094,32 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 4166, function: Function { arguments: [NamedExternref("IDBVersionChangeEvent")], shim_idx: 4167, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 4399, function: Function { arguments: [NamedExternref("IDBVersionChangeEvent")], shim_idx: 4400, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h1b2e119846aa4fe7, wasm_bindgen__convert__closures_____invoke__h80378f27fd9cd579);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 4279, function: Function { arguments: [NamedExternref("Event")], shim_idx: 4282, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 4512, function: Function { arguments: [NamedExternref("Event")], shim_idx: 4515, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h013a009d16441bb5, wasm_bindgen__convert__closures_____invoke__h2bd87d565c60dbe8);
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 4279, function: Function { arguments: [], shim_idx: 4280, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 4512, function: Function { arguments: [], shim_idx: 4513, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h013a009d16441bb5, wasm_bindgen__convert__closures_____invoke__h2383b4061152a312);
             return ret;
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 4373, function: Function { arguments: [], shim_idx: 4374, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 4605, function: Function { arguments: [], shim_idx: 4606, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h4f196889b42287cd, wasm_bindgen__convert__closures_____invoke__ha0d8a027dc714569);
             return ret;
         },
         __wbindgen_cast_0000000000000005: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 6995, function: Function { arguments: [Externref], shim_idx: 6996, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 7226, function: Function { arguments: [Externref], shim_idx: 7227, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h4aa1861517c36be3, wasm_bindgen__convert__closures_____invoke__h31c84a9d43650e37);
             return ret;
         },
         __wbindgen_cast_0000000000000006: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 7006, function: Function { arguments: [], shim_idx: 7007, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 7237, function: Function { arguments: [], shim_idx: 7238, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h11160d558792d42b, wasm_bindgen__convert__closures_____invoke__h3987d9dd2704c835);
             return ret;
         },
@@ -1262,6 +1289,17 @@ function debugString(val) {
     }
     // TODO we could test for more things here, like `Set`s and `Map`s.
     return className;
+}
+
+function getArrayJsValueFromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    const mem = getDataViewMemory0();
+    const result = [];
+    for (let i = ptr; i < ptr + 4 * len; i += 4) {
+        result.push(wasm.__wbindgen_externrefs.get(mem.getUint32(i, true)));
+    }
+    wasm.__externref_drop_slice(ptr, len);
+    return result;
 }
 
 function getArrayU8FromWasm0(ptr, len) {

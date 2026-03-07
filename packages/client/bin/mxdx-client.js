@@ -72,7 +72,7 @@ program
     }
 
     // Read telemetry state event
-    const events = await client.collectRoomEvents(topology.status_room_id, 3);
+    const events = JSON.parse(await client.collectRoomEvents(topology.status_room_id, 3));
     if (events && events.length > 0) {
       for (const event of events) {
         if (event.type === 'org.mxdx.host_telemetry') {

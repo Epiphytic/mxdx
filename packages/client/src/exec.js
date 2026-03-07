@@ -37,7 +37,7 @@ export async function execCommand(client, topology, command, args = [], options 
   while (Date.now() < deadline) {
     await client.syncOnce();
 
-    const events = await client.collectRoomEvents(topology.exec_room_id, 1);
+    const events = JSON.parse(await client.collectRoomEvents(topology.exec_room_id, 1));
     if (!events || !Array.isArray(events)) continue;
 
     for (const event of events) {

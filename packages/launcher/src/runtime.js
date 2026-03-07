@@ -61,6 +61,25 @@ export class LauncherRuntime {
       logs: this.#topology.logs_room_id,
     });
 
+    // Invite admin users to all rooms
+    if (this.#config.adminUsers && this.#config.adminUsers.length > 0) {
+      console.log(`[launcher] Inviting admin users: ${this.#config.adminUsers.join(', ')}`);
+      for (const adminUser of this.#config.adminUsers) {
+        for (const roomId of [
+          this.#topology.space_id,
+          this.#topology.exec_room_id,
+          this.#topology.status_room_id,
+          this.#topology.logs_room_id,
+        ]) {
+          try {
+            await this.#client.inviteUser(roomId, adminUser);
+          } catch {
+            // May already be invited/joined
+          }
+        }
+      }
+    }
+
     // Post initial telemetry
     await this.#postTelemetry();
 
@@ -94,10 +113,11 @@ export class LauncherRuntime {
   }
 
   async #processCommands() {
-    const events = await this.#client.collectRoomEvents(
+    const eventsJson = await this.#client.collectRoomEvents(
       this.#topology.exec_room_id,
       1,
     );
+    const events = JSON.parse(eventsJson);
 
     if (!events || !Array.isArray(events)) return;
 

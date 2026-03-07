@@ -1,26 +1,28 @@
-import { WasmMatrixClient } from '@mxdx/core';
-
 /**
- * Discover online launchers by scanning joined rooms for launcher space topics.
- * Returns an array of { name, spaceId, execRoomId, statusRoomId, logsRoomId }.
- */
-export async function discoverLaunchers(client) {
-  await client.syncOnce();
-
-  // The WASM client doesn't expose room listing directly,
-  // so we use findLauncherSpace with known launcher names.
-  // For full discovery, we'll need to add a room-listing export.
-  // For now, return empty — the E2E test will use findLauncherSpace directly.
-  return [];
-}
-
-/**
- * Connect to a Matrix server and discover a specific launcher.
+ * Accept all pending room invitations, then discover a specific launcher.
  * @param {WasmMatrixClient} client - Connected client
  * @param {string} launcherName - The launcher ID to find
  * @returns {Object|null} Topology or null
  */
 export async function findLauncher(client, launcherName) {
+  // Sync to pick up invitations
+  await client.syncOnce();
+
+  // Accept all pending invitations
+  const invited = client.invitedRoomIds();
+  for (const roomId of invited) {
+    try {
+      await client.joinRoom(roomId);
+    } catch {
+      // May fail if invite was revoked
+    }
+  }
+
+  // Sync again to get room state after joining
+  if (invited.length > 0) {
+    await client.syncOnce();
+  }
+
   const topology = await client.findLauncherSpace(launcherName);
   if (!topology) return null;
   return {

@@ -7,7 +7,10 @@ export const wasmmatrixclient_collectRoomEvents: (a: number, b: number, c: numbe
 export const wasmmatrixclient_createLauncherSpace: (a: number, b: number, c: number) => any;
 export const wasmmatrixclient_findLauncherSpace: (a: number, b: number, c: number) => any;
 export const wasmmatrixclient_getOrCreateLauncherSpace: (a: number, b: number, c: number) => any;
+export const wasmmatrixclient_inviteUser: (a: number, b: number, c: number, d: number, e: number) => any;
+export const wasmmatrixclient_invitedRoomIds: (a: number) => [number, number];
 export const wasmmatrixclient_isLoggedIn: (a: number) => number;
+export const wasmmatrixclient_joinRoom: (a: number, b: number, c: number) => any;
 export const wasmmatrixclient_login: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
 export const wasmmatrixclient_register: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => any;
 export const wasmmatrixclient_sendEvent: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
@@ -33,5 +36,6 @@ export const __wbindgen_exn_store: (a: number) => void;
 export const __externref_table_alloc: () => number;
 export const __wbindgen_externrefs: WebAssembly.Table;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __externref_drop_slice: (a: number, b: number) => void;
 export const __externref_table_dealloc: (a: number) => void;
 export const __wbindgen_start: () => void;

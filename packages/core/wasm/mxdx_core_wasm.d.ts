@@ -41,9 +41,9 @@ export class WasmMatrixClient {
     free(): void;
     [Symbol.dispose](): void;
     /**
-     * Sync and collect events from a room. Returns JSON array of events.
+     * Sync and collect events from a room. Returns JSON string of event array.
      */
-    collectRoomEvents(room_id: string, timeout_secs: number): Promise<any>;
+    collectRoomEvents(room_id: string, timeout_secs: number): Promise<string>;
     /**
      * Create a launcher space with exec, status, and logs child rooms.
      * Returns JSON: { space_id, exec_room_id, status_room_id, logs_room_id }
@@ -58,7 +58,19 @@ export class WasmMatrixClient {
      * Find or create a launcher space (idempotent).
      */
     getOrCreateLauncherSpace(launcher_id: string): Promise<any>;
+    /**
+     * Invite a user to a room.
+     */
+    inviteUser(room_id: string, user_id: string): Promise<void>;
+    /**
+     * Get list of invited room IDs (pending invitations).
+     */
+    invitedRoomIds(): string[];
     isLoggedIn(): boolean;
+    /**
+     * Accept a pending room invitation.
+     */
+    joinRoom(room_id: string): Promise<void>;
     /**
      * Login to a Matrix server.
      */
