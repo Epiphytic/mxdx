@@ -6,10 +6,12 @@ import { setupTerminalView } from './terminal-view.js';
 const SESSION_KEY = 'mxdx-session';
 
 let client = null;
+let wasmReady = false;
 
 async function boot() {
   // Initialize WASM
   await init();
+  wasmReady = true;
 
   // Try restoring saved session
   const savedSession = localStorage.getItem(SESSION_KEY);
@@ -67,6 +69,7 @@ function handleLogout() {
 
 // Wire up auth
 setupAuth({
+  getWasmClient: () => wasmReady ? WasmMatrixClient : null,
   onLogin: (newClient, sessionJson) => {
     client = newClient;
     localStorage.setItem(SESSION_KEY, sessionJson);
@@ -87,4 +90,10 @@ document.getElementById('terminal-back').addEventListener('click', () => {
 
 boot().catch((err) => {
   console.error('Boot failed:', err);
+  const errorEl = document.getElementById('login-error');
+  if (errorEl) {
+    errorEl.textContent = `Failed to initialize: ${err instanceof Error ? err.message : String(err)}`;
+    errorEl.hidden = false;
+  }
+  document.getElementById('login').hidden = false;
 });
