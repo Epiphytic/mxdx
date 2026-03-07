@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "workspaces": [
+    "packages/core",
+    "packages/launcher",
+    "packages/client",
+    "packages/e2e-tests"
+  ]
+}
