@@ -17,43 +17,94 @@ export class LauncherRuntime {
     this.#config = config;
     this.#credentialStore = new CredentialStore({
       configDir: config.configDir,
-      useKeychain: false,
+      useKeychain: true,
     });
   }
 
   async start() {
-    console.log(`[launcher] Connecting to ${this.#config.servers[0]}...`);
-
-    // Connect to the first server
     const server = this.#config.servers[0];
-    if (this.#config.registrationToken) {
-      this.#client = await WasmMatrixClient.register(
-        server,
-        this.#config.username,
-        this.#config.password,
-        this.#config.registrationToken,
-      );
-    } else {
-      this.#client = await WasmMatrixClient.login(
-        server,
-        this.#config.username,
-        this.#config.password,
-      );
+    const username = this.#config.username;
+
+    // ── 1. Try restoring an existing session ──────────────────────
+    const savedSession = await this.#credentialStore.loadSession(username, server);
+    if (savedSession) {
+      try {
+        console.log(`[launcher] Restoring session for ${username}@${server}...`);
+        this.#client = await WasmMatrixClient.restoreSession(
+          JSON.stringify(savedSession),
+        );
+        console.log(`[launcher] Session restored as ${this.#client.userId()} (device: ${this.#client.deviceId()})`);
+      } catch (err) {
+        console.log(`[launcher] Session restore failed (${err}), will login fresh`);
+        this.#client = null;
+      }
     }
 
-    console.log(`[launcher] Logged in as ${this.#client.userId()}`);
+    // ── 2. Fresh login if no session restored ─────────────────────
+    if (!this.#client) {
+      // Get password: CLI arg → config → keyring → interactive prompt
+      let password = this.#config.password;
 
-    // Save credentials for reconnection
-    await this.#credentialStore.save({
-      serverUrl: server,
-      username: this.#config.username,
-      accessToken: 'stored-via-sdk',
-      deviceId: 'stored-via-sdk',
-    });
+      if (!password) {
+        password = await this.#credentialStore.loadPassword(username, server);
+      }
 
-    // Get or create launcher space
-    console.log(`[launcher] Setting up rooms for ${this.#config.username}...`);
-    this.#topology = await this.#client.getOrCreateLauncherSpace(this.#config.username);
+      if (!password) {
+        password = await this.#promptPassword();
+      }
+
+      if (!password) {
+        throw new Error('Password required. Use --password, store in keyring, or run interactively.');
+      }
+
+      console.log(`[launcher] Connecting to ${server}...`);
+
+      if (this.#config.registrationToken) {
+        this.#client = await WasmMatrixClient.register(
+          server, username, password, this.#config.registrationToken,
+        );
+      } else {
+        this.#client = await WasmMatrixClient.login(server, username, password);
+      }
+
+      console.log(`[launcher] Logged in as ${this.#client.userId()} (device: ${this.#client.deviceId()})`);
+
+      // ── 3. Bootstrap cross-signing (first login) ────────────────
+      try {
+        console.log('[launcher] Bootstrapping cross-signing...');
+        await this.#client.bootstrapCrossSigningIfNeeded(password);
+        console.log('[launcher] Cross-signing ready');
+      } catch (err) {
+        console.warn(`[launcher] Cross-signing bootstrap failed (non-fatal): ${err}`);
+      }
+
+      // ── 4. Store password and session in keyring ────────────────
+      await this.#credentialStore.savePassword(username, server, password);
+
+      const sessionData = this.#client.exportSession();
+      await this.#credentialStore.saveSession(
+        username, server, JSON.parse(sessionData),
+      );
+      console.log('[launcher] Credentials stored in keyring');
+
+      // ── 5. Remove password from config file if present ──────────
+      if (this.#config.password) {
+        this.#config.password = undefined;
+        this.#config._password = undefined;
+        if (this.#config.configPath) {
+          try {
+            this.#config.save(this.#config.configPath);
+            console.log('[launcher] Password removed from config file (now in keyring)');
+          } catch {
+            // Non-fatal: config may be read-only
+          }
+        }
+      }
+    }
+
+    // ── 6. Set up rooms ───────────────────────────────────────────
+    console.log(`[launcher] Setting up rooms for ${username}...`);
+    this.#topology = await this.#client.getOrCreateLauncherSpace(username);
     console.log(`[launcher] Rooms ready:`, {
       space: this.#topology.space_id,
       exec: this.#topology.exec_room_id,
@@ -98,6 +149,20 @@ export class LauncherRuntime {
 
   get client() {
     return this.#client;
+  }
+
+  async #promptPassword() {
+    // Only prompt if stdin is a TTY
+    if (!process.stdin.isTTY) return null;
+
+    const { createInterface } = await import('node:readline/promises');
+    const rl = createInterface({ input: process.stdin, output: process.stderr });
+    try {
+      const password = await rl.question('[launcher] Password: ');
+      return password || null;
+    } finally {
+      rl.close();
+    }
   }
 
   async #syncLoop() {

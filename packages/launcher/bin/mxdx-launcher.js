@@ -16,7 +16,7 @@ program
   .option('--config <path>', 'Config file path')
   .option('--telemetry <full|summary>', 'Telemetry detail level', 'full')
   .option('--max-sessions <n>', 'Max concurrent sessions', '5')
-  .option('--password <pass>', 'Password (for automated registration)')
+  .option('--password <pass>', 'Password (first run only — stored in keyring)')
   .parse();
 
 const opts = program.opts();
@@ -42,12 +42,9 @@ async function main() {
     console.log(`[launcher] Config saved to ${configPath}`);
   }
 
-  // Password from CLI args or onboarding
+  // Password from CLI args or onboarding (will be migrated to keyring on first login)
   config.password = opts.password || config._password;
-  if (!config.password) {
-    console.error('[launcher] Password required. Use --password or run interactive onboarding.');
-    process.exit(1);
-  }
+  config.configPath = configPath;
 
   // Registration token from CLI
   if (opts.registrationToken) {
