@@ -4,5 +4,11 @@
   "private": true,
   "main": "index.js",
   "type": "module",
-  "files": ["wasm/", "index.js"]
+  "files": [
+    "wasm/",
+    "index.js"
+  ],
+  "dependencies": {
+    "fake-indexeddb": "^6.2.5"
+  }
 }

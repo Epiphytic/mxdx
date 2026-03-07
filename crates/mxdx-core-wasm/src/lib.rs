@@ -206,8 +206,8 @@ impl WasmMatrixClient {
         let space = self.client.create_room(space_request).await.map_err(to_js_err)?;
         let space_id = space.room_id().to_string();
 
-        // Create exec room (unencrypted for now — E2EE requires IndexedDB polyfill in Node.js)
-        let exec_room_id = self.create_named_room(
+        // Create exec room (encrypted)
+        let exec_room_id = self.create_named_encrypted_room(
             &format!("mxdx: {launcher_id} — exec"),
             &format!("org.mxdx.launcher.exec:{launcher_id}"),
         ).await?;
