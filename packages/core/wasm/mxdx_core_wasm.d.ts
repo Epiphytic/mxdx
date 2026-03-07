@@ -59,8 +59,8 @@ export class WasmMatrixClient {
      */
     collectRoomEvents(room_id: string, timeout_secs: number): Promise<string>;
     /**
-     * Create a launcher space with exec, status, and logs child rooms.
-     * Returns JSON: { space_id, exec_room_id, status_room_id, logs_room_id }
+     * Create a launcher space with exec and logs child rooms (both E2EE + MSC4362).
+     * Returns JSON: { space_id, exec_room_id, logs_room_id }
      */
     createLauncherSpace(launcher_id: string): Promise<any>;
     /**

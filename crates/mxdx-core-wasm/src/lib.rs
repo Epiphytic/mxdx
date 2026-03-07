@@ -38,7 +38,6 @@ pub fn sdk_version() -> String {
 pub struct LauncherTopology {
     pub space_id: String,
     pub exec_room_id: String,
-    pub status_room_id: String,
     pub logs_room_id: String,
 }
 
@@ -358,8 +357,8 @@ impl WasmMatrixClient {
         Ok(identity.map(|i| i.is_verified()).unwrap_or(false))
     }
 
-    /// Create a launcher space with exec, status, and logs child rooms.
-    /// Returns JSON: { space_id, exec_room_id, status_room_id, logs_room_id }
+    /// Create a launcher space with exec and logs child rooms (both E2EE + MSC4362).
+    /// Returns JSON: { space_id, exec_room_id, logs_room_id }
     #[wasm_bindgen(js_name = "createLauncherSpace")]
     pub async fn create_launcher_space(&self, launcher_id: &str) -> Result<JsValue, JsValue> {
         let server_name = self.client.user_id()
@@ -387,27 +386,21 @@ impl WasmMatrixClient {
         let space = self.client.create_room(space_request).await.map_err(to_js_err)?;
         let space_id = space.room_id().to_string();
 
-        // Create exec room (encrypted)
+        // Create exec room (E2EE + MSC4362)
         let exec_room_id = self.create_named_encrypted_room(
             &format!("mxdx: {launcher_id} — exec"),
             &format!("org.mxdx.launcher.exec:{launcher_id}"),
         ).await?;
 
-        // Create status room (unencrypted)
-        let status_room_id = self.create_named_room(
-            &format!("mxdx: {launcher_id} — status"),
-            &format!("org.mxdx.launcher.status:{launcher_id}"),
-        ).await?;
-
-        // Create logs room (unencrypted)
-        let logs_room_id = self.create_named_room(
+        // Create logs room (E2EE + MSC4362)
+        let logs_room_id = self.create_named_encrypted_room(
             &format!("mxdx: {launcher_id} — logs"),
             &format!("org.mxdx.launcher.logs:{launcher_id}"),
         ).await?;
 
         // Link child rooms to space
         let via = serde_json::json!({ "via": [server_name] });
-        for child_id in [&exec_room_id, &status_room_id, &logs_room_id] {
+        for child_id in [&exec_room_id, &logs_room_id] {
             let room = self.client.get_room(space.room_id())
                 .ok_or_else(|| to_js_err("Space room not found"))?;
             room.send_state_event_raw("m.space.child", child_id, via.clone())
@@ -418,7 +411,6 @@ impl WasmMatrixClient {
         let topology = LauncherTopology {
             space_id,
             exec_room_id,
-            status_room_id,
             logs_room_id,
         };
         serde_wasm_bindgen::to_value(&topology).map_err(to_js_err)
@@ -432,12 +424,10 @@ impl WasmMatrixClient {
 
         let expected_space = format!("org.mxdx.launcher.space:{launcher_id}");
         let expected_exec = format!("org.mxdx.launcher.exec:{launcher_id}");
-        let expected_status = format!("org.mxdx.launcher.status:{launcher_id}");
         let expected_logs = format!("org.mxdx.launcher.logs:{launcher_id}");
 
         let mut space_id = None;
         let mut exec_room_id = None;
-        let mut status_room_id = None;
         let mut logs_room_id = None;
 
         for room in self.client.joined_rooms() {
@@ -448,19 +438,16 @@ impl WasmMatrixClient {
                 space_id = Some(rid);
             } else if topic == expected_exec {
                 exec_room_id = Some(rid);
-            } else if topic == expected_status {
-                status_room_id = Some(rid);
             } else if topic == expected_logs {
                 logs_room_id = Some(rid);
             }
         }
 
-        match (space_id, exec_room_id, status_room_id, logs_room_id) {
-            (Some(s), Some(e), Some(st), Some(l)) => {
+        match (space_id, exec_room_id, logs_room_id) {
+            (Some(s), Some(e), Some(l)) => {
                 let topology = LauncherTopology {
                     space_id: s,
                     exec_room_id: e,
-                    status_room_id: st,
                     logs_room_id: l,
                 };
                 serde_wasm_bindgen::to_value(&topology).map_err(to_js_err)
@@ -555,7 +542,7 @@ impl WasmMatrixClient {
     async fn create_named_encrypted_room(&self, name: &str, topic: &str) -> Result<String, JsValue> {
         let encryption_event = InitialStateEvent::new(
             EmptyStateKey,
-            RoomEncryptionEventContent::with_recommended_defaults(),
+            RoomEncryptionEventContent::with_recommended_defaults().with_encrypted_state(),
         );
         let topic_event = InitialStateEvent::new(
             EmptyStateKey,
@@ -565,20 +552,6 @@ impl WasmMatrixClient {
         let mut request = CreateRoomRequest::new();
         request.name = Some(name.to_string());
         request.initial_state = vec![encryption_event.to_raw_any(), topic_event.to_raw_any()];
-
-        let response = self.client.create_room(request).await.map_err(to_js_err)?;
-        Ok(response.room_id().to_string())
-    }
-
-    async fn create_named_room(&self, name: &str, topic: &str) -> Result<String, JsValue> {
-        let topic_event = InitialStateEvent::new(
-            EmptyStateKey,
-            RoomTopicEventContent::new(topic.to_string()),
-        );
-
-        let mut request = CreateRoomRequest::new();
-        request.name = Some(name.to_string());
-        request.initial_state = vec![topic_event.to_raw_any()];
 
         let response = self.client.create_room(request).await.map_err(to_js_err)?;
         Ok(response.room_id().to_string())

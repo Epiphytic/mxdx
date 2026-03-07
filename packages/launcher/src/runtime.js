@@ -56,7 +56,6 @@ export class LauncherRuntime {
         for (const roomId of [
           this.#topology.space_id,
           this.#topology.exec_room_id,
-          this.#topology.status_room_id,
           this.#topology.logs_room_id,
         ]) {
           try {
@@ -219,7 +218,7 @@ export class LauncherRuntime {
     };
 
     await this.#client.sendStateEvent(
-      this.#topology.status_room_id,
+      this.#topology.exec_room_id,
       'org.mxdx.host_telemetry',
       '',
       JSON.stringify(telemetry),

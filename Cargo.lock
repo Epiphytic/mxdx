@@ -2444,6 +2444,7 @@ dependencies = [
  "getrandom 0.3.4",
  "js-sys",
  "matrix-sdk",
+ "matrix-sdk-base",
  "mxdx-types",
  "reqwest",
  "serde",
