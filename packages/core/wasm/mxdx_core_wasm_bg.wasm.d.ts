@@ -3,9 +3,15 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_wasmmatrixclient_free: (a: number, b: number) => void;
 export const sdk_version: () => [number, number];
+export const wasmmatrixclient_collectRoomEvents: (a: number, b: number, c: number, d: number) => any;
+export const wasmmatrixclient_createLauncherSpace: (a: number, b: number, c: number) => any;
+export const wasmmatrixclient_findLauncherSpace: (a: number, b: number, c: number) => any;
+export const wasmmatrixclient_getOrCreateLauncherSpace: (a: number, b: number, c: number) => any;
 export const wasmmatrixclient_isLoggedIn: (a: number) => number;
 export const wasmmatrixclient_login: (a: number, b: number, c: number, d: number, e: number, f: number) => any;
 export const wasmmatrixclient_register: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => any;
+export const wasmmatrixclient_sendEvent: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => any;
+export const wasmmatrixclient_sendStateEvent: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number) => any;
 export const wasmmatrixclient_syncOnce: (a: number) => any;
 export const wasmmatrixclient_userId: (a: number) => [number, number];
 export const init: () => void;

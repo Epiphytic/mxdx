@@ -56,7 +56,53 @@ class WasmMatrixClient {
         wasm.__wbg_wasmmatrixclient_free(ptr, 0);
     }
     /**
-     * Check if logged in.
+     * Sync and collect events from a room. Returns JSON array of events.
+     * @param {string} room_id
+     * @param {number} timeout_secs
+     * @returns {Promise<any>}
+     */
+    collectRoomEvents(room_id, timeout_secs) {
+        const ptr0 = passStringToWasm0(room_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmatrixclient_collectRoomEvents(this.__wbg_ptr, ptr0, len0, timeout_secs);
+        return ret;
+    }
+    /**
+     * Create a launcher space with exec, status, and logs child rooms.
+     * Returns JSON: { space_id, exec_room_id, status_room_id, logs_room_id }
+     * @param {string} launcher_id
+     * @returns {Promise<any>}
+     */
+    createLauncherSpace(launcher_id) {
+        const ptr0 = passStringToWasm0(launcher_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmatrixclient_createLauncherSpace(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
+     * Find an existing launcher space by scanning joined rooms for matching topics.
+     * Returns JSON topology or null.
+     * @param {string} launcher_id
+     * @returns {Promise<any>}
+     */
+    findLauncherSpace(launcher_id) {
+        const ptr0 = passStringToWasm0(launcher_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmatrixclient_findLauncherSpace(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
+     * Find or create a launcher space (idempotent).
+     * @param {string} launcher_id
+     * @returns {Promise<any>}
+     */
+    getOrCreateLauncherSpace(launcher_id) {
+        const ptr0 = passStringToWasm0(launcher_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmatrixclient_getOrCreateLauncherSpace(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
      * @returns {boolean}
      */
     isLoggedIn() {
@@ -64,7 +110,7 @@ class WasmMatrixClient {
         return ret !== 0;
     }
     /**
-     * Login to a Matrix server. server_name can be "matrix.org" or a full URL.
+     * Login to a Matrix server.
      * @param {string} server_name
      * @param {string} username
      * @param {string} password
@@ -101,7 +147,43 @@ class WasmMatrixClient {
         return ret;
     }
     /**
-     * Perform a single sync cycle.
+     * Send a custom event to a room.
+     * @param {string} room_id
+     * @param {string} event_type
+     * @param {string} content_json
+     * @returns {Promise<void>}
+     */
+    sendEvent(room_id, event_type, content_json) {
+        const ptr0 = passStringToWasm0(room_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(event_type, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(content_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmatrixclient_sendEvent(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2);
+        return ret;
+    }
+    /**
+     * Send a state event to a room.
+     * @param {string} room_id
+     * @param {string} event_type
+     * @param {string} state_key
+     * @param {string} content_json
+     * @returns {Promise<void>}
+     */
+    sendStateEvent(room_id, event_type, state_key, content_json) {
+        const ptr0 = passStringToWasm0(room_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(event_type, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(state_key, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(content_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmatrixclient_sendStateEvent(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        return ret;
+    }
+    /**
      * @returns {Promise<void>}
      */
     syncOnce() {
@@ -109,7 +191,6 @@ class WasmMatrixClient {
         return ret;
     }
     /**
-     * Get the user ID.
      * @returns {string | undefined}
      */
     userId() {
@@ -644,6 +725,10 @@ function __wbg_get_imports() {
             const ret = new Error();
             return ret;
         },
+        __wbg_new_49d5571bd3f0c4d4: function() {
+            const ret = new Map();
+            return ret;
+        },
         __wbg_new_5f486cdf45a04d78: function(arg0) {
             const ret = new Uint8Array(arg0);
             return ret;
@@ -825,6 +910,10 @@ function __wbg_get_imports() {
         __wbg_set_6be42768c690e380: function(arg0, arg1, arg2) {
             arg0[arg1] = arg2;
         },
+        __wbg_set_bf7251625df30a02: function(arg0, arg1, arg2) {
+            const ret = arg0.set(arg1, arg2);
+            return ret;
+        },
         __wbg_set_body_a3d856b097dfda04: function(arg0, arg1) {
             arg0.body = arg1;
         },
@@ -978,32 +1067,32 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 4103, function: Function { arguments: [NamedExternref("IDBVersionChangeEvent")], shim_idx: 4104, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 4166, function: Function { arguments: [NamedExternref("IDBVersionChangeEvent")], shim_idx: 4167, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h1b2e119846aa4fe7, wasm_bindgen__convert__closures_____invoke__h80378f27fd9cd579);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 4216, function: Function { arguments: [NamedExternref("Event")], shim_idx: 4219, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 4279, function: Function { arguments: [NamedExternref("Event")], shim_idx: 4282, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h013a009d16441bb5, wasm_bindgen__convert__closures_____invoke__h2bd87d565c60dbe8);
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 4216, function: Function { arguments: [], shim_idx: 4217, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 4279, function: Function { arguments: [], shim_idx: 4280, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h013a009d16441bb5, wasm_bindgen__convert__closures_____invoke__h2383b4061152a312);
             return ret;
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 4309, function: Function { arguments: [], shim_idx: 4310, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 4373, function: Function { arguments: [], shim_idx: 4374, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h4f196889b42287cd, wasm_bindgen__convert__closures_____invoke__ha0d8a027dc714569);
             return ret;
         },
         __wbindgen_cast_0000000000000005: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 6931, function: Function { arguments: [Externref], shim_idx: 6932, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 6995, function: Function { arguments: [Externref], shim_idx: 6996, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h4aa1861517c36be3, wasm_bindgen__convert__closures_____invoke__h31c84a9d43650e37);
             return ret;
         },
         __wbindgen_cast_0000000000000006: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 6942, function: Function { arguments: [], shim_idx: 6943, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 7006, function: Function { arguments: [], shim_idx: 7007, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h11160d558792d42b, wasm_bindgen__convert__closures_____invoke__h3987d9dd2704c835);
             return ret;
         },

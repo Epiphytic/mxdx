@@ -41,11 +41,26 @@ export class WasmMatrixClient {
     free(): void;
     [Symbol.dispose](): void;
     /**
-     * Check if logged in.
+     * Sync and collect events from a room. Returns JSON array of events.
      */
+    collectRoomEvents(room_id: string, timeout_secs: number): Promise<any>;
+    /**
+     * Create a launcher space with exec, status, and logs child rooms.
+     * Returns JSON: { space_id, exec_room_id, status_room_id, logs_room_id }
+     */
+    createLauncherSpace(launcher_id: string): Promise<any>;
+    /**
+     * Find an existing launcher space by scanning joined rooms for matching topics.
+     * Returns JSON topology or null.
+     */
+    findLauncherSpace(launcher_id: string): Promise<any>;
+    /**
+     * Find or create a launcher space (idempotent).
+     */
+    getOrCreateLauncherSpace(launcher_id: string): Promise<any>;
     isLoggedIn(): boolean;
     /**
-     * Login to a Matrix server. server_name can be "matrix.org" or a full URL.
+     * Login to a Matrix server.
      */
     static login(server_name: string, username: string, password: string): Promise<WasmMatrixClient>;
     /**
@@ -53,12 +68,14 @@ export class WasmMatrixClient {
      */
     static register(homeserver_url: string, username: string, password: string, registration_token: string): Promise<WasmMatrixClient>;
     /**
-     * Perform a single sync cycle.
+     * Send a custom event to a room.
      */
-    syncOnce(): Promise<void>;
+    sendEvent(room_id: string, event_type: string, content_json: string): Promise<void>;
     /**
-     * Get the user ID.
+     * Send a state event to a room.
      */
+    sendStateEvent(room_id: string, event_type: string, state_key: string, content_json: string): Promise<void>;
+    syncOnce(): Promise<void>;
     userId(): string | undefined;
 }
 
