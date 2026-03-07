@@ -16,6 +16,8 @@ js-sys = "0.3"
 web-sys = "0.3"
 console_error_panic_hook = "0.1"
 
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
 matrix-sdk = { version = "0.16", default-features = false, features = ["e2e-encryption", "js", "indexeddb", "rustls-tls"] }
 
 mxdx-types = { path = "../mxdx-types" }
