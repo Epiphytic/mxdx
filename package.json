@@ -4,6 +4,7 @@
     "packages/core",
     "packages/launcher",
     "packages/client",
+    "packages/web-console",
     "packages/e2e-tests"
   ]
 }

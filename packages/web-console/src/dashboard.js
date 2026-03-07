@@ -1,0 +1,161 @@
+import { runExecCommand } from './exec-view.js';
+
+let refreshTimer = null;
+
+/**
+ * Set up the dashboard view.
+ * @param {object} client - WasmMatrixClient
+ * @param {object} callbacks
+ * @param {function} callbacks.onOpenTerminal - Called with launcher info
+ */
+export function setupDashboard(client, { onOpenTerminal }) {
+  if (refreshTimer) {
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+
+  render(client, onOpenTerminal);
+
+  // Auto-refresh every 10s
+  refreshTimer = setInterval(() => {
+    render(client, onOpenTerminal);
+  }, 10000);
+}
+
+async function render(client, onOpenTerminal) {
+  const dashboard = document.getElementById('dashboard');
+  dashboard.replaceChildren();
+
+  try {
+    await client.syncOnce();
+    const launchersJson = await client.listLauncherSpaces();
+    const launchers = JSON.parse(launchersJson);
+
+    if (launchers.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'no-launchers';
+      const p1 = document.createElement('p');
+      p1.textContent = 'No launchers discovered.';
+      const p2 = document.createElement('p');
+      p2.textContent = 'Start a launcher and it will appear here.';
+      empty.append(p1, p2);
+      dashboard.appendChild(empty);
+      return;
+    }
+
+    // Fetch telemetry for each launcher
+    const launcherData = [];
+    for (const launcher of launchers) {
+      let telemetry = null;
+      try {
+        const eventsJson = await client.collectRoomEvents(launcher.exec_room_id, 2);
+        const events = JSON.parse(eventsJson);
+        const telemetryEvent = events.find(e => e.type === 'org.mxdx.host_telemetry');
+        if (telemetryEvent) {
+          telemetry = telemetryEvent.content;
+        }
+      } catch {
+        // Telemetry not available
+      }
+      launcherData.push({ ...launcher, telemetry });
+    }
+
+    const grid = document.createElement('div');
+    grid.className = 'launcher-grid';
+
+    for (const launcher of launcherData) {
+      grid.appendChild(renderCard(launcher, client, onOpenTerminal));
+    }
+
+    dashboard.appendChild(grid);
+  } catch (err) {
+    const errDiv = document.createElement('div');
+    errDiv.className = 'no-launchers';
+    const p = document.createElement('p');
+    p.textContent = `Error loading launchers: ${err}`;
+    errDiv.appendChild(p);
+    dashboard.appendChild(errDiv);
+  }
+}
+
+function renderCard(launcher, client, onOpenTerminal) {
+  const card = document.createElement('div');
+  card.className = 'launcher-card';
+
+  const title = document.createElement('h3');
+  title.textContent = launcher.launcher_id;
+  card.appendChild(title);
+
+  // Telemetry
+  const telDiv = document.createElement('div');
+  telDiv.className = 'telemetry';
+  const t = launcher.telemetry;
+  if (t) {
+    appendTelemetryLine(telDiv, 'Hostname', t.hostname || 'unknown');
+    appendTelemetryLine(telDiv, 'Platform', `${t.platform || '?'} (${t.arch || '?'})`);
+    if (t.cpus != null) appendTelemetryLine(telDiv, 'CPUs', String(t.cpus));
+    if (t.total_memory_mb != null) appendTelemetryLine(telDiv, 'Memory', `${t.free_memory_mb || '?'}MB free / ${t.total_memory_mb}MB total`);
+    if (t.uptime_secs != null) appendTelemetryLine(telDiv, 'Uptime', `${Math.floor(t.uptime_secs / 3600)}h`);
+  } else {
+    telDiv.textContent = 'No telemetry data';
+  }
+  card.appendChild(telDiv);
+
+  // Actions
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+
+  const termBtn = document.createElement('button');
+  termBtn.className = 'btn btn-primary';
+  termBtn.textContent = 'Open Terminal';
+  termBtn.addEventListener('click', () => {
+    if (refreshTimer) {
+      clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+    onOpenTerminal(launcher);
+  });
+  actions.appendChild(termBtn);
+  card.appendChild(actions);
+
+  // Exec input
+  const execForm = document.createElement('form');
+  execForm.className = 'exec-input';
+
+  const execInput = document.createElement('input');
+  execInput.type = 'text';
+  execInput.placeholder = 'Run command...';
+  execForm.appendChild(execInput);
+
+  const runBtn = document.createElement('button');
+  runBtn.type = 'submit';
+  runBtn.className = 'btn';
+  runBtn.textContent = 'Run';
+  execForm.appendChild(runBtn);
+
+  // Exec output panel
+  const execOutput = document.createElement('div');
+  execOutput.className = 'exec-panel';
+  execOutput.hidden = true;
+
+  execForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const cmd = execInput.value.trim();
+    if (cmd) {
+      runExecCommand(client, launcher, cmd, execOutput);
+      execInput.value = '';
+    }
+  });
+
+  card.appendChild(execForm);
+  card.appendChild(execOutput);
+
+  return card;
+}
+
+function appendTelemetryLine(container, label, value) {
+  const labelSpan = document.createTextNode(`${label}: `);
+  const valueSpan = document.createElement('span');
+  valueSpan.textContent = value;
+  container.append(labelSpan, valueSpan, document.createElement('br'));
+}
