@@ -20,6 +20,7 @@ pub struct MatrixClient {
     client: Client,
     _store_dir: tempfile::TempDir,
     room_creation_delay: Option<Duration>,
+    room_creation_timeout: Duration,
 }
 
 impl MatrixClient {
@@ -66,6 +67,7 @@ impl MatrixClient {
             client,
             _store_dir: store_dir,
             room_creation_delay: None,
+            room_creation_timeout: Duration::from_secs(30),
         })
     }
 
@@ -134,6 +136,7 @@ impl MatrixClient {
             client,
             _store_dir: store_dir,
             room_creation_delay: None,
+            room_creation_timeout: Duration::from_secs(30),
         })
     }
 
@@ -336,6 +339,12 @@ impl MatrixClient {
         self.room_creation_delay
     }
 
+    /// Set the timeout for room creation (default: 30s).
+    /// Public servers with aggressive rate limiting may need 120s+.
+    pub fn set_room_creation_timeout(&mut self, timeout: Duration) {
+        self.room_creation_timeout = timeout;
+    }
+
     /// Get access to the inner matrix-sdk Client (escape hatch for advanced use).
     pub fn inner(&self) -> &Client {
         &self.client
@@ -349,14 +358,15 @@ impl MatrixClient {
         request: CreateRoomRequest,
     ) -> Result<matrix_sdk::room::Room> {
         match tokio::time::timeout(
-            Duration::from_secs(30),
+            self.room_creation_timeout,
             self.client.create_room(request),
         )
         .await
         {
             Ok(result) => Ok(result?),
             Err(_) => Err(MatrixClientError::RoomCreationTimeout(
-                "Room creation timed out after 30s — server may be rate-limiting".into(),
+                format!("Room creation timed out after {}s — server may be rate-limiting",
+                    self.room_creation_timeout.as_secs()),
             )),
         }
     }

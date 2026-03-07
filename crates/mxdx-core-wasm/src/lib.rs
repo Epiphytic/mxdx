@@ -3,7 +3,10 @@ use matrix_sdk::{
     config::SyncSettings,
     room::MessagesOptions,
     ruma::{
-        api::client::room::create_room::v3::{CreationContent, Request as CreateRoomRequest},
+        api::client::{
+            room::create_room::v3::{CreationContent, Request as CreateRoomRequest},
+            uiaa,
+        },
         events::{
             room::{
                 encryption::RoomEncryptionEventContent,
@@ -175,6 +178,139 @@ impl WasmMatrixClient {
     #[wasm_bindgen(js_name = "invitedRoomIds")]
     pub fn invited_room_ids(&self) -> Vec<String> {
         self.client.invited_rooms().iter().map(|r| r.room_id().to_string()).collect()
+    }
+
+    /// Export the current session as JSON for persistence.
+    /// Returns JSON: { user_id, device_id, access_token, homeserver_url }
+    /// Store this in the OS keyring — never write it to a config file.
+    #[wasm_bindgen(js_name = "exportSession")]
+    pub fn export_session(&self) -> Result<String, JsValue> {
+        let session = self.client.matrix_auth().session()
+            .ok_or_else(|| to_js_err("No active session to export"))?;
+
+        let data = serde_json::json!({
+            "user_id": session.meta.user_id.to_string(),
+            "device_id": session.meta.device_id.to_string(),
+            "access_token": session.tokens.access_token,
+            "homeserver_url": self.client.homeserver().to_string(),
+        });
+        serde_json::to_string(&data).map_err(to_js_err)
+    }
+
+    /// Restore a previously exported session without logging in again.
+    /// Reuses the same device_id, avoiding rate limits and preserving cross-signing.
+    /// The session_json should be the output of exportSession().
+    #[wasm_bindgen(js_name = "restoreSession")]
+    pub async fn restore_session(session_json: &str) -> Result<WasmMatrixClient, JsValue> {
+        let parsed: serde_json::Value = serde_json::from_str(session_json).map_err(to_js_err)?;
+
+        let homeserver_url = parsed["homeserver_url"].as_str()
+            .ok_or_else(|| to_js_err("Missing homeserver_url in session data"))?;
+        let user_id = parsed["user_id"].as_str()
+            .ok_or_else(|| to_js_err("Missing user_id in session data"))?;
+        let device_id = parsed["device_id"].as_str()
+            .ok_or_else(|| to_js_err("Missing device_id in session data"))?;
+        let access_token = parsed["access_token"].as_str()
+            .ok_or_else(|| to_js_err("Missing access_token in session data"))?;
+
+        let client = Client::builder()
+            .homeserver_url(homeserver_url)
+            .build()
+            .await
+            .map_err(to_js_err)?;
+
+        let session = matrix_sdk::authentication::matrix::MatrixSession {
+            meta: matrix_sdk::SessionMeta {
+                user_id: user_id.try_into().map_err(to_js_err)?,
+                device_id: device_id.into(),
+            },
+            tokens: matrix_sdk::authentication::SessionTokens {
+                access_token: access_token.to_string(),
+                refresh_token: None,
+            },
+        };
+
+        client.restore_session(session).await.map_err(to_js_err)?;
+
+        // Sync to re-establish crypto state
+        client
+            .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
+            .await
+            .map_err(to_js_err)?;
+
+        Ok(WasmMatrixClient { client })
+    }
+
+    /// Bootstrap cross-signing for this device.
+    /// Makes this device self-verified and establishes the user's signing keys.
+    /// Tries without UIA first (grace period after login), falls back to password auth.
+    #[wasm_bindgen(js_name = "bootstrapCrossSigning")]
+    pub async fn bootstrap_cross_signing(&self, password: &str) -> Result<(), JsValue> {
+        let encryption = self.client.encryption();
+
+        // Try without auth first (UIA grace period right after login)
+        match encryption.bootstrap_cross_signing(None).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                // Check if it's a UIA challenge — if so, retry with password
+                if e.as_uiaa_response().is_none() {
+                    return Err(to_js_err(format!("Cross-signing bootstrap failed: {e}")));
+                }
+            }
+        }
+
+        // Server requires UIA — retry with password auth
+        let user_id = self.client.user_id()
+            .ok_or_else(|| to_js_err("Not logged in"))?;
+
+        let password_auth = uiaa::Password::new(
+            uiaa::UserIdentifier::UserIdOrLocalpart(user_id.localpart().to_owned()),
+            password.to_owned(),
+        );
+
+        encryption
+            .bootstrap_cross_signing(Some(uiaa::AuthData::Password(password_auth)))
+            .await
+            .map_err(|e| to_js_err(format!("Cross-signing bootstrap with password failed: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Bootstrap cross-signing only if not already set up.
+    /// No-op if cross-signing keys already exist for this user.
+    #[wasm_bindgen(js_name = "bootstrapCrossSigningIfNeeded")]
+    pub async fn bootstrap_cross_signing_if_needed(&self, password: &str) -> Result<(), JsValue> {
+        let encryption = self.client.encryption();
+
+        match encryption.bootstrap_cross_signing_if_needed(None).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if e.as_uiaa_response().is_none() {
+                    return Err(to_js_err(format!("Cross-signing bootstrap failed: {e}")));
+                }
+            }
+        }
+
+        let user_id = self.client.user_id()
+            .ok_or_else(|| to_js_err("Not logged in"))?;
+
+        let password_auth = uiaa::Password::new(
+            uiaa::UserIdentifier::UserIdOrLocalpart(user_id.localpart().to_owned()),
+            password.to_owned(),
+        );
+
+        encryption
+            .bootstrap_cross_signing_if_needed(Some(uiaa::AuthData::Password(password_auth)))
+            .await
+            .map_err(|e| to_js_err(format!("Cross-signing bootstrap with password failed: {e}")))?;
+
+        Ok(())
+    }
+
+    /// Get the device ID of the current session.
+    #[wasm_bindgen(js_name = "deviceId")]
+    pub fn device_id(&self) -> Option<String> {
+        self.client.device_id().map(|d| d.to_string())
     }
 
     /// Create a launcher space with exec, status, and logs child rooms.

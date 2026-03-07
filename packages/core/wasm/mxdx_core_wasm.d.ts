@@ -41,6 +41,17 @@ export class WasmMatrixClient {
     free(): void;
     [Symbol.dispose](): void;
     /**
+     * Bootstrap cross-signing for this device.
+     * Makes this device self-verified and establishes the user's signing keys.
+     * Tries without UIA first (grace period after login), falls back to password auth.
+     */
+    bootstrapCrossSigning(password: string): Promise<void>;
+    /**
+     * Bootstrap cross-signing only if not already set up.
+     * No-op if cross-signing keys already exist for this user.
+     */
+    bootstrapCrossSigningIfNeeded(password: string): Promise<void>;
+    /**
      * Sync and collect events from a room. Returns JSON string of event array.
      */
     collectRoomEvents(room_id: string, timeout_secs: number): Promise<string>;
@@ -49,6 +60,16 @@ export class WasmMatrixClient {
      * Returns JSON: { space_id, exec_room_id, status_room_id, logs_room_id }
      */
     createLauncherSpace(launcher_id: string): Promise<any>;
+    /**
+     * Get the device ID of the current session.
+     */
+    deviceId(): string | undefined;
+    /**
+     * Export the current session as JSON for persistence.
+     * Returns JSON: { user_id, device_id, access_token, homeserver_url }
+     * Store this in the OS keyring — never write it to a config file.
+     */
+    exportSession(): string;
     /**
      * Find an existing launcher space by scanning joined rooms for matching topics.
      * Returns JSON topology or null.
@@ -79,6 +100,12 @@ export class WasmMatrixClient {
      * Register a new user on a homeserver with a registration token.
      */
     static register(homeserver_url: string, username: string, password: string, registration_token: string): Promise<WasmMatrixClient>;
+    /**
+     * Restore a previously exported session without logging in again.
+     * Reuses the same device_id, avoiding rate limits and preserving cross-signing.
+     * The session_json should be the output of exportSession().
+     */
+    static restoreSession(session_json: string): Promise<WasmMatrixClient>;
     /**
      * Send a custom event to a room.
      */

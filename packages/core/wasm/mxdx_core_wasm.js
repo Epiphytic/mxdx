@@ -56,6 +56,31 @@ class WasmMatrixClient {
         wasm.__wbg_wasmmatrixclient_free(ptr, 0);
     }
     /**
+     * Bootstrap cross-signing for this device.
+     * Makes this device self-verified and establishes the user's signing keys.
+     * Tries without UIA first (grace period after login), falls back to password auth.
+     * @param {string} password
+     * @returns {Promise<void>}
+     */
+    bootstrapCrossSigning(password) {
+        const ptr0 = passStringToWasm0(password, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmatrixclient_bootstrapCrossSigning(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
+     * Bootstrap cross-signing only if not already set up.
+     * No-op if cross-signing keys already exist for this user.
+     * @param {string} password
+     * @returns {Promise<void>}
+     */
+    bootstrapCrossSigningIfNeeded(password) {
+        const ptr0 = passStringToWasm0(password, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmatrixclient_bootstrapCrossSigningIfNeeded(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
      * Sync and collect events from a room. Returns JSON string of event array.
      * @param {string} room_id
      * @param {number} timeout_secs
@@ -78,6 +103,43 @@ class WasmMatrixClient {
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.wasmmatrixclient_createLauncherSpace(this.__wbg_ptr, ptr0, len0);
         return ret;
+    }
+    /**
+     * Get the device ID of the current session.
+     * @returns {string | undefined}
+     */
+    deviceId() {
+        const ret = wasm.wasmmatrixclient_deviceId(this.__wbg_ptr);
+        let v1;
+        if (ret[0] !== 0) {
+            v1 = getStringFromWasm0(ret[0], ret[1]).slice();
+            wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        }
+        return v1;
+    }
+    /**
+     * Export the current session as JSON for persistence.
+     * Returns JSON: { user_id, device_id, access_token, homeserver_url }
+     * Store this in the OS keyring — never write it to a config file.
+     * @returns {string}
+     */
+    exportSession() {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            const ret = wasm.wasmmatrixclient_exportSession(this.__wbg_ptr);
+            var ptr1 = ret[0];
+            var len1 = ret[1];
+            if (ret[3]) {
+                ptr1 = 0; len1 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
     }
     /**
      * Find an existing launcher space by scanning joined rooms for matching topics.
@@ -179,6 +241,19 @@ class WasmMatrixClient {
         const ptr3 = passStringToWasm0(registration_token, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len3 = WASM_VECTOR_LEN;
         const ret = wasm.wasmmatrixclient_register(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        return ret;
+    }
+    /**
+     * Restore a previously exported session without logging in again.
+     * Reuses the same device_id, avoiding rate limits and preserving cross-signing.
+     * The session_json should be the output of exportSession().
+     * @param {string} session_json
+     * @returns {Promise<WasmMatrixClient>}
+     */
+    static restoreSession(session_json) {
+        const ptr0 = passStringToWasm0(session_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmatrixclient_restoreSession(ptr0, len0);
         return ret;
     }
     /**
@@ -1094,32 +1169,32 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_cast_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 4398, function: Function { arguments: [NamedExternref("IDBVersionChangeEvent")], shim_idx: 4399, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 4484, function: Function { arguments: [NamedExternref("IDBVersionChangeEvent")], shim_idx: 4485, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h1b2e119846aa4fe7, wasm_bindgen__convert__closures_____invoke__h80378f27fd9cd579);
             return ret;
         },
         __wbindgen_cast_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 4511, function: Function { arguments: [NamedExternref("Event")], shim_idx: 4514, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 4597, function: Function { arguments: [NamedExternref("Event")], shim_idx: 4600, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h013a009d16441bb5, wasm_bindgen__convert__closures_____invoke__h2bd87d565c60dbe8);
             return ret;
         },
         __wbindgen_cast_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 4511, function: Function { arguments: [], shim_idx: 4512, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 4597, function: Function { arguments: [], shim_idx: 4598, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h013a009d16441bb5, wasm_bindgen__convert__closures_____invoke__h2383b4061152a312);
             return ret;
         },
         __wbindgen_cast_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 4604, function: Function { arguments: [], shim_idx: 4605, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 4690, function: Function { arguments: [], shim_idx: 4691, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h4f196889b42287cd, wasm_bindgen__convert__closures_____invoke__ha0d8a027dc714569);
             return ret;
         },
         __wbindgen_cast_0000000000000005: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 7225, function: Function { arguments: [Externref], shim_idx: 7226, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 7311, function: Function { arguments: [Externref], shim_idx: 7312, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h4aa1861517c36be3, wasm_bindgen__convert__closures_____invoke__h31c84a9d43650e37);
             return ret;
         },
         __wbindgen_cast_0000000000000006: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 7236, function: Function { arguments: [], shim_idx: 7237, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 7322, function: Function { arguments: [], shim_idx: 7323, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h11160d558792d42b, wasm_bindgen__convert__closures_____invoke__h3987d9dd2704c835);
             return ret;
         },
