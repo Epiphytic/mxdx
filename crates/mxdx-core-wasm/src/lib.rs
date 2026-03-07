@@ -10,6 +10,7 @@ use matrix_sdk::{
         events::{
             room::{
                 encryption::RoomEncryptionEventContent,
+                history_visibility::{HistoryVisibility, RoomHistoryVisibilityEventContent},
                 topic::RoomTopicEventContent,
             },
             EmptyStateKey, InitialStateEvent,
@@ -577,6 +578,82 @@ impl WasmMatrixClient {
         }
 
         Ok("[]".to_string())
+    }
+
+    /// Create a direct message room with E2EE and history_visibility: joined.
+    /// Used for interactive terminal sessions — only participants who join see messages.
+    #[wasm_bindgen(js_name = "createDmRoom")]
+    pub async fn create_dm_room(&self, user_id: &str) -> Result<String, JsValue> {
+        let uid: OwnedUserId = user_id.try_into()
+            .map_err(|e| to_js_err(format!("Invalid user ID '{user_id}': {e}")))?;
+
+        let encryption_event = InitialStateEvent::new(
+            EmptyStateKey,
+            RoomEncryptionEventContent::with_recommended_defaults(),
+        );
+        let history_event = InitialStateEvent::new(
+            EmptyStateKey,
+            RoomHistoryVisibilityEventContent::new(HistoryVisibility::Joined),
+        );
+
+        let mut request = CreateRoomRequest::new();
+        request.is_direct = true;
+        request.invite = vec![uid];
+        request.initial_state = vec![
+            encryption_event.to_raw_any(),
+            history_event.to_raw_any(),
+        ];
+
+        let response = self.client.create_room(request).await.map_err(to_js_err)?;
+        Ok(response.room_id().to_string())
+    }
+
+    /// Sync and wait for a specific event type in a room.
+    /// Returns event content as JSON string, or "null" if timeout.
+    #[wasm_bindgen(js_name = "onRoomEvent")]
+    pub async fn on_room_event(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        timeout_secs: u32,
+    ) -> Result<String, JsValue> {
+        let rid = <&matrix_sdk::ruma::RoomId>::try_from(room_id).map_err(to_js_err)?;
+        let timeout = Duration::from_secs(timeout_secs as u64);
+        let deadline = web_time::Instant::now() + timeout;
+        let mut seen_event_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // Collect already-seen event IDs on first pass
+        if let Some(room) = self.client.get_room(rid) {
+            if let Ok(messages) = room.messages(MessagesOptions::backward()).await {
+                for event in &messages.chunk {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(event.raw().json().get()) {
+                        if let Some(eid) = json.get("event_id").and_then(|e| e.as_str()) {
+                            seen_event_ids.insert(eid.to_string());
+                        }
+                    }
+                }
+            }
+        }
+
+        while web_time::Instant::now() < deadline {
+            self.sync_once().await?;
+
+            if let Some(room) = self.client.get_room(rid) {
+                let messages = room.messages(MessagesOptions::backward()).await.map_err(to_js_err)?;
+                for event in &messages.chunk {
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(event.raw().json().get()) {
+                        let etype = json.get("type").and_then(|t| t.as_str());
+                        let eid = json.get("event_id").and_then(|e| e.as_str()).unwrap_or("");
+
+                        if etype == Some(event_type) && !seen_event_ids.contains(eid) {
+                            return serde_json::to_string(&json).map_err(to_js_err);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok("null".to_string())
     }
 }
 

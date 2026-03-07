@@ -4,6 +4,7 @@ import { connectWithSession } from '@mxdx/core';
 import { ClientConfig } from '../src/config.js';
 import { findLauncher } from '../src/discovery.js';
 import { execCommand } from '../src/exec.js';
+import { startInteractiveSession } from '../src/interactive.js';
 
 program
   .name('mxdx-client')
@@ -44,6 +45,36 @@ program
     }
 
     process.exit(result.exitCode);
+  });
+
+program
+  .command('shell <launcher> [command]')
+  .description('Start an interactive terminal session on a launcher')
+  .option('--cols <n>', 'Terminal columns (default: current terminal width)')
+  .option('--rows <n>', 'Terminal rows (default: current terminal height)')
+  .action(async (launcher, command, opts) => {
+    const parentOpts = program.opts();
+    const { client } = await connect(parentOpts);
+
+    const topology = await findLauncher(client, launcher);
+    if (!topology) {
+      console.error(`Launcher '${launcher}' not found`);
+      process.exit(1);
+    }
+
+    const log = (msg) => console.error(`[shell] ${msg}`);
+
+    try {
+      await startInteractiveSession(client, topology, {
+        command: command || '/bin/bash',
+        cols: opts.cols ? parseInt(opts.cols, 10) : undefined,
+        rows: opts.rows ? parseInt(opts.rows, 10) : undefined,
+        log,
+      });
+    } catch (err) {
+      console.error(`Shell session failed: ${err.message}`);
+      process.exit(1);
+    }
   });
 
 program

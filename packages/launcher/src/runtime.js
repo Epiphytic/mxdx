@@ -1,5 +1,9 @@
-import { connectWithSession } from '@mxdx/core';
+import { connectWithSession, TerminalDataEvent } from '@mxdx/core';
 import { executeCommand } from './process-bridge.js';
+import { PtyBridge } from './pty-bridge.js';
+import { inflateSync } from 'node:zlib';
+
+const MAX_DECOMPRESSED_SIZE = 1024 * 1024; // 1MB zlib bomb protection
 
 /**
  * Structured logger with JSON and text output modes.
@@ -155,10 +159,19 @@ export class LauncherRuntime {
       this.#processedEvents.add(eventId);
 
       const content = event.content || {};
+      const action = content.action;
       const command = content.command;
       const args = content.args || [];
       const cwd = content.cwd || '/tmp';
       const requestId = content.request_id || eventId;
+      const sender = event.sender;
+
+      // Route interactive sessions
+      if (action === 'interactive') {
+        this.#log.info('Interactive session requested', { request_id: requestId, sender });
+        await this.#handleInteractiveSession(content, requestId, sender);
+        continue;
+      }
 
       this.#log.info(`Received command: ${command} ${args.join(' ')}`, { request_id: requestId });
 
@@ -219,6 +232,182 @@ export class LauncherRuntime {
         this.#activeSessions--;
       }
     }
+  }
+
+  async #handleInteractiveSession(content, requestId, sender) {
+    const command = content.command || '/bin/bash';
+    const cols = content.cols || 80;
+    const rows = content.rows || 24;
+    const cwd = content.cwd || '/tmp';
+    const env = content.env || {};
+
+    // Validate command
+    if (!this.#isCommandAllowed(command)) {
+      this.#log.warn(`Interactive command rejected: ${command}`, { request_id: requestId });
+      await this.#sendSessionResponse(requestId, 'rejected', null);
+      return;
+    }
+
+    // Validate cwd
+    if (!this.#isCwdAllowed(cwd)) {
+      this.#log.warn(`Interactive CWD rejected: ${cwd}`, { request_id: requestId });
+      await this.#sendSessionResponse(requestId, 'rejected', null);
+      return;
+    }
+
+    // Check session limit
+    if (this.#activeSessions >= this.#maxSessions) {
+      this.#log.warn('Session limit reached for interactive', { request_id: requestId });
+      await this.#sendSessionResponse(requestId, 'rejected', null);
+      return;
+    }
+
+    if (!sender) {
+      this.#log.warn('Interactive session missing sender', { request_id: requestId });
+      await this.#sendSessionResponse(requestId, 'rejected', null);
+      return;
+    }
+
+    this.#activeSessions++;
+
+    try {
+      // Create E2EE DM room with history_visibility: joined
+      const dmRoomId = await this.#client.createDmRoom(sender);
+      this.#log.info('Created DM room for interactive session', {
+        request_id: requestId,
+        room_id: dmRoomId,
+        sender,
+      });
+
+      // Respond with DM room ID
+      await this.#sendSessionResponse(requestId, 'started', dmRoomId);
+
+      // Wait for the client to join the DM
+      await new Promise((r) => setTimeout(r, 2000));
+      await this.#client.syncOnce();
+
+      // Spawn PTY bridge
+      const pty = new PtyBridge(command, { cols, rows, cwd, env });
+
+      // Wait for PTY to initialize
+      await new Promise((r) => setTimeout(r, 500));
+
+      // Forward PTY output -> DM room as terminal.data events
+      let sendSeq = 0;
+      pty.onData(async (data) => {
+        const seq = sendSeq++;
+        let encoded;
+        let encoding;
+
+        if (data.length >= 32) {
+          const { deflateSync } = await import('node:zlib');
+          const compressed = deflateSync(Buffer.from(data));
+          encoded = Buffer.from(compressed).toString('base64');
+          encoding = 'zlib+base64';
+        } else {
+          encoded = Buffer.from(data).toString('base64');
+          encoding = 'base64';
+        }
+
+        try {
+          await this.#client.sendEvent(
+            dmRoomId,
+            'org.mxdx.terminal.data',
+            JSON.stringify({ data: encoded, encoding, seq }),
+          );
+        } catch {
+          // Best effort
+        }
+      });
+
+      // Poll for incoming terminal data and resize events from the client
+      const pollForInput = async () => {
+        while (pty.alive) {
+          try {
+            // Check for terminal data
+            const dataEventJson = await this.#client.onRoomEvent(
+              dmRoomId,
+              'org.mxdx.terminal.data',
+              1,
+            );
+            if (dataEventJson && dataEventJson !== 'null') {
+              const dataEvent = JSON.parse(dataEventJson);
+              const eventContent = dataEvent.content || dataEvent;
+              const eventSender = dataEvent.sender;
+
+              // Only process events from the client (not our own output)
+              if (eventSender && eventSender !== this.#client.userId()) {
+                this.#processTerminalInput(eventContent, pty);
+              }
+            }
+
+            // Check for resize events
+            const resizeJson = await this.#client.onRoomEvent(
+              dmRoomId,
+              'org.mxdx.terminal.resize',
+              1,
+            );
+            if (resizeJson && resizeJson !== 'null') {
+              const resizeEvent = JSON.parse(resizeJson);
+              const resizeContent = resizeEvent.content || resizeEvent;
+              const resizeCols = resizeContent.cols;
+              const resizeRows = resizeContent.rows;
+              if (resizeCols && resizeRows) {
+                pty.resize(resizeCols, resizeRows);
+              }
+            }
+          } catch {
+            // Sync error, retry
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+        }
+      };
+
+      // Run input polling (don't await — let it run in background)
+      pollForInput().finally(() => {
+        this.#log.info('Interactive session ended', { request_id: requestId });
+        this.#sendSessionResponse(requestId, 'ended', dmRoomId).catch(() => {});
+        this.#activeSessions--;
+      });
+
+      // Don't decrement activeSessions here — the finally block above handles it
+      return;
+    } catch (err) {
+      this.#log.error('Interactive session failed', { request_id: requestId, error: err.message });
+      await this.#sendSessionResponse(requestId, 'error', null);
+      this.#activeSessions--;
+    }
+  }
+
+  #processTerminalInput(content, pty) {
+    const parsed = TerminalDataEvent.safeParse(content);
+    if (!parsed.success) return;
+
+    const { data, encoding } = parsed.data;
+    const raw = Buffer.from(data, 'base64');
+
+    if (encoding === 'zlib+base64') {
+      try {
+        const decompressed = inflateSync(raw, { maxOutputLength: MAX_DECOMPRESSED_SIZE });
+        pty.write(new Uint8Array(decompressed));
+      } catch {
+        // Decompression failed or exceeded size limit (zlib bomb protection)
+      }
+    } else {
+      pty.write(new Uint8Array(raw));
+    }
+  }
+
+  async #sendSessionResponse(requestId, status, roomId) {
+    await this.#client.sendEvent(
+      this.#topology.exec_room_id,
+      'org.mxdx.terminal.session',
+      JSON.stringify({
+        request_id: requestId,
+        status,
+        room_id: roomId,
+      }),
+    );
   }
 
   #isCommandAllowed(command) {

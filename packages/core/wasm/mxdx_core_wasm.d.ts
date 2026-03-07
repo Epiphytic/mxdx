@@ -59,6 +59,11 @@ export class WasmMatrixClient {
      */
     collectRoomEvents(room_id: string, timeout_secs: number): Promise<string>;
     /**
+     * Create a direct message room with E2EE and history_visibility: joined.
+     * Used for interactive terminal sessions — only participants who join see messages.
+     */
+    createDmRoom(user_id: string): Promise<string>;
+    /**
      * Create a launcher space with exec and logs child rooms (both E2EE + MSC4362).
      * Returns JSON: { space_id, exec_room_id, logs_room_id }
      */
@@ -108,6 +113,11 @@ export class WasmMatrixClient {
      * Login to a Matrix server.
      */
     static login(server_name: string, username: string, password: string): Promise<WasmMatrixClient>;
+    /**
+     * Sync and wait for a specific event type in a room.
+     * Returns event content as JSON string, or "null" if timeout.
+     */
+    onRoomEvent(room_id: string, event_type: string, timeout_secs: number): Promise<string>;
     /**
      * Register a new user on a homeserver with a registration token.
      */
