@@ -156,3 +156,75 @@ jobs:
         with:
           node-version: "22"
       - run: cd client && npm ci && npm test
+
+  npm-e2e:
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Install tuwunel
+        run: |
+          curl -fsSL -o /tmp/tuwunel.deb \
+            "https://github.com/matrix-construct/tuwunel/releases/download/v1.5.0/v1.5.0-release-all-x86_64-v1-linux-gnu-tuwunel.deb"
+          sudo dpkg -i /tmp/tuwunel.deb
+      - name: Build WASM
+        run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm
+      - name: Install npm dependencies
+        run: npm install
+      - name: Run launcher unit tests
+        run: node --test packages/launcher/tests/runtime-unit.test.js
+      - name: Run local E2E tests (onboarding)
+        run: node --test packages/e2e-tests/tests/launcher-onboarding.test.js
+      - name: Run local E2E tests (commands)
+        run: node --test packages/e2e-tests/tests/launcher-commands.test.js
+
+  npm-public-server:
+    needs: preflight
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    env:
+      TEST_SERVER_URL: ${{ secrets.TEST_SERVER_URL }}
+      TEST_ACCOUNT1_USERNAME: ${{ secrets.TEST_ACCOUNT1_USERNAME }}
+      TEST_ACCOUNT1_PASSWORD: ${{ secrets.TEST_ACCOUNT1_PASSWORD }}
+      TEST_ACCOUNT2_USERNAME: ${{ secrets.TEST_ACCOUNT2_USERNAME }}
+      TEST_ACCOUNT2_PASSWORD: ${{ secrets.TEST_ACCOUNT2_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Build WASM
+        run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm
+      - name: Install npm dependencies
+        run: npm install
+      - name: Write test credentials
+        run: |
+          cat > test-credentials.toml <<TOML
+          [server]
+          url = "$TEST_SERVER_URL"
+
+          [account1]
+          username = "$TEST_ACCOUNT1_USERNAME"
+          password = "$TEST_ACCOUNT1_PASSWORD"
+
+          [account2]
+          username = "$TEST_ACCOUNT2_USERNAME"
+          password = "$TEST_ACCOUNT2_PASSWORD"
+          TOML
+      - name: Run public server tests
+        run: node --test packages/e2e-tests/tests/public-server.test.js
