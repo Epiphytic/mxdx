@@ -131,8 +131,10 @@ describe('Public Server: WASM Client', { timeout: 120000 }, () => {
     client.free();
   });
 
-  it('cross-sign both accounts', async () => {
-    // Login both accounts
+  it('verify cross-signing state between accounts', async () => {
+    // Cross-signing must be set up externally (e.g., via Element) for servers
+    // that require OAuth for key uploads (like matrix.org).
+    // This test verifies the state is visible to our WASM clients.
     const client1 = await WasmMatrixClient.login(
       creds.url, creds.account1.username, creds.account1.password,
     );
@@ -142,37 +144,25 @@ describe('Public Server: WASM Client', { timeout: 120000 }, () => {
 
     const userId1 = client1.userId();
     const userId2 = client2.userId();
-    console.log(`[pub] Cross-signing ${userId1} <-> ${userId2}`);
+    console.log(`[pub] Checking cross-signing ${userId1} <-> ${userId2}`);
 
-    // 1. Bootstrap cross-signing for both accounts
+    // Bootstrap if needed (no-op if keys exist) and verify own identity
     await client1.bootstrapCrossSigningIfNeeded(creds.account1.password);
-    console.log(`[pub] Account1 cross-signing bootstrapped`);
     await client2.bootstrapCrossSigningIfNeeded(creds.account2.password);
-    console.log(`[pub] Account2 cross-signing bootstrapped`);
-
-    // 2. Verify own identity on both sides
     await client1.verifyOwnIdentity();
-    console.log(`[pub] Account1 own identity verified`);
     await client2.verifyOwnIdentity();
-    console.log(`[pub] Account2 own identity verified`);
 
-    // 3. Sync so each client sees the other's cross-signing keys
+    // Sync to pull cross-signing signatures from server
     await client1.syncOnce();
     await client2.syncOnce();
 
-    // 4. Each account verifies the other (signs their master key)
-    await client1.verifyUser(userId2);
-    console.log(`[pub] Account1 verified ${userId2}`);
-    await client2.verifyUser(userId1);
-    console.log(`[pub] Account2 verified ${userId1}`);
-
-    // 5. Confirm verification state
+    // Confirm both accounts see each other as verified
     const verified1 = await client1.isUserVerified(userId2);
     const verified2 = await client2.isUserVerified(userId1);
     console.log(`[pub] Account1 sees Account2 verified: ${verified1}`);
     console.log(`[pub] Account2 sees Account1 verified: ${verified2}`);
-    assert.ok(verified1, 'Account1 should see Account2 as verified');
-    assert.ok(verified2, 'Account2 should see Account1 as verified');
+    assert.ok(verified1, 'Account1 should see Account2 as verified (cross-sign via Element first)');
+    assert.ok(verified2, 'Account2 should see Account1 as verified (cross-sign via Element first)');
 
     client1.free();
     client2.free();
@@ -281,10 +271,11 @@ describe('Public Server: WASM Client', { timeout: 120000 }, () => {
 describe('Public Server: Launcher + Client Round-Trip', { timeout: 180000 }, () => {
   let creds;
   let launcherProc;
-  const LAUNCHER_NAME = `pub-launcher-${Date.now()}`;
+  let LAUNCHER_NAME;
 
   before(() => {
     creds = loadCredentials();
+    LAUNCHER_NAME = creds.account2.username;
   });
 
   after(() => {
@@ -308,7 +299,7 @@ describe('Public Server: Launcher + Client Round-Trip', { timeout: 180000 }, () 
     launcherProc = spawn('node', [
       LAUNCHER_BIN,
       '--servers', creds.url,
-      '--username', LAUNCHER_NAME,
+      '--username', creds.account2.username,
       '--password', creds.account2.password,
       '--allowed-commands', 'echo,date,uname',
       '--allowed-cwd', '/tmp',

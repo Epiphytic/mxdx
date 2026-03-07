@@ -243,8 +243,9 @@ impl WasmMatrixClient {
     }
 
     /// Bootstrap cross-signing for this device.
-    /// Makes this device self-verified and establishes the user's signing keys.
-    /// Tries without UIA first (grace period after login), falls back to password auth.
+    /// Generates cross-signing keys and uploads them. Handles the two-step UIA
+    /// flow by capturing the session ID from the 401 response and including it
+    /// in the password auth retry.
     #[wasm_bindgen(js_name = "bootstrapCrossSigning")]
     pub async fn bootstrap_cross_signing(&self, password: &str) -> Result<(), JsValue> {
         let encryption = self.client.encryption();
@@ -253,59 +254,48 @@ impl WasmMatrixClient {
         match encryption.bootstrap_cross_signing(None).await {
             Ok(()) => return Ok(()),
             Err(e) => {
-                // Check if it's a UIA challenge — if so, retry with password
-                if e.as_uiaa_response().is_none() {
-                    return Err(to_js_err(format!("Cross-signing bootstrap failed: {e}")));
-                }
+                let uiaa_info = e.as_uiaa_response()
+                    .ok_or_else(|| to_js_err(format!("Cross-signing bootstrap failed (not UIA): {e}")))?;
+
+                // Extract UIA session from the 401 response
+                let session = uiaa_info.session.clone();
+
+                let user_id = self.client.user_id()
+                    .ok_or_else(|| to_js_err("Not logged in"))?;
+
+                let mut password_auth = uiaa::Password::new(
+                    uiaa::UserIdentifier::UserIdOrLocalpart(user_id.localpart().to_owned()),
+                    password.to_owned(),
+                );
+                password_auth.session = session;
+
+                encryption
+                    .bootstrap_cross_signing(Some(uiaa::AuthData::Password(password_auth)))
+                    .await
+                    .map_err(|e| to_js_err(format!("Cross-signing UIA auth failed: {e}")))?;
             }
         }
-
-        // Server requires UIA — retry with password auth
-        let user_id = self.client.user_id()
-            .ok_or_else(|| to_js_err("Not logged in"))?;
-
-        let password_auth = uiaa::Password::new(
-            uiaa::UserIdentifier::UserIdOrLocalpart(user_id.localpart().to_owned()),
-            password.to_owned(),
-        );
-
-        encryption
-            .bootstrap_cross_signing(Some(uiaa::AuthData::Password(password_auth)))
-            .await
-            .map_err(|e| to_js_err(format!("Cross-signing bootstrap with password failed: {e}")))?;
 
         Ok(())
     }
 
     /// Bootstrap cross-signing only if not already set up.
-    /// No-op if cross-signing keys already exist for this user.
+    /// No-op if keys exist and private parts are in the local crypto store.
+    /// Falls back to full bootstrap if private keys are missing (e.g. after
+    /// session restore with ephemeral crypto store).
     #[wasm_bindgen(js_name = "bootstrapCrossSigningIfNeeded")]
     pub async fn bootstrap_cross_signing_if_needed(&self, password: &str) -> Result<(), JsValue> {
         let encryption = self.client.encryption();
 
         match encryption.bootstrap_cross_signing_if_needed(None).await {
             Ok(()) => return Ok(()),
-            Err(e) => {
-                if e.as_uiaa_response().is_none() {
-                    return Err(to_js_err(format!("Cross-signing bootstrap failed: {e}")));
-                }
+            Err(_) => {
+                // Either UIA required or private keys missing locally —
+                // fall through to full bootstrap
             }
         }
 
-        let user_id = self.client.user_id()
-            .ok_or_else(|| to_js_err("Not logged in"))?;
-
-        let password_auth = uiaa::Password::new(
-            uiaa::UserIdentifier::UserIdOrLocalpart(user_id.localpart().to_owned()),
-            password.to_owned(),
-        );
-
-        encryption
-            .bootstrap_cross_signing_if_needed(Some(uiaa::AuthData::Password(password_auth)))
-            .await
-            .map_err(|e| to_js_err(format!("Cross-signing bootstrap with password failed: {e}")))?;
-
-        Ok(())
+        self.bootstrap_cross_signing(password).await
     }
 
     /// Get the device ID of the current session.

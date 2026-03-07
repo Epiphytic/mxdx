@@ -42,13 +42,16 @@ export class WasmMatrixClient {
     [Symbol.dispose](): void;
     /**
      * Bootstrap cross-signing for this device.
-     * Makes this device self-verified and establishes the user's signing keys.
-     * Tries without UIA first (grace period after login), falls back to password auth.
+     * Generates cross-signing keys and uploads them. Handles the two-step UIA
+     * flow by capturing the session ID from the 401 response and including it
+     * in the password auth retry.
      */
     bootstrapCrossSigning(password: string): Promise<void>;
     /**
      * Bootstrap cross-signing only if not already set up.
-     * No-op if cross-signing keys already exist for this user.
+     * No-op if keys exist and private parts are in the local crypto store.
+     * Falls back to full bootstrap if private keys are missing (e.g. after
+     * session restore with ephemeral crypto store).
      */
     bootstrapCrossSigningIfNeeded(password: string): Promise<void>;
     /**
