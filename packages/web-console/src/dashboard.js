@@ -15,18 +15,18 @@ export function stopDashboardRefresh() {
  * @param {object} callbacks
  * @param {function} callbacks.onOpenTerminal - Called with launcher info
  */
-export function setupDashboard(client, { onOpenTerminal }) {
+export function setupDashboard(client, { onOpenTerminal, onReconnect }) {
   stopDashboardRefresh();
 
-  render(client, onOpenTerminal);
+  render(client, onOpenTerminal, onReconnect);
 
   // Auto-refresh every 10s
   refreshTimer = setInterval(() => {
-    render(client, onOpenTerminal);
+    render(client, onOpenTerminal, onReconnect);
   }, 10000);
 }
 
-async function render(client, onOpenTerminal) {
+async function render(client, onOpenTerminal, onReconnect) {
   const dashboard = document.getElementById('dashboard');
 
   try {
@@ -60,14 +60,31 @@ async function render(client, onOpenTerminal) {
       } catch {
         // Telemetry not available
       }
-      launcherData.push({ ...launcher, telemetry });
+      let sessions = [];
+      try {
+        const listRequestId = crypto.randomUUID();
+        await client.sendEvent(launcher.exec_room_id, 'org.mxdx.command', JSON.stringify({
+          action: 'list_sessions',
+          request_id: listRequestId,
+        }));
+        await client.syncOnce();
+        const sessionsJson = await client.onRoomEvent(
+          launcher.exec_room_id, 'org.mxdx.terminal.sessions', 5,
+        );
+        if (sessionsJson && sessionsJson !== 'null') {
+          const sessionsResponse = JSON.parse(sessionsJson);
+          const sessionsContent = sessionsResponse.content || sessionsResponse;
+          sessions = sessionsContent.sessions || [];
+        }
+      } catch { /* sessions not available */ }
+      launcherData.push({ ...launcher, telemetry, sessions });
     }
 
     const grid = document.createElement('div');
     grid.className = 'launcher-grid';
 
     for (const launcher of launcherData) {
-      grid.appendChild(renderCard(launcher, client, onOpenTerminal));
+      grid.appendChild(renderCard(launcher, client, onOpenTerminal, onReconnect));
     }
 
     dashboard.replaceChildren(grid);
@@ -81,7 +98,7 @@ async function render(client, onOpenTerminal) {
   }
 }
 
-function renderCard(launcher, client, onOpenTerminal) {
+function renderCard(launcher, client, onOpenTerminal, onReconnect) {
   const card = document.createElement('div');
   card.className = 'launcher-card';
 
@@ -99,6 +116,9 @@ function renderCard(launcher, client, onOpenTerminal) {
     if (t.cpus != null) appendTelemetryLine(telDiv, 'CPUs', String(t.cpus));
     if (t.total_memory_mb != null) appendTelemetryLine(telDiv, 'Memory', `${t.free_memory_mb || '?'}MB free / ${t.total_memory_mb}MB total`);
     if (t.uptime_secs != null) appendTelemetryLine(telDiv, 'Uptime', `${Math.floor(t.uptime_secs / 3600)}h`);
+    if (t.session_persistence != null) {
+      appendTelemetryLine(telDiv, 'Session Persistence', t.session_persistence ? 'Yes (tmux)' : 'No');
+    }
   } else {
     telDiv.textContent = 'No telemetry data';
   }
@@ -120,6 +140,38 @@ function renderCard(launcher, client, onOpenTerminal) {
   });
   actions.appendChild(termBtn);
   card.appendChild(actions);
+
+  // Active sessions
+  if (launcher.sessions && launcher.sessions.length > 0) {
+    const sessionsDiv = document.createElement('div');
+    sessionsDiv.className = 'sessions';
+
+    const sessionsTitle = document.createElement('h4');
+    sessionsTitle.textContent = 'Active Sessions';
+    sessionsDiv.appendChild(sessionsTitle);
+
+    for (const session of launcher.sessions) {
+      const sessionRow = document.createElement('div');
+      sessionRow.className = 'session-row';
+
+      const label = document.createElement('span');
+      const age = Math.floor((Date.now() - new Date(session.created_at).getTime()) / 60000);
+      label.textContent = `${session.session_id} (${age}m ago)${session.persistent ? '' : ' — non-persistent'}`;
+      sessionRow.appendChild(label);
+
+      const reconnBtn = document.createElement('button');
+      reconnBtn.className = 'btn btn-secondary';
+      reconnBtn.textContent = 'Reconnect';
+      reconnBtn.addEventListener('click', () => {
+        if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+        onReconnect(launcher, session);
+      });
+      sessionRow.appendChild(reconnBtn);
+
+      sessionsDiv.appendChild(sessionRow);
+    }
+    card.appendChild(sessionsDiv);
+  }
 
   // Exec input
   const execForm = document.createElement('form');
