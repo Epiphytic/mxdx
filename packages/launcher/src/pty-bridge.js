@@ -1,11 +1,20 @@
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
+
+function detectTmux() {
+  try {
+    const version = execFileSync('tmux', ['-V'], { encoding: 'utf8', timeout: 5000 }).trim();
+    const match = version.match(/tmux\s+([\d.]+)/);
+    return { available: true, version: match ? match[1] : version };
+  } catch {
+    return { available: false, version: null };
+  }
+}
 
 /**
  * PtyBridge — manages an interactive shell session using `script` for
- * PTY allocation. This avoids the need for node-pty native bindings.
- *
- * Uses: script -q /dev/null -c <command>
- * This allocates a real PTY for the child process.
+ * PTY allocation. Supports tmux for session persistence with graceful
+ * fallback to bare script(1) when tmux is unavailable.
  */
 export class PtyBridge {
   #proc = null;
@@ -13,6 +22,26 @@ export class PtyBridge {
   #dataCallbacks = [];
   #cols;
   #rows;
+  #tmuxName = null;
+  #persistent = false;
+
+  static tmuxInfo() {
+    return detectTmux();
+  }
+
+  static list() {
+    try {
+      const output = execFileSync('tmux', ['list-sessions', '-F', '#{session_name}'], {
+        encoding: 'utf8',
+        timeout: 5000,
+      }).trim();
+      return output
+        .split('\n')
+        .filter(name => name.startsWith('mxdx-'));
+    } catch {
+      return [];
+    }
+  }
 
   /**
    * @param {string} command - Shell command to run (e.g. "bash", "/bin/sh")
@@ -21,46 +50,80 @@ export class PtyBridge {
    * @param {number} [options.rows=24]
    * @param {string} [options.cwd='/tmp']
    * @param {Record<string,string>} [options.env={}]
+   * @param {string|null} [options.sessionName=null] - tmux session name (for reconnect)
+   * @param {string} [options.useTmux='auto'] - 'auto'|'always'|'never'
    */
-  constructor(command, { cols = 80, rows = 24, cwd = '/tmp', env = {} } = {}) {
+  constructor(command, { cols = 80, rows = 24, cwd = '/tmp', env = {}, sessionName = null, useTmux = 'auto' } = {}) {
     this.#cols = cols;
     this.#rows = rows;
 
-    // Use script(1) to allocate a real PTY for the shell
-    this.#proc = spawn('script', ['-q', '/dev/null', '-c', command], {
-      cwd,
-      env: {
-        ...process.env,
-        ...env,
-        TERM: 'xterm-256color',
-        COLUMNS: String(cols),
-        LINES: String(rows),
-      },
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
+    const tmux = detectTmux();
+    const wantTmux = useTmux === 'always' || (useTmux === 'auto' && tmux.available);
+
+    if (useTmux === 'always' && !tmux.available) {
+      throw new Error('tmux required (use_tmux=always) but not found on PATH');
+    }
+
+    this.#persistent = wantTmux;
+
+    const shellEnv = {
+      ...process.env,
+      ...env,
+      TERM: 'xterm-256color',
+      COLUMNS: String(cols),
+      LINES: String(rows),
+    };
+
+    if (wantTmux) {
+      this.#tmuxName = sessionName || `mxdx-${crypto.randomUUID().slice(0, 8)}`;
+
+      const existing = PtyBridge.list().includes(this.#tmuxName);
+
+      if (!existing) {
+        // Create detached tmux session — execFileSync (no shell)
+        execFileSync('tmux', [
+          'new-session', '-d', '-s', this.#tmuxName,
+          '-x', String(cols), '-y', String(rows),
+          command,
+        ], { env: shellEnv, cwd, timeout: 5000 });
+      } else {
+        execFileSync('tmux', [
+          'resize-window', '-t', this.#tmuxName,
+          '-x', String(cols), '-y', String(rows),
+        ], { timeout: 5000 });
+      }
+
+      // Attach via script for piped stdio
+      this.#proc = spawn('script', ['-q', '/dev/null', '-c', `tmux attach -t ${this.#tmuxName}`], {
+        cwd,
+        env: shellEnv,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    } else {
+      this.#tmuxName = null;
+      this.#proc = spawn('script', ['-q', '/dev/null', '-c', command], {
+        cwd,
+        env: shellEnv,
+        stdio: ['pipe', 'pipe', 'pipe'],
+      });
+    }
 
     this.#alive = true;
 
     this.#proc.stdout.on('data', (chunk) => {
-      for (const cb of this.#dataCallbacks) {
-        cb(new Uint8Array(chunk));
-      }
+      for (const cb of this.#dataCallbacks) cb(new Uint8Array(chunk));
     });
 
     this.#proc.stderr.on('data', (chunk) => {
-      for (const cb of this.#dataCallbacks) {
-        cb(new Uint8Array(chunk));
-      }
+      for (const cb of this.#dataCallbacks) cb(new Uint8Array(chunk));
     });
 
-    this.#proc.on('close', () => {
-      this.#alive = false;
-    });
-
-    this.#proc.on('error', () => {
-      this.#alive = false;
-    });
+    this.#proc.on('close', () => { this.#alive = false; });
+    this.#proc.on('error', () => { this.#alive = false; });
   }
+
+  get persistent() { return this.#persistent; }
+  get tmuxName() { return this.#tmuxName; }
 
   write(data) {
     if (!this.#alive || !this.#proc?.stdin?.writable) return;
@@ -76,14 +139,28 @@ export class PtyBridge {
   }
 
   resize(cols, rows) {
-    if (!this.#alive || !this.#proc?.pid) return;
+    if (!this.#alive) return;
     this.#cols = cols;
     this.#rows = rows;
-    // Send SIGWINCH to the script process with new size via stty
-    try {
-      spawn('kill', ['-WINCH', String(this.#proc.pid)], { stdio: 'ignore' });
-    } catch {
-      // Best effort
+
+    if (this.#tmuxName) {
+      try {
+        execFileSync('tmux', ['resize-window', '-t', this.#tmuxName, '-x', String(cols), '-y', String(rows)], { timeout: 5000 });
+      } catch { /* best effort */ }
+    } else if (this.#proc?.pid) {
+      try {
+        spawn('kill', ['-WINCH', String(this.#proc.pid)], { stdio: 'ignore' });
+      } catch { /* best effort */ }
+    }
+  }
+
+  detach() {
+    if (this.#proc) {
+      this.#proc.kill();
+      this.#proc = null;
+    }
+    if (!this.#tmuxName) {
+      this.#alive = false;
     }
   }
 
@@ -92,6 +169,12 @@ export class PtyBridge {
     if (this.#proc) {
       this.#proc.kill();
       this.#proc = null;
+    }
+    if (this.#tmuxName) {
+      try {
+        execFileSync('tmux', ['kill-session', '-t', this.#tmuxName], { timeout: 5000 });
+      } catch { /* session may already be dead */ }
+      this.#tmuxName = null;
     }
   }
 
