@@ -283,3 +283,44 @@ body {
   color: var(--text-muted);
   padding: 3rem;
 }
+
+/* Sessions */
+.sessions {
+  margin-top: 1rem;
+  border-top: 1px solid #30363d;
+  padding-top: 0.75rem;
+}
+
+.sessions h4 {
+  margin: 0 0 0.5rem;
+  font-size: 0.85rem;
+  color: #8b949e;
+  font-weight: 500;
+}
+
+.session-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.35rem 0;
+  font-size: 0.85rem;
+}
+
+.session-row span {
+  color: #c9d1d9;
+}
+
+.btn-secondary {
+  background: #21262d;
+  color: #c9d1d9;
+  border: 1px solid #30363d;
+  padding: 0.25rem 0.75rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.btn-secondary:hover {
+  background: #30363d;
+  border-color: #8b949e;
+}
