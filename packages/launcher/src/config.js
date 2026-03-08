@@ -13,6 +13,7 @@ export class LauncherConfig {
     maxSessions = 5,
     adminUsers = [],
     registrationToken = null,
+    useTmux = 'auto',
   } = {}) {
     this.username = username || os.hostname();
     this.servers = servers;
@@ -22,6 +23,7 @@ export class LauncherConfig {
     this.maxSessions = maxSessions;
     this.adminUsers = adminUsers;
     this.registrationToken = registrationToken;
+    this.useTmux = useTmux;
   }
 
   static fromArgs(args) {
@@ -34,6 +36,7 @@ export class LauncherConfig {
       maxSessions: args.maxSessions ? parseInt(args.maxSessions, 10) : 5,
       adminUsers: args.adminUser ? args.adminUser.split(',') : [],
       registrationToken: args.registrationToken || null,
+      useTmux: args.useTmux || 'auto',
     });
   }
 
@@ -49,6 +52,7 @@ export class LauncherConfig {
         telemetry: this.telemetry,
         max_sessions: this.maxSessions,
         admin_users: this.adminUsers,
+        use_tmux: this.useTmux,
       },
     });
     fs.writeFileSync(filePath, toml, { mode: 0o600 });
@@ -67,6 +71,7 @@ export class LauncherConfig {
       telemetry: l.telemetry || 'full',
       maxSessions: l.max_sessions || 5,
       adminUsers: l.admin_users || [],
+      useTmux: l.use_tmux || 'auto',
     });
   }
 

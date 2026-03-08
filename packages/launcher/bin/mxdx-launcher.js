@@ -19,6 +19,7 @@ program
   .option('--max-sessions <n>', 'Max concurrent sessions', '5')
   .option('--password <pass>', 'Password (first run only — stored in keyring)')
   .option('--log-format <json|text>', 'Log output format', 'json')
+  .option('--use-tmux <mode>', 'tmux mode: auto|always|never', 'auto')
   .parse();
 
 const opts = program.opts();
@@ -55,6 +56,11 @@ async function main() {
 
   // Log format from CLI
   config.logFormat = opts.logFormat || 'json';
+
+  // tmux mode from CLI
+  if (opts.useTmux) {
+    config.useTmux = opts.useTmux;
+  }
 
   const runtime = new LauncherRuntime(config);
 
