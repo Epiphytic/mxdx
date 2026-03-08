@@ -654,6 +654,14 @@ export class LauncherRuntime {
       telemetry.uptime_secs = Math.floor(os.uptime());
     }
 
+    const tmuxInfo = PtyBridge.tmuxInfo();
+    telemetry.tmux_available = tmuxInfo.available;
+    if (tmuxInfo.version) telemetry.tmux_version = tmuxInfo.version;
+    telemetry.session_persistence =
+      (this.#config.useTmux === 'never') ? false :
+      (this.#config.useTmux === 'always') ? true :
+      tmuxInfo.available;
+
     await this.#client.sendStateEvent(
       this.#topology.exec_room_id,
       'org.mxdx.host_telemetry',
