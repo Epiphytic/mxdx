@@ -189,6 +189,19 @@ export class LauncherRuntime {
       const requestId = content.request_id || eventId;
       const sender = event.sender;
 
+      // Route session management actions
+      if (action === 'list_sessions') {
+        this.#log.info('Session list requested', { request_id: requestId, sender });
+        await this.#handleListSessions(requestId);
+        continue;
+      }
+
+      if (action === 'reconnect') {
+        this.#log.info('Session reconnect requested', { request_id: requestId, sender });
+        await this.#handleReconnect(content, requestId, sender);
+        continue;
+      }
+
       // Route interactive sessions
       if (action === 'interactive') {
         this.#log.info('Interactive session requested', { request_id: requestId, sender });
@@ -425,6 +438,129 @@ export class LauncherRuntime {
       this.#log.error('Interactive session failed', { request_id: requestId, error: err.message });
       await this.#sendSessionResponse(requestId, 'error', null);
       this.#activeSessions--;
+    }
+  }
+
+  async #handleListSessions(requestId) {
+    const sessions = [];
+    for (const [sessionId, entry] of this.#sessionRegistry) {
+      sessions.push({
+        session_id: sessionId,
+        room_id: entry.dmRoomId,
+        persistent: entry.persistent,
+        created_at: entry.createdAt,
+      });
+    }
+    await this.#client.sendEvent(
+      this.#topology.exec_room_id,
+      'org.mxdx.terminal.sessions',
+      JSON.stringify({ request_id: requestId, sessions }),
+    );
+  }
+
+  async #handleReconnect(content, requestId, sender) {
+    const sessionId = content.session_id;
+    const cols = content.cols || 80;
+    const rows = content.rows || 24;
+
+    const entry = this.#sessionRegistry.get(sessionId);
+    if (!entry || !entry.persistent) {
+      await this.#sendSessionResponse(requestId, 'expired', null);
+      return;
+    }
+
+    if (entry.sender !== sender) {
+      await this.#sendSessionResponse(requestId, 'rejected', null);
+      return;
+    }
+
+    try {
+      const pty = new PtyBridge('bash', {
+        cols, rows,
+        sessionName: entry.tmuxName,
+        useTmux: 'always',
+      });
+
+      entry.pty = pty;
+      this.#activeSessions++;
+
+      await this.#sendSessionResponse(requestId, 'reconnected', entry.dmRoomId, {
+        session_id: sessionId,
+        persistent: true,
+      });
+
+      await new Promise((r) => setTimeout(r, 2000));
+      await this.#client.syncOnce();
+
+      // Forward PTY output -> DM room
+      let sendSeq = 0;
+      pty.onData(async (data) => {
+        const seq = sendSeq++;
+        let encoded, encoding;
+        if (data.length >= 32) {
+          const { deflateSync } = await import('node:zlib');
+          const compressed = deflateSync(Buffer.from(data));
+          encoded = Buffer.from(compressed).toString('base64');
+          encoding = 'zlib+base64';
+        } else {
+          encoded = Buffer.from(data).toString('base64');
+          encoding = 'base64';
+        }
+        try {
+          await this.#client.sendEvent(
+            entry.dmRoomId,
+            'org.mxdx.terminal.data',
+            JSON.stringify({ data: encoded, encoding, seq }),
+          );
+        } catch (err) {
+          this.#log.warn('terminal.data send failed', { seq, error: String(err) });
+        }
+      });
+
+      // Poll for input from client
+      const pollForInput = async () => {
+        while (pty.alive) {
+          try {
+            const dataEventJson = await this.#client.onRoomEvent(
+              entry.dmRoomId, 'org.mxdx.terminal.data', 1,
+            );
+            if (dataEventJson && dataEventJson !== 'null') {
+              const dataEvent = JSON.parse(dataEventJson);
+              const eventContent = dataEvent.content || dataEvent;
+              const eventSender = dataEvent.sender;
+              if (eventSender && eventSender !== this.#client.userId()) {
+                this.#processTerminalInput(eventContent, pty);
+              }
+            }
+            const resizeJson = await this.#client.onRoomEvent(
+              entry.dmRoomId, 'org.mxdx.terminal.resize', 1,
+            );
+            if (resizeJson && resizeJson !== 'null') {
+              const resizeEvent = JSON.parse(resizeJson);
+              const resizeContent = resizeEvent.content || resizeEvent;
+              if (resizeContent.cols && resizeContent.rows) {
+                pty.resize(resizeContent.cols, resizeContent.rows);
+              }
+            }
+          } catch {
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+        }
+      };
+
+      pollForInput().finally(() => {
+        if (pty.persistent) {
+          pty.detach();
+          this.#log.info('Reconnected session bridge detached', { session_id: sessionId });
+        } else {
+          this.#sessionRegistry.delete(sessionId);
+        }
+        this.#sendSessionResponse(requestId, 'ended', entry.dmRoomId).catch(() => {});
+        this.#activeSessions--;
+      });
+    } catch (err) {
+      this.#log.error('Reconnect failed', { session_id: sessionId, error: err.message });
+      await this.#sendSessionResponse(requestId, 'expired', null);
     }
   }
 
