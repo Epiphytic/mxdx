@@ -31,7 +31,7 @@ tempfile = "3"
 base64 = "0.22"
 flate2 = "1"
 lru = "0.12"
-tower-http = { version = "0.6", features = ["cors", "set-header"] }
+tower-http = { version = "0.6", features = ["cors", "set-header", "fs"] }
 tower = { version = "0.5", features = ["util"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 http = "1"

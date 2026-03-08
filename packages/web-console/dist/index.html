@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mxdx Console</title>
+  <script type="module" crossorigin src="/assets/index-8yb4eXgf.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-B0kuIeSS.css">
+</head>
+<body>
+  <div id="app">
+    <header id="header" hidden>
+      <h1>mxdx</h1>
+      <nav>
+        <button id="nav-dashboard" class="nav-btn active">Dashboard</button>
+        <button id="nav-logout" class="nav-btn">Logout</button>
+      </nav>
+    </header>
+
+    <div id="login" class="screen">
+      <div class="login-box">
+        <h2>mxdx Console</h2>
+        <form id="login-form">
+          <label for="server">Homeserver</label>
+          <input type="text" id="server" placeholder="https://matrix.example.com" required>
+          <label for="username">Username</label>
+          <input type="text" id="username" placeholder="admin" required>
+          <label for="password">Password</label>
+          <input type="password" id="password" required>
+          <button type="submit" id="login-btn">Login</button>
+          <p id="login-error" class="error" hidden></p>
+          <p id="login-status" class="status" hidden></p>
+        </form>
+      </div>
+    </div>
+
+    <div id="dashboard" class="screen" hidden></div>
+
+    <div id="terminal" class="screen" hidden>
+      <div id="terminal-toolbar">
+        <button id="terminal-back">Back to Dashboard</button>
+        <span id="terminal-title"></span>
+      </div>
+      <div id="terminal-container"></div>
+    </div>
+  </div>
+</body>
+</html>

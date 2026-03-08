@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { program } from 'commander';
+import { saveIndexedDB } from '@mxdx/core';
 import { LauncherConfig } from '../src/config.js';
 import { LauncherRuntime } from '../src/runtime.js';
 import { runOnboarding } from '../src/onboarding.js';
@@ -17,6 +18,8 @@ program
   .option('--telemetry <full|summary>', 'Telemetry detail level', 'full')
   .option('--max-sessions <n>', 'Max concurrent sessions', '5')
   .option('--password <pass>', 'Password (first run only — stored in keyring)')
+  .option('--log-format <json|text>', 'Log output format', 'json')
+  .option('--use-tmux <mode>', 'tmux mode: auto|always|never', 'auto')
   .parse();
 
 const opts = program.opts();
@@ -51,16 +54,28 @@ async function main() {
     config.registrationToken = opts.registrationToken;
   }
 
+  // Log format from CLI
+  config.logFormat = opts.logFormat || 'json';
+
+  // tmux mode from CLI
+  if (opts.useTmux) {
+    config.useTmux = opts.useTmux;
+  }
+
   const runtime = new LauncherRuntime(config);
 
-  // Graceful shutdown
+  // Graceful shutdown — save crypto store before exit
+  async function shutdown() {
+    await runtime.stop();
+    try { await saveIndexedDB(config.configDir); } catch { /* best effort */ }
+  }
   process.on('SIGINT', async () => {
     console.log('\n[launcher] Shutting down...');
-    await runtime.stop();
+    await shutdown();
     process.exit(0);
   });
   process.on('SIGTERM', async () => {
-    await runtime.stop();
+    await shutdown();
     process.exit(0);
   });
 

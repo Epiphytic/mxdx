@@ -1,5 +1,40 @@
-import { connectWithSession } from '@mxdx/core';
+import crypto from 'node:crypto';
+import { connectWithSession, TerminalDataEvent, saveIndexedDB } from '@mxdx/core';
 import { executeCommand } from './process-bridge.js';
+import { PtyBridge } from './pty-bridge.js';
+import { inflateSync } from 'node:zlib';
+
+const MAX_DECOMPRESSED_SIZE = 1024 * 1024; // 1MB zlib bomb protection
+
+/**
+ * Structured logger with JSON and text output modes.
+ */
+class Logger {
+  #format;
+
+  constructor(format = 'json') {
+    this.#format = format;
+  }
+
+  info(msg, data) { this.#log('info', msg, data); }
+  warn(msg, data) { this.#log('warn', msg, data); }
+  error(msg, data) { this.#log('error', msg, data); }
+  debug(msg, data) { this.#log('debug', msg, data); }
+
+  #log(level, msg, data) {
+    if (this.#format === 'json') {
+      const entry = { level, msg, ts: new Date().toISOString(), ...data };
+      const stream = level === 'error' ? process.stderr : process.stdout;
+      stream.write(JSON.stringify(entry) + '\n');
+    } else {
+      const ts = new Date().toISOString();
+      const prefix = `[${level}] [${ts}]`;
+      const extra = data ? ' ' + JSON.stringify(data) : '';
+      const stream = level === 'error' ? process.stderr : process.stdout;
+      stream.write(`${prefix} ${msg}${extra}\n`);
+    }
+  }
+}
 
 /**
  * The launcher runtime: connects to Matrix, creates rooms, listens for commands.
@@ -10,17 +45,25 @@ export class LauncherRuntime {
   #topology;
   #running = false;
   #processedEvents = new Set();
+  #activeSessions = 0;
+  #maxSessions;
+  #backoffMs = 0;
+  #lastStoreSave = 0;
+  #log;
+  #sessionRegistry = new Map(); // sessionId -> { tmuxName, dmRoomId, sender, persistent, pty, createdAt }
 
   constructor(config) {
     this.#config = config;
+    this.#maxSessions = config.maxSessions || 10;
+    this.#log = new Logger(config.logFormat || 'json');
   }
 
   async start() {
     const server = this.#config.servers[0];
     const username = this.#config.username;
-    const log = (msg) => console.log(`[launcher] ${msg}`);
+    const log = (msg) => this.#log.info(msg);
 
-    // ── 1. Connect with session persistence + cross-signing ─────
+    // ── 1. Connect (crypto store is persistent via IndexedDB snapshots) ──
     const { client, freshLogin, password } = await connectWithSession({
       username,
       server,
@@ -56,7 +99,6 @@ export class LauncherRuntime {
         for (const roomId of [
           this.#topology.space_id,
           this.#topology.exec_room_id,
-          this.#topology.status_room_id,
           this.#topology.logs_room_id,
         ]) {
           try {
@@ -91,10 +133,33 @@ export class LauncherRuntime {
   async #syncLoop() {
     while (this.#running) {
       try {
-        await this.#client.syncOnce();
-        await this.#processCommands();
+        await Promise.race([
+          this.#client.syncOnce(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('syncOnce timed out after 30s')), 30000),
+          ),
+        ]);
+        await Promise.race([
+          this.#processCommands(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('processCommands timed out after 30s')), 30000),
+          ),
+        ]);
+        this.#backoffMs = 0;
+
+        // Save crypto store every 5 minutes to persist new Megolm keys
+        if (Date.now() - this.#lastStoreSave > 300000) {
+          try {
+            await saveIndexedDB(this.#config.configDir);
+            this.#lastStoreSave = Date.now();
+          } catch {
+            // Non-fatal
+          }
+        }
       } catch (err) {
-        console.error(`[launcher] Sync error:`, err);
+        this.#backoffMs = Math.min(Math.max(1000, this.#backoffMs * 2 || 1000), 30000);
+        this.#log.error('Sync error', { error: err.message, backoff_ms: this.#backoffMs });
+        await new Promise((r) => setTimeout(r, this.#backoffMs));
       }
     }
   }
@@ -117,16 +182,38 @@ export class LauncherRuntime {
       this.#processedEvents.add(eventId);
 
       const content = event.content || {};
+      const action = content.action;
       const command = content.command;
       const args = content.args || [];
       const cwd = content.cwd || '/tmp';
       const requestId = content.request_id || eventId;
+      const sender = event.sender;
 
-      console.log(`[launcher] Received command: ${command} ${args.join(' ')}`);
+      // Route session management actions
+      if (action === 'list_sessions') {
+        this.#log.info('Session list requested', { request_id: requestId, sender });
+        await this.#handleListSessions(requestId);
+        continue;
+      }
+
+      if (action === 'reconnect') {
+        this.#log.info('Session reconnect requested', { request_id: requestId, sender });
+        await this.#handleReconnect(content, requestId, sender);
+        continue;
+      }
+
+      // Route interactive sessions
+      if (action === 'interactive') {
+        this.#log.info('Interactive session requested', { request_id: requestId, sender });
+        await this.#handleInteractiveSession(content, requestId, sender);
+        continue;
+      }
+
+      this.#log.info(`Received command: ${command} ${args.join(' ')}`, { request_id: requestId });
 
       // Validate command against allowlist
       if (!this.#isCommandAllowed(command)) {
-        console.log(`[launcher] Command rejected: ${command} not in allowlist`);
+        this.#log.warn(`Command rejected: ${command} not in allowlist`, { request_id: requestId });
         await this.#sendResult(requestId, {
           exit_code: 1,
           error: `Command '${command}' is not allowed`,
@@ -136,7 +223,7 @@ export class LauncherRuntime {
 
       // Validate cwd
       if (!this.#isCwdAllowed(cwd)) {
-        console.log(`[launcher] CWD rejected: ${cwd} not in allowed paths`);
+        this.#log.warn(`CWD rejected: ${cwd}`, { request_id: requestId });
         await this.#sendResult(requestId, {
           exit_code: 1,
           error: `Working directory '${cwd}' is not allowed`,
@@ -144,7 +231,18 @@ export class LauncherRuntime {
         continue;
       }
 
+      // Check session limit
+      if (this.#activeSessions >= this.#maxSessions) {
+        this.#log.warn('Session limit reached', { active: this.#activeSessions, max: this.#maxSessions, request_id: requestId });
+        await this.#sendResult(requestId, {
+          exit_code: 1,
+          error: `Session limit reached (${this.#maxSessions} max)`,
+        });
+        continue;
+      }
+
       // Execute command
+      this.#activeSessions++;
       try {
         const result = await executeCommand(command, args, {
           cwd,
@@ -166,8 +264,341 @@ export class LauncherRuntime {
           exit_code: 1,
           error: err.message,
         });
+      } finally {
+        this.#activeSessions--;
       }
     }
+  }
+
+  async #handleInteractiveSession(content, requestId, sender) {
+    const defaultShell = process.env.SHELL || '/bin/bash';
+    const command = content.command || defaultShell;
+    const cols = content.cols || 80;
+    const rows = content.rows || 24;
+    const cwd = content.cwd || '/tmp';
+    const env = content.env || {};
+
+    // Validate explicit command against allowlist; default shell is always permitted
+    if (content.command && !this.#isCommandAllowed(command)) {
+      this.#log.warn(`Interactive command rejected: ${command}`, { request_id: requestId });
+      await this.#sendSessionResponse(requestId, 'rejected', null);
+      return;
+    }
+
+    // Validate cwd
+    if (!this.#isCwdAllowed(cwd)) {
+      this.#log.warn(`Interactive CWD rejected: ${cwd}`, { request_id: requestId });
+      await this.#sendSessionResponse(requestId, 'rejected', null);
+      return;
+    }
+
+    // Check session limit
+    if (this.#activeSessions >= this.#maxSessions) {
+      this.#log.warn('Session limit reached for interactive', { request_id: requestId });
+      await this.#sendSessionResponse(requestId, 'rejected', null);
+      return;
+    }
+
+    if (!sender) {
+      this.#log.warn('Interactive session missing sender', { request_id: requestId });
+      await this.#sendSessionResponse(requestId, 'rejected', null);
+      return;
+    }
+
+    this.#activeSessions++;
+
+    try {
+      // Create E2EE DM room with history_visibility: joined
+      const dmRoomId = await this.#client.createDmRoom(sender);
+      this.#log.info('Created DM room for interactive session', {
+        request_id: requestId,
+        room_id: dmRoomId,
+        sender,
+      });
+
+      // Spawn PTY bridge with tmux support
+      const sessionId = crypto.randomUUID().slice(0, 8);
+      const pty = new PtyBridge(command, {
+        cols, rows, cwd, env,
+        useTmux: this.#config.useTmux || 'auto',
+      });
+
+      this.#sessionRegistry.set(sessionId, {
+        tmuxName: pty.tmuxName,
+        dmRoomId,
+        sender,
+        persistent: pty.persistent,
+        pty,
+        createdAt: new Date().toISOString(),
+      });
+
+      // Respond with DM room ID
+      await this.#sendSessionResponse(requestId, 'started', dmRoomId, {
+        session_id: sessionId,
+        persistent: pty.persistent,
+      });
+
+      // Wait for the client to join the DM
+      await new Promise((r) => setTimeout(r, 2000));
+      await this.#client.syncOnce();
+
+      // Wait for PTY to initialize
+      await new Promise((r) => setTimeout(r, 500));
+
+      // Forward PTY output -> DM room as terminal.data events
+      let sendSeq = 0;
+      pty.onData(async (data) => {
+        const seq = sendSeq++;
+        let encoded;
+        let encoding;
+
+        if (data.length >= 32) {
+          const { deflateSync } = await import('node:zlib');
+          const compressed = deflateSync(Buffer.from(data));
+          encoded = Buffer.from(compressed).toString('base64');
+          encoding = 'zlib+base64';
+        } else {
+          encoded = Buffer.from(data).toString('base64');
+          encoding = 'base64';
+        }
+
+        try {
+          await this.#client.sendEvent(
+            dmRoomId,
+            'org.mxdx.terminal.data',
+            JSON.stringify({ data: encoded, encoding, seq }),
+          );
+        } catch (err) {
+          this.#log.warn('terminal.data send failed', { seq, error: String(err) });
+        }
+      });
+
+      // Poll for incoming terminal data and resize events from the client
+      const pollForInput = async () => {
+        while (pty.alive) {
+          try {
+            // Check for terminal data
+            const dataEventJson = await this.#client.onRoomEvent(
+              dmRoomId,
+              'org.mxdx.terminal.data',
+              1,
+            );
+            if (dataEventJson && dataEventJson !== 'null') {
+              const dataEvent = JSON.parse(dataEventJson);
+              const eventContent = dataEvent.content || dataEvent;
+              const eventSender = dataEvent.sender;
+
+              // Only process events from the client (not our own output)
+              if (eventSender && eventSender !== this.#client.userId()) {
+                this.#processTerminalInput(eventContent, pty);
+              }
+            }
+
+            // Check for resize events
+            const resizeJson = await this.#client.onRoomEvent(
+              dmRoomId,
+              'org.mxdx.terminal.resize',
+              1,
+            );
+            if (resizeJson && resizeJson !== 'null') {
+              const resizeEvent = JSON.parse(resizeJson);
+              const resizeContent = resizeEvent.content || resizeEvent;
+              const resizeCols = resizeContent.cols;
+              const resizeRows = resizeContent.rows;
+              if (resizeCols && resizeRows) {
+                pty.resize(resizeCols, resizeRows);
+              }
+            }
+          } catch {
+            // Sync error, retry
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+        }
+      };
+
+      // Run input polling (don't await — let it run in background)
+      pollForInput().finally(() => {
+        if (pty.persistent) {
+          pty.detach();
+          this.#log.info('Interactive session bridge detached (tmux alive)', {
+            request_id: requestId,
+            session_id: sessionId,
+          });
+        } else {
+          this.#sessionRegistry.delete(sessionId);
+          this.#log.info('Interactive session ended', { request_id: requestId, session_id: sessionId });
+        }
+        this.#sendSessionResponse(requestId, 'ended', dmRoomId).catch(() => {});
+        this.#activeSessions--;
+      });
+
+      // Don't decrement activeSessions here — the finally block above handles it
+      return;
+    } catch (err) {
+      this.#log.error('Interactive session failed', { request_id: requestId, error: err.message });
+      await this.#sendSessionResponse(requestId, 'error', null);
+      this.#activeSessions--;
+    }
+  }
+
+  async #handleListSessions(requestId) {
+    const sessions = [];
+    for (const [sessionId, entry] of this.#sessionRegistry) {
+      sessions.push({
+        session_id: sessionId,
+        room_id: entry.dmRoomId,
+        persistent: entry.persistent,
+        created_at: entry.createdAt,
+      });
+    }
+    await this.#client.sendEvent(
+      this.#topology.exec_room_id,
+      'org.mxdx.terminal.sessions',
+      JSON.stringify({ request_id: requestId, sessions }),
+    );
+  }
+
+  async #handleReconnect(content, requestId, sender) {
+    const sessionId = content.session_id;
+    const cols = content.cols || 80;
+    const rows = content.rows || 24;
+
+    const entry = this.#sessionRegistry.get(sessionId);
+    if (!entry || !entry.persistent) {
+      await this.#sendSessionResponse(requestId, 'expired', null);
+      return;
+    }
+
+    if (entry.sender !== sender) {
+      await this.#sendSessionResponse(requestId, 'rejected', null);
+      return;
+    }
+
+    try {
+      const pty = new PtyBridge('bash', {
+        cols, rows,
+        sessionName: entry.tmuxName,
+        useTmux: 'always',
+      });
+
+      entry.pty = pty;
+      this.#activeSessions++;
+
+      await this.#sendSessionResponse(requestId, 'reconnected', entry.dmRoomId, {
+        session_id: sessionId,
+        persistent: true,
+      });
+
+      await new Promise((r) => setTimeout(r, 2000));
+      await this.#client.syncOnce();
+
+      // Forward PTY output -> DM room
+      let sendSeq = 0;
+      pty.onData(async (data) => {
+        const seq = sendSeq++;
+        let encoded, encoding;
+        if (data.length >= 32) {
+          const { deflateSync } = await import('node:zlib');
+          const compressed = deflateSync(Buffer.from(data));
+          encoded = Buffer.from(compressed).toString('base64');
+          encoding = 'zlib+base64';
+        } else {
+          encoded = Buffer.from(data).toString('base64');
+          encoding = 'base64';
+        }
+        try {
+          await this.#client.sendEvent(
+            entry.dmRoomId,
+            'org.mxdx.terminal.data',
+            JSON.stringify({ data: encoded, encoding, seq }),
+          );
+        } catch (err) {
+          this.#log.warn('terminal.data send failed', { seq, error: String(err) });
+        }
+      });
+
+      // Poll for input from client
+      const pollForInput = async () => {
+        while (pty.alive) {
+          try {
+            const dataEventJson = await this.#client.onRoomEvent(
+              entry.dmRoomId, 'org.mxdx.terminal.data', 1,
+            );
+            if (dataEventJson && dataEventJson !== 'null') {
+              const dataEvent = JSON.parse(dataEventJson);
+              const eventContent = dataEvent.content || dataEvent;
+              const eventSender = dataEvent.sender;
+              if (eventSender && eventSender !== this.#client.userId()) {
+                this.#processTerminalInput(eventContent, pty);
+              }
+            }
+            const resizeJson = await this.#client.onRoomEvent(
+              entry.dmRoomId, 'org.mxdx.terminal.resize', 1,
+            );
+            if (resizeJson && resizeJson !== 'null') {
+              const resizeEvent = JSON.parse(resizeJson);
+              const resizeContent = resizeEvent.content || resizeEvent;
+              if (resizeContent.cols && resizeContent.rows) {
+                pty.resize(resizeContent.cols, resizeContent.rows);
+              }
+            }
+          } catch {
+            await new Promise((r) => setTimeout(r, 1000));
+          }
+        }
+      };
+
+      pollForInput().finally(() => {
+        if (pty.persistent) {
+          pty.detach();
+          this.#log.info('Reconnected session bridge detached', { session_id: sessionId });
+        } else {
+          this.#sessionRegistry.delete(sessionId);
+        }
+        this.#sendSessionResponse(requestId, 'ended', entry.dmRoomId).catch(() => {});
+        this.#activeSessions--;
+      });
+    } catch (err) {
+      this.#log.error('Reconnect failed', { session_id: sessionId, error: err.message });
+      await this.#sendSessionResponse(requestId, 'expired', null);
+    }
+  }
+
+  #processTerminalInput(content, pty) {
+    const parsed = TerminalDataEvent.safeParse(content);
+    if (!parsed.success) return;
+
+    const { data, encoding } = parsed.data;
+    const raw = Buffer.from(data, 'base64');
+
+    if (encoding === 'zlib+base64') {
+      try {
+        const decompressed = inflateSync(raw, { maxOutputLength: MAX_DECOMPRESSED_SIZE });
+        pty.write(new Uint8Array(decompressed));
+      } catch {
+        // Decompression failed or exceeded size limit (zlib bomb protection)
+      }
+    } else {
+      pty.write(new Uint8Array(raw));
+    }
+  }
+
+  async #sendSessionResponse(requestId, status, roomId, extra = {}) {
+    await Promise.race([
+      this.#client.sendEvent(
+        this.#topology.exec_room_id,
+        'org.mxdx.terminal.session',
+        JSON.stringify({
+          request_id: requestId,
+          status,
+          room_id: roomId,
+          ...extra,
+        }),
+      ),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('sendSessionResponse timed out after 30s')), 30000),
+      ),
+    ]);
   }
 
   #isCommandAllowed(command) {
@@ -208,18 +639,31 @@ export class LauncherRuntime {
 
   async #postTelemetry() {
     const os = await import('node:os');
+    const level = this.#config.telemetry || 'full';
+
     const telemetry = {
       hostname: os.hostname(),
       platform: os.platform(),
       arch: os.arch(),
-      cpus: os.cpus().length,
-      total_memory_mb: Math.floor(os.totalmem() / (1024 * 1024)),
-      free_memory_mb: Math.floor(os.freemem() / (1024 * 1024)),
-      uptime_secs: Math.floor(os.uptime()),
     };
 
+    if (level === 'full') {
+      telemetry.cpus = os.cpus().length;
+      telemetry.total_memory_mb = Math.floor(os.totalmem() / (1024 * 1024));
+      telemetry.free_memory_mb = Math.floor(os.freemem() / (1024 * 1024));
+      telemetry.uptime_secs = Math.floor(os.uptime());
+    }
+
+    const tmuxInfo = PtyBridge.tmuxInfo();
+    telemetry.tmux_available = tmuxInfo.available;
+    if (tmuxInfo.version) telemetry.tmux_version = tmuxInfo.version;
+    telemetry.session_persistence =
+      (this.#config.useTmux === 'never') ? false :
+      (this.#config.useTmux === 'always') ? true :
+      tmuxInfo.available;
+
     await this.#client.sendStateEvent(
-      this.#topology.status_room_id,
+      this.#topology.exec_room_id,
       'org.mxdx.host_telemetry',
       '',
       JSON.stringify(telemetry),

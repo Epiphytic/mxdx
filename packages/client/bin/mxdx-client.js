@@ -4,6 +4,7 @@ import { connectWithSession } from '@mxdx/core';
 import { ClientConfig } from '../src/config.js';
 import { findLauncher } from '../src/discovery.js';
 import { execCommand } from '../src/exec.js';
+import { startInteractiveSession } from '../src/interactive.js';
 
 program
   .name('mxdx-client')
@@ -47,6 +48,36 @@ program
   });
 
 program
+  .command('shell <launcher> [command]')
+  .description('Start an interactive terminal session on a launcher')
+  .option('--cols <n>', 'Terminal columns (default: current terminal width)')
+  .option('--rows <n>', 'Terminal rows (default: current terminal height)')
+  .action(async (launcher, command, opts) => {
+    const parentOpts = program.opts();
+    const { client } = await connect(parentOpts);
+
+    const topology = await findLauncher(client, launcher);
+    if (!topology) {
+      console.error(`Launcher '${launcher}' not found`);
+      process.exit(1);
+    }
+
+    const log = (msg) => console.error(`[shell] ${msg}`);
+
+    try {
+      await startInteractiveSession(client, topology, {
+        command: command || '/bin/bash',
+        cols: opts.cols ? parseInt(opts.cols, 10) : undefined,
+        rows: opts.rows ? parseInt(opts.rows, 10) : undefined,
+        log,
+      });
+    } catch (err) {
+      console.error(`Shell session failed: ${err.message}`);
+      process.exit(1);
+    }
+  });
+
+program
   .command('verify <user_id>')
   .description('Cross-sign verify another user by their Matrix ID')
   .action(async (userId) => {
@@ -72,9 +103,26 @@ program
   .action(async () => {
     const opts = program.opts();
     const { client } = await connect(opts);
-    await client.syncOnce();
-    console.log('Use: mxdx-client exec <launcher-name> <command>');
-    console.log('Launcher names match the --username used at launcher startup.');
+
+    const launchersJson = await client.listLauncherSpaces();
+    const launchers = JSON.parse(launchersJson);
+
+    if (opts.format === 'json') {
+      console.log(JSON.stringify(launchers, null, 2));
+      return;
+    }
+
+    if (launchers.length === 0) {
+      console.log('No launchers discovered.');
+      return;
+    }
+
+    for (const l of launchers) {
+      console.log(`  ${l.launcher_id}`);
+      console.log(`    Space: ${l.space_id}`);
+      console.log(`    Exec:  ${l.exec_room_id}`);
+      console.log(`    Logs:  ${l.logs_room_id}`);
+    }
   });
 
 program
@@ -90,17 +138,21 @@ program
       process.exit(1);
     }
 
-    // Read telemetry state event
-    const events = JSON.parse(await client.collectRoomEvents(topology.status_room_id, 3));
+    // Read telemetry state event from exec room
+    const events = JSON.parse(await client.collectRoomEvents(topology.exec_room_id, 3));
     if (events && events.length > 0) {
       for (const event of events) {
         if (event.type === 'org.mxdx.host_telemetry') {
           const t = event.content;
-          console.log(`  Hostname:  ${t.hostname}`);
-          console.log(`  Platform:  ${t.platform} (${t.arch})`);
-          console.log(`  CPUs:      ${t.cpus}`);
-          console.log(`  Memory:    ${t.free_memory_mb}MB free / ${t.total_memory_mb}MB total`);
-          console.log(`  Uptime:    ${Math.floor(t.uptime_secs / 3600)}h`);
+          if (opts.format === 'json') {
+            console.log(JSON.stringify(t, null, 2));
+          } else {
+            console.log(`  Hostname:  ${t.hostname}`);
+            console.log(`  Platform:  ${t.platform} (${t.arch})`);
+            if (t.cpus != null) console.log(`  CPUs:      ${t.cpus}`);
+            if (t.total_memory_mb != null) console.log(`  Memory:    ${t.free_memory_mb}MB free / ${t.total_memory_mb}MB total`);
+            if (t.uptime_secs != null) console.log(`  Uptime:    ${Math.floor(t.uptime_secs / 3600)}h`);
+          }
           return;
         }
       }

@@ -1,12 +1,15 @@
 import { WasmMatrixClient } from './wasm/mxdx_core_wasm.js';
 import { CredentialStore } from './credentials.js';
+import { saveIndexedDB, restoreIndexedDB } from './persistent-indexeddb.js';
 
 /**
  * Connect to Matrix with full session lifecycle:
- *   1. Try restoring saved session from keyring
- *   2. Fresh login if no session (password from args → keyring → TTY prompt)
- *   3. Bootstrap cross-signing + verify own identity
- *   4. Store session + password in keyring
+ *   1. Restore IndexedDB crypto store from disk (Node.js only)
+ *   2. Try restoring saved session from keyring
+ *   3. Fresh login if no session (password from args → keyring → TTY prompt)
+ *   4. Bootstrap cross-signing + verify own identity
+ *   5. Store session + password in keyring
+ *   6. Save IndexedDB crypto store to disk
  *
  * @param {Object} options
  * @param {string} options.username - Matrix username (localpart)
@@ -31,7 +34,13 @@ export async function connectWithSession({
   let client = null;
   let freshLogin = false;
 
-  // ── 1. Try restoring an existing session ────────────────────────
+  // ── 1. Restore IndexedDB crypto store from disk ─────────────────
+  const restored = await restoreIndexedDB(configDir);
+  if (restored) {
+    log('Crypto store restored from disk');
+  }
+
+  // ── 2. Try restoring an existing session ────────────────────────
   const savedSession = await credentialStore.loadSession(username, server);
   if (savedSession) {
     try {
@@ -46,7 +55,7 @@ export async function connectWithSession({
     }
   }
 
-  // ── 2. Fresh login if no session restored ───────────────────────
+  // ── 3. Fresh login if no session restored ───────────────────────
   if (!client) {
     freshLogin = true;
 
@@ -77,7 +86,7 @@ export async function connectWithSession({
 
     log(`Logged in as ${client.userId()} (device: ${client.deviceId()})`);
 
-    // ── 3. Bootstrap cross-signing ──────────────────────────────
+    // ── 4. Bootstrap cross-signing ──────────────────────────────
     try {
       log('Bootstrapping cross-signing...');
       await client.bootstrapCrossSigningIfNeeded(password);
@@ -87,7 +96,7 @@ export async function connectWithSession({
       log(`Cross-signing bootstrap failed (non-fatal): ${err}`);
     }
 
-    // ── 4. Store credentials in keyring ─────────────────────────
+    // ── 5. Store credentials in keyring ─────────────────────────
     await credentialStore.savePassword(username, server, password);
 
     const sessionData = client.exportSession();
@@ -95,6 +104,14 @@ export async function connectWithSession({
       username, server, JSON.parse(sessionData),
     );
     log('Credentials stored in keyring');
+  }
+
+  // ── 6. Save IndexedDB crypto store to disk ──────────────────────
+  try {
+    await saveIndexedDB(configDir);
+    log('Crypto store saved to disk');
+  } catch (err) {
+    log(`Crypto store save failed (non-fatal): ${err}`);
   }
 
   return { client, credentialStore, freshLogin, password };

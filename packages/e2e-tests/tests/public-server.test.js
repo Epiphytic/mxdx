@@ -37,6 +37,9 @@ const REPO_ROOT = path.resolve(__dirname, '../../..');
 const LAUNCHER_BIN = path.resolve(__dirname, '../../launcher/bin/mxdx-launcher.js');
 const CLIENT_BIN = path.resolve(__dirname, '../../client/bin/mxdx-client.js');
 
+// Fixed launcher ID for room reuse across test runs
+const FIXED_LAUNCHER_ID = 'pub-e2e-stable';
+
 /**
  * Load credentials from test-credentials.toml.
  */
@@ -102,6 +105,10 @@ function waitForOutput(proc, needle, timeoutMs = 30000) {
   });
 }
 
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
 // ─── WASM Client Tests ──────────────────────────────────────────────────────
 
 describe('Public Server: WASM Client', { timeout: 120000 }, () => {
@@ -132,9 +139,6 @@ describe('Public Server: WASM Client', { timeout: 120000 }, () => {
   });
 
   it('verify cross-signing state between accounts', async () => {
-    // Cross-signing must be set up externally (e.g., via Element) for servers
-    // that require OAuth for key uploads (like matrix.org).
-    // This test verifies the state is visible to our WASM clients.
     const client1 = await WasmMatrixClient.login(
       creds.url, creds.account1.username, creds.account1.password,
     );
@@ -146,17 +150,14 @@ describe('Public Server: WASM Client', { timeout: 120000 }, () => {
     const userId2 = client2.userId();
     console.log(`[pub] Checking cross-signing ${userId1} <-> ${userId2}`);
 
-    // Bootstrap if needed (no-op if keys exist) and verify own identity
     await client1.bootstrapCrossSigningIfNeeded(creds.account1.password);
     await client2.bootstrapCrossSigningIfNeeded(creds.account2.password);
     await client1.verifyOwnIdentity();
     await client2.verifyOwnIdentity();
 
-    // Sync to pull cross-signing signatures from server
     await client1.syncOnce();
     await client2.syncOnce();
 
-    // Confirm both accounts see each other as verified
     const verified1 = await client1.isUserVerified(userId2);
     const verified2 = await client2.isUserVerified(userId1);
     console.log(`[pub] Account1 sees Account2 verified: ${verified1}`);
@@ -168,24 +169,36 @@ describe('Public Server: WASM Client', { timeout: 120000 }, () => {
     client2.free();
   });
 
-  it('create launcher space and find it', async () => {
+  it('find-or-create launcher space (room reuse)', async () => {
     const client = await WasmMatrixClient.login(
       creds.url, creds.account1.username, creds.account1.password,
     );
 
-    const launcherId = `pub-test-${Date.now()}`;
-    const topology = await client.getOrCreateLauncherSpace(launcherId);
-    assert.ok(topology, 'Should create topology');
+    const topology = await client.getOrCreateLauncherSpace(FIXED_LAUNCHER_ID);
+    assert.ok(topology, 'Should create/find topology');
     assert.ok(topology.space_id, 'Should have space_id');
     assert.ok(topology.exec_room_id, 'Should have exec_room_id');
-    assert.ok(topology.status_room_id, 'Should have status_room_id');
     assert.ok(topology.logs_room_id, 'Should have logs_room_id');
-    console.log(`[pub] Created launcher space: ${topology.space_id}`);
+    assert.strictEqual(topology.status_room_id, undefined, 'Should NOT have status_room_id');
+    console.log(`[pub] Launcher space: ${topology.space_id}`);
 
-    // Find the space we just created
-    const found = await client.findLauncherSpace(launcherId);
-    assert.ok(found, 'Should find existing launcher space');
-    assert.strictEqual(found.space_id, topology.space_id);
+    client.free();
+  });
+
+  it('getOrCreateLauncherSpace is idempotent', async () => {
+    const client = await WasmMatrixClient.login(
+      creds.url, creds.account1.username, creds.account1.password,
+    );
+
+    const first = await client.getOrCreateLauncherSpace(FIXED_LAUNCHER_ID);
+    // Throttle between room operations
+    await sleep(2000);
+    const second = await client.getOrCreateLauncherSpace(FIXED_LAUNCHER_ID);
+
+    assert.strictEqual(second.space_id, first.space_id, 'space_id should be identical');
+    assert.strictEqual(second.exec_room_id, first.exec_room_id, 'exec_room_id should be identical');
+    assert.strictEqual(second.logs_room_id, first.logs_room_id, 'logs_room_id should be identical');
+    console.log('[pub] Idempotency verified');
 
     client.free();
   });
@@ -195,10 +208,8 @@ describe('Public Server: WASM Client', { timeout: 120000 }, () => {
       creds.url, creds.account1.username, creds.account1.password,
     );
 
-    const launcherId = `pub-evt-${Date.now()}`;
-    const topology = await client.getOrCreateLauncherSpace(launcherId);
+    const topology = await client.getOrCreateLauncherSpace(FIXED_LAUNCHER_ID);
 
-    // Send a command event to the encrypted exec room
     const crypto = await import('node:crypto');
     const requestId = crypto.randomUUID();
     await client.sendEvent(
@@ -213,7 +224,6 @@ describe('Public Server: WASM Client', { timeout: 120000 }, () => {
     );
     console.log(`[pub] Sent command event: ${requestId}`);
 
-    // Collect events and verify we can read our own event back
     let found = false;
     const deadline = Date.now() + 15000;
     while (Date.now() < deadline && !found) {
@@ -234,17 +244,15 @@ describe('Public Server: WASM Client', { timeout: 120000 }, () => {
     client.free();
   });
 
-  it('send state event to status room', async () => {
+  it('send telemetry state event to exec room', async () => {
     const client = await WasmMatrixClient.login(
       creds.url, creds.account1.username, creds.account1.password,
     );
 
-    const launcherId = `pub-state-${Date.now()}`;
-    const topology = await client.getOrCreateLauncherSpace(launcherId);
+    const topology = await client.getOrCreateLauncherSpace(FIXED_LAUNCHER_ID);
 
-    // Send telemetry state event
     await client.sendStateEvent(
-      topology.status_room_id,
+      topology.exec_room_id,
       'org.mxdx.host_telemetry',
       '',
       JSON.stringify({
@@ -253,14 +261,32 @@ describe('Public Server: WASM Client', { timeout: 120000 }, () => {
         arch: 'x64',
       }),
     );
-    console.log('[pub] Sent state event to status room');
+    console.log('[pub] Sent state event to exec room');
 
-    // Verify by collecting events
     await client.syncOnce();
-    const eventsJson = await client.collectRoomEvents(topology.status_room_id, 3);
+    const eventsJson = await client.collectRoomEvents(topology.exec_room_id, 3);
     const events = JSON.parse(eventsJson);
     const found = events?.some(e => e.type === 'org.mxdx.host_telemetry');
     assert.ok(found, 'Should find telemetry state event');
+
+    client.free();
+  });
+
+  it('listLauncherSpaces discovers existing spaces', async () => {
+    const client = await WasmMatrixClient.login(
+      creds.url, creds.account1.username, creds.account1.password,
+    );
+
+    const launchersJson = await client.listLauncherSpaces();
+    const launchers = JSON.parse(launchersJson);
+    assert.ok(Array.isArray(launchers), 'Should return array');
+
+    const found = launchers.find(l => l.launcher_id === FIXED_LAUNCHER_ID);
+    assert.ok(found, `Should find ${FIXED_LAUNCHER_ID} in launcher list`);
+    assert.ok(found.space_id, 'Should have space_id');
+    assert.ok(found.exec_room_id, 'Should have exec_room_id');
+    assert.ok(found.logs_room_id, 'Should have logs_room_id');
+    console.log(`[pub] Found ${launchers.length} launcher(s)`);
 
     client.free();
   });
@@ -282,11 +308,9 @@ describe('Public Server: Launcher + Client Round-Trip', { timeout: 180000 }, () 
     if (launcherProc) launcherProc.kill();
   });
 
-  it('launcher starts and client executes a command', async () => {
-    // Start the launcher using account2
+  it('launcher starts and client executes a command (latency < 10s)', async () => {
     console.log(`[pub] Starting launcher as ${creds.account2.username} on ${creds.url}...`);
 
-    // Get account1's MXID for admin invite
     const adminClient = await WasmMatrixClient.login(
       creds.url, creds.account1.username, creds.account1.password,
     );
@@ -305,11 +329,11 @@ describe('Public Server: Launcher + Client Round-Trip', { timeout: 180000 }, () 
       '--allowed-cwd', '/tmp',
       '--admin-user', adminMxid,
       '--config', configPath,
+      '--log-format', 'text',
     ], {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    // Capture output for debugging
     let launcherOutput = '';
     launcherProc.stdout.on('data', (chunk) => {
       launcherOutput += chunk.toString();
@@ -324,10 +348,10 @@ describe('Public Server: Launcher + Client Round-Trip', { timeout: 180000 }, () 
     assert.ok(online, 'Launcher should come online');
     console.log('[pub] Launcher is online');
 
-    // Give time for invites to propagate
-    await new Promise(r => setTimeout(r, 3000));
+    await sleep(3000);
 
-    // Connect as client (account1) and execute a command via the client CLI
+    // Measure latency: time from client exec start to result
+    const startTime = Date.now();
     console.log('[pub] Running client exec...');
 
     const clientResult = await new Promise((resolve, reject) => {
@@ -354,24 +378,23 @@ describe('Public Server: Launcher + Client Round-Trip', { timeout: 180000 }, () 
       });
       proc.on('error', reject);
 
-      // Safety timeout
       setTimeout(() => {
         proc.kill();
         resolve({ code: -1, stdout, stderr: stderr + '\n[timeout]' });
       }, 60000);
     });
 
-    console.log(`[pub] Client exit code: ${clientResult.code}`);
+    const latencyMs = Date.now() - startTime;
+    console.log(`[pub] Client exit code: ${clientResult.code}, latency: ${latencyMs}ms`);
     console.log(`[pub] Client stdout: ${clientResult.stdout}`);
     if (clientResult.stderr) console.log(`[pub] Client stderr: ${clientResult.stderr}`);
 
     assert.strictEqual(clientResult.code, 0, `Client should exit 0, got ${clientResult.code}`);
+    assert.ok(latencyMs < 10000, `Latency should be < 10s, was ${latencyMs}ms`);
 
-    // Parse JSON output
     const output = JSON.parse(clientResult.stdout);
     assert.strictEqual(output.exitCode, 0, 'Remote command exit code should be 0');
 
-    // Cleanup config
     try { fs.unlinkSync(configPath); } catch { /* ignore */ }
   });
 });
