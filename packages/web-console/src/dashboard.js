@@ -31,6 +31,16 @@ async function render(client, onOpenTerminal, onReconnect) {
 
   try {
     await client.syncOnce();
+
+    // Auto-join any invited rooms (launcher invites client to space/exec/logs)
+    try {
+      const invited = client.invitedRoomIds();
+      for (const roomId of invited) {
+        try { await client.joinRoom(roomId); } catch { /* may fail */ }
+      }
+      if (invited.length > 0) await client.syncOnce();
+    } catch { /* invitedRoomIds may not be available */ }
+
     const launchersJson = await client.listLauncherSpaces();
     const launchers = JSON.parse(launchersJson);
 
