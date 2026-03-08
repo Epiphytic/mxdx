@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import { connectWithSession, TerminalDataEvent, saveIndexedDB } from '@mxdx/core';
 import { executeCommand } from './process-bridge.js';
 import { PtyBridge } from './pty-bridge.js';
@@ -49,6 +50,7 @@ export class LauncherRuntime {
   #backoffMs = 0;
   #lastStoreSave = 0;
   #log;
+  #sessionRegistry = new Map(); // sessionId -> { tmuxName, dmRoomId, sender, persistent, pty, createdAt }
 
   constructor(config) {
     this.#config = config;
@@ -301,15 +303,31 @@ export class LauncherRuntime {
         sender,
       });
 
+      // Spawn PTY bridge with tmux support
+      const sessionId = crypto.randomUUID().slice(0, 8);
+      const pty = new PtyBridge(command, {
+        cols, rows, cwd, env,
+        useTmux: this.#config.useTmux || 'auto',
+      });
+
+      this.#sessionRegistry.set(sessionId, {
+        tmuxName: pty.tmuxName,
+        dmRoomId,
+        sender,
+        persistent: pty.persistent,
+        pty,
+        createdAt: new Date().toISOString(),
+      });
+
       // Respond with DM room ID
-      await this.#sendSessionResponse(requestId, 'started', dmRoomId);
+      await this.#sendSessionResponse(requestId, 'started', dmRoomId, {
+        session_id: sessionId,
+        persistent: pty.persistent,
+      });
 
       // Wait for the client to join the DM
       await new Promise((r) => setTimeout(r, 2000));
       await this.#client.syncOnce();
-
-      // Spawn PTY bridge
-      const pty = new PtyBridge(command, { cols, rows, cwd, env });
 
       // Wait for PTY to initialize
       await new Promise((r) => setTimeout(r, 500));
@@ -387,7 +405,16 @@ export class LauncherRuntime {
 
       // Run input polling (don't await — let it run in background)
       pollForInput().finally(() => {
-        this.#log.info('Interactive session ended', { request_id: requestId });
+        if (pty.persistent) {
+          pty.detach();
+          this.#log.info('Interactive session bridge detached (tmux alive)', {
+            request_id: requestId,
+            session_id: sessionId,
+          });
+        } else {
+          this.#sessionRegistry.delete(sessionId);
+          this.#log.info('Interactive session ended', { request_id: requestId, session_id: sessionId });
+        }
         this.#sendSessionResponse(requestId, 'ended', dmRoomId).catch(() => {});
         this.#activeSessions--;
       });
@@ -420,7 +447,7 @@ export class LauncherRuntime {
     }
   }
 
-  async #sendSessionResponse(requestId, status, roomId) {
+  async #sendSessionResponse(requestId, status, roomId, extra = {}) {
     await Promise.race([
       this.#client.sendEvent(
         this.#topology.exec_room_id,
@@ -429,6 +456,7 @@ export class LauncherRuntime {
           request_id: requestId,
           status,
           room_id: roomId,
+          ...extra,
         }),
       ),
       new Promise((_, reject) =>
