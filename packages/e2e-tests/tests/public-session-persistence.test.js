@@ -31,6 +31,27 @@ const LAUNCHER_BIN = path.join(ROOT, 'packages', 'launcher', 'bin', 'mxdx-launch
 const WEB_CONSOLE_DIR = path.join(ROOT, 'packages', 'web-console');
 const CREDENTIALS_PATH = path.join(ROOT, 'test-credentials.toml');
 
+// ── Helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Extract the Matrix server name from a URL or hostname.
+ * "matrix.org" -> "matrix.org"
+ * "https://matrix-client.matrix.org" -> "matrix.org"
+ * "https://my-server.example.com" -> "my-server.example.com"
+ */
+function extractServerName(serverUrl) {
+  // If it's already a bare hostname (no protocol), use as-is
+  if (!serverUrl.includes('://')) return serverUrl;
+  try {
+    const hostname = new URL(serverUrl).hostname;
+    // matrix-client.matrix.org is a CDN alias — real server name is matrix.org
+    if (hostname === 'matrix-client.matrix.org') return 'matrix.org';
+    return hostname;
+  } catch {
+    return serverUrl;
+  }
+}
+
 // ── Load and validate credentials ──────────────────────────────────────
 
 function loadCredentials() {
@@ -148,7 +169,7 @@ test.beforeAll(async ({}, testInfo) => {
     '--username', creds.account1User,
     '--password', creds.account1Pass,
     '--allowed-commands', 'echo,bash,cat,ls,sleep,date,whoami',
-    '--admin-user', `@${creds.account2User}:${new URL(creds.serverUrl).hostname === 'matrix-client.matrix.org' ? 'matrix.org' : new URL(creds.serverUrl).hostname}`,
+    '--admin-user', `@${creds.account2User}:${extractServerName(creds.serverUrl)}`,
     '--use-tmux', 'auto',
     '--log-format', 'text',
     '--config', configPath,
@@ -210,12 +231,20 @@ test.describe('Public Server Session Persistence', () => {
     console.log('[pub-e2e] Step 2: Waiting for launcher card');
 
     // Dashboard refreshes every 10s. Launcher needs to be discovered via spaces.
-    // On public servers with many rooms, this can take a few refresh cycles.
-    await expect(page.locator('.launcher-card')).toBeVisible({ timeout: 60000 });
-    console.log('[pub-e2e] Launcher card visible');
+    // Multiple launcher cards may exist (from previous test runs) — find ours.
+    await expect(page.locator('.launcher-card').first()).toBeVisible({ timeout: 60000 });
+    console.log('[pub-e2e] Launcher card(s) visible');
+
+    // Find our launcher card by account1 username
+    const launcherCard = page.locator(`.launcher-card:has-text("${creds.account1User}")`);
+    const ourCardCount = await launcherCard.count();
+    console.log(`[pub-e2e] Found ${ourCardCount} card(s) matching ${creds.account1User}`);
+
+    // Use the matching card, or fall back to first card
+    const targetCard = ourCardCount > 0 ? launcherCard.first() : page.locator('.launcher-card').first();
 
     // Check telemetry for session persistence info
-    const telemetryText = await page.locator('.launcher-card .telemetry').first().innerText();
+    const telemetryText = await targetCard.locator('.telemetry').innerText();
     console.log(`[pub-e2e] Telemetry: ${telemetryText.replace(/\n/g, ' | ')}`);
 
     // Session persistence depends on tmux availability on the test machine
@@ -224,7 +253,7 @@ test.describe('Public Server Session Persistence', () => {
 
     // ── Step 3: Open terminal ──────────────────────────────────
     console.log('[pub-e2e] Step 3: Opening terminal');
-    await page.click('.btn-primary:text("Open Terminal")');
+    await targetCard.locator('.btn-primary:text("Open Terminal")').click();
     await expect(page.locator('#terminal')).toBeVisible();
 
     // Wait for xterm.js to render
