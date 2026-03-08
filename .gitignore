@@ -10,5 +10,9 @@ node_modules/
 .env.test
 test-credentials.toml
 
+# WASM build artifacts (regenerated from crates/mxdx-core-wasm)
+packages/core/wasm/
+packages/web-console/wasm/
+
 # Git worktrees
 .worktrees/
