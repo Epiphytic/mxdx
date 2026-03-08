@@ -109,7 +109,6 @@ class WasmMatrixClient {
     }
     /**
      * Create a direct message room with E2EE and history_visibility: joined.
-     * Used for interactive terminal sessions — only participants who join see messages.
      * @param {string} user_id
      * @returns {Promise<string>}
      */
@@ -122,8 +121,8 @@ class WasmMatrixClient {
         return ret;
     }
     /**
-     * Create a launcher space with exec and logs child rooms (both E2EE + MSC4362).
-     * Returns JSON: { space_id, exec_room_id, logs_room_id }
+     * Create a launcher space with exec, status, and logs child rooms.
+     * Returns JSON: { space_id, exec_room_id, status_room_id, logs_room_id }
      * @param {string} launcher_id
      * @returns {Promise<any>}
      */
@@ -133,6 +132,33 @@ class WasmMatrixClient {
         const ptr0 = passStringToWasm0(launcher_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.wasmmatrixclient_createLauncherSpace(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
+     * Diagnostic: check encryption readiness for a room.
+     * Returns JSON with room encryption status, member count, etc.
+     * @param {string} room_id
+     * @returns {Promise<string>}
+     */
+    debugRoomEncryption(room_id) {
+        if (this.__wbg_ptr == 0) throw new Error('Attempt to use a moved value');
+        _assertNum(this.__wbg_ptr);
+        const ptr0 = passStringToWasm0(room_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmatrixclient_debugRoomEncryption(this.__wbg_ptr, ptr0, len0);
+        return ret;
+    }
+    /**
+     * Debug: dump all event types from a room (including encrypted).
+     * @param {string} room_id
+     * @returns {Promise<string>}
+     */
+    debugRoomEvents(room_id) {
+        if (this.__wbg_ptr == 0) throw new Error('Attempt to use a moved value');
+        _assertNum(this.__wbg_ptr);
+        const ptr0 = passStringToWasm0(room_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmmatrixclient_debugRoomEvents(this.__wbg_ptr, ptr0, len0);
         return ret;
     }
     /**
@@ -268,7 +294,6 @@ class WasmMatrixClient {
     }
     /**
      * List all launcher spaces by scanning joined rooms for matching topic patterns.
-     * Returns JSON string: array of { space_id, exec_room_id, logs_room_id, launcher_id }.
      * @returns {Promise<string>}
      */
     listLauncherSpaces() {
@@ -295,8 +320,8 @@ class WasmMatrixClient {
         return ret;
     }
     /**
-     * Sync and wait for a specific event type in a room.
-     * Returns event content as JSON string, or "null" if timeout.
+     * Wait for a specific event type to appear in a room.
+     * Returns the first new event matching the type, or "null" on timeout.
      * @param {string} room_id
      * @param {string} event_type
      * @param {number} timeout_secs
@@ -347,7 +372,12 @@ class WasmMatrixClient {
         return ret;
     }
     /**
-     * Send a custom event to a room.
+     * Send a custom event to a room (with E2EE encryption).
+     * Uses Room::send_raw() which handles encryption inline:
+     *   1. Syncs room members
+     *   2. Queries device keys for all members
+     *   3. Preshares the Megolm room key
+     *   4. Encrypts and sends via HTTP
      * @param {string} room_id
      * @param {string} event_type
      * @param {string} content_json
@@ -1361,32 +1391,32 @@ function __wbg_get_imports() {
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000001: function() { return logError(function (arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 2024, function: Function { arguments: [NamedExternref("IDBVersionChangeEvent")], shim_idx: 1920, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
-            const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h7f9f576ba0a4aeae, wasm_bindgen__convert__closures_____invoke__h337a4118a47e785a);
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 1858, function: Function { arguments: [NamedExternref("IDBVersionChangeEvent")], shim_idx: 1859, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h742486a037eafbab, wasm_bindgen__convert__closures_____invoke__h517844515a342c77);
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000002: function() { return logError(function (arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 2129, function: Function { arguments: [NamedExternref("Event")], shim_idx: 2144, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 2140, function: Function { arguments: [NamedExternref("Event")], shim_idx: 2155, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h1ee1b80d23108f5e, wasm_bindgen__convert__closures_____invoke__hbf331c3d6d1961e6);
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000003: function() { return logError(function (arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 2130, function: Function { arguments: [], shim_idx: 2143, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 2141, function: Function { arguments: [], shim_idx: 2154, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__hf437510793b70492, wasm_bindgen__convert__closures_____invoke__hc2947d00ce9e2e3e);
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000004: function() { return logError(function (arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 2257, function: Function { arguments: [], shim_idx: 2258, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 2268, function: Function { arguments: [], shim_idx: 2269, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h491709c3abe8a21d, wasm_bindgen__convert__closures_____invoke__h34bf6056b0fdf334);
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000005: function() { return logError(function (arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 5360, function: Function { arguments: [Externref], shim_idx: 6386, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 5364, function: Function { arguments: [Externref], shim_idx: 6389, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__hcc9109799539efff, wasm_bindgen__convert__closures_____invoke__h0b3ed8b0571a3d86);
             return ret;
         }, arguments); },
         __wbindgen_cast_0000000000000006: function() { return logError(function (arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { dtor_idx: 5375, function: Function { arguments: [], shim_idx: 5376, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { dtor_idx: 5379, function: Function { arguments: [], shim_idx: 5380, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm.wasm_bindgen__closure__destroy__h69a0302428491d92, wasm_bindgen__convert__closures_____invoke__h73099c48dc6a931a);
             return ret;
         }, arguments); },
@@ -1464,10 +1494,10 @@ function wasm_bindgen__convert__closures_____invoke__hbf331c3d6d1961e6(arg0, arg
     wasm.wasm_bindgen__convert__closures_____invoke__hbf331c3d6d1961e6(arg0, arg1, arg2);
 }
 
-function wasm_bindgen__convert__closures_____invoke__h337a4118a47e785a(arg0, arg1, arg2) {
+function wasm_bindgen__convert__closures_____invoke__h517844515a342c77(arg0, arg1, arg2) {
     _assertNum(arg0);
     _assertNum(arg1);
-    const ret = wasm.wasm_bindgen__convert__closures_____invoke__h337a4118a47e785a(arg0, arg1, arg2);
+    const ret = wasm.wasm_bindgen__convert__closures_____invoke__h517844515a342c77(arg0, arg1, arg2);
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }

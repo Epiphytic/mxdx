@@ -50,21 +50,38 @@ export function setupAuth({ onLogin, getWasmClient }) {
       showStatus(`Connecting to ${server}...`);
       const client = await WasmMatrixClient.login(server, username, password);
 
-      showStatus('Bootstrapping cross-signing...');
+      showStatus('Setting up encryption...');
       try {
-        await client.bootstrapCrossSigningIfNeeded(password);
-        await client.verifyOwnIdentity();
-      } catch {
-        // Non-fatal: cross-signing may not be available
+        await Promise.race([
+          (async () => {
+            await client.bootstrapCrossSigningIfNeeded(password);
+            await client.verifyOwnIdentity();
+          })(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000)),
+        ]);
+      } catch (csErr) {
+        console.warn('[auth] Cross-signing skipped (non-fatal):', csErr);
       }
 
       showStatus('Saving session...');
       const sessionJson = client.exportSession();
 
       statusEl.hidden = true;
+      form.reset();
+      document.getElementById('server').value = 'matrix.org';
       onLogin(client, sessionJson);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[auth] Login error:', err);
+      let msg;
+      if (err instanceof Error) {
+        msg = err.message;
+      } else if (typeof err === 'string') {
+        msg = err;
+      } else if (err && typeof err.message === 'string') {
+        msg = err.message;
+      } else {
+        msg = String(err) || 'Unknown error';
+      }
       showError(`Login failed: ${msg}`);
     } finally {
       loginBtn.disabled = false;

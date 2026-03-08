@@ -1,5 +1,6 @@
-// Polyfill IndexedDB for Node.js — matrix-sdk's crypto store requires it for E2EE key exchange
-import 'fake-indexeddb/auto';
+// Persistent IndexedDB polyfill for Node.js — must load before WASM.
+// In browser environments this module is not used (browser has real IndexedDB).
+export { saveIndexedDB, restoreIndexedDB } from './persistent-indexeddb.js';
 
 export * from './wasm/mxdx_core_wasm.js';
 export { CredentialStore } from './credentials.js';

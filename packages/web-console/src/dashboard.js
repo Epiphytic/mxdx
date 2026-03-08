@@ -2,6 +2,13 @@ import { runExecCommand } from './exec-view.js';
 
 let refreshTimer = null;
 
+export function stopDashboardRefresh() {
+  if (refreshTimer) {
+    clearInterval(refreshTimer);
+    refreshTimer = null;
+  }
+}
+
 /**
  * Set up the dashboard view.
  * @param {object} client - WasmMatrixClient
@@ -9,10 +16,7 @@ let refreshTimer = null;
  * @param {function} callbacks.onOpenTerminal - Called with launcher info
  */
 export function setupDashboard(client, { onOpenTerminal }) {
-  if (refreshTimer) {
-    clearInterval(refreshTimer);
-    refreshTimer = null;
-  }
+  stopDashboardRefresh();
 
   render(client, onOpenTerminal);
 
@@ -24,7 +28,6 @@ export function setupDashboard(client, { onOpenTerminal }) {
 
 async function render(client, onOpenTerminal) {
   const dashboard = document.getElementById('dashboard');
-  dashboard.replaceChildren();
 
   try {
     await client.syncOnce();
@@ -39,7 +42,7 @@ async function render(client, onOpenTerminal) {
       const p2 = document.createElement('p');
       p2.textContent = 'Start a launcher and it will appear here.';
       empty.append(p1, p2);
-      dashboard.appendChild(empty);
+      dashboard.replaceChildren(empty);
       return;
     }
 
@@ -67,14 +70,14 @@ async function render(client, onOpenTerminal) {
       grid.appendChild(renderCard(launcher, client, onOpenTerminal));
     }
 
-    dashboard.appendChild(grid);
+    dashboard.replaceChildren(grid);
   } catch (err) {
     const errDiv = document.createElement('div');
     errDiv.className = 'no-launchers';
     const p = document.createElement('p');
     p.textContent = `Error loading launchers: ${err}`;
     errDiv.appendChild(p);
-    dashboard.appendChild(errDiv);
+    dashboard.replaceChildren(errDiv);
   }
 }
 

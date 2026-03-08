@@ -47,26 +47,34 @@ export async function setupTerminalView(client, launcher, { onClose }) {
   term.writeln('Requesting interactive session...');
 
   try {
+    // Sync first to pick up any device key changes (e.g. launcher restart)
+    await client.syncOnce();
+
     // Send interactive session request
     const requestId = crypto.randomUUID();
     const cols = term.cols;
     const rows = term.rows;
 
-    await client.sendEvent(
-      launcher.exec_room_id,
-      'org.mxdx.command',
-      JSON.stringify({
-        action: 'interactive',
-        command: '/bin/bash',
-        request_id: requestId,
-        cols,
-        rows,
-      }),
-    );
+    try {
+      await client.sendEvent(
+        launcher.exec_room_id,
+        'org.mxdx.command',
+        JSON.stringify({
+          action: 'interactive',
+          request_id: requestId,
+          cols,
+          rows,
+        }),
+      );
+    } catch (sendErr) {
+      term.writeln(`\r\nFailed to send session request: ${sendErr}`);
+      return;
+    }
 
     term.writeln('Waiting for session...');
 
-    // Wait for session response
+    // Wait for session response (30s timeout — E2EE key sharing with many
+    // devices can take 5-10s each direction)
     const responseJson = await client.onRoomEvent(
       launcher.exec_room_id,
       'org.mxdx.terminal.session',
@@ -74,7 +82,8 @@ export async function setupTerminalView(client, launcher, { onClose }) {
     );
 
     if (!responseJson || responseJson === 'null') {
-      term.writeln('\r\nTimeout waiting for session response.');
+      term.writeln('\r\nTimeout: launcher did not respond within 30 seconds.');
+      term.writeln('Check that the launcher is running and can decrypt messages.');
       return;
     }
 

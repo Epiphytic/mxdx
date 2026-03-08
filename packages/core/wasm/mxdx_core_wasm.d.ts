@@ -60,14 +60,22 @@ export class WasmMatrixClient {
     collectRoomEvents(room_id: string, timeout_secs: number): Promise<string>;
     /**
      * Create a direct message room with E2EE and history_visibility: joined.
-     * Used for interactive terminal sessions — only participants who join see messages.
      */
     createDmRoom(user_id: string): Promise<string>;
     /**
-     * Create a launcher space with exec and logs child rooms (both E2EE + MSC4362).
-     * Returns JSON: { space_id, exec_room_id, logs_room_id }
+     * Create a launcher space with exec, status, and logs child rooms.
+     * Returns JSON: { space_id, exec_room_id, status_room_id, logs_room_id }
      */
     createLauncherSpace(launcher_id: string): Promise<any>;
+    /**
+     * Diagnostic: check encryption readiness for a room.
+     * Returns JSON with room encryption status, member count, etc.
+     */
+    debugRoomEncryption(room_id: string): Promise<string>;
+    /**
+     * Debug: dump all event types from a room (including encrypted).
+     */
+    debugRoomEvents(room_id: string): Promise<string>;
     /**
      * Get the device ID of the current session.
      */
@@ -106,7 +114,6 @@ export class WasmMatrixClient {
     joinRoom(room_id: string): Promise<void>;
     /**
      * List all launcher spaces by scanning joined rooms for matching topic patterns.
-     * Returns JSON string: array of { space_id, exec_room_id, logs_room_id, launcher_id }.
      */
     listLauncherSpaces(): Promise<string>;
     /**
@@ -114,8 +121,8 @@ export class WasmMatrixClient {
      */
     static login(server_name: string, username: string, password: string): Promise<WasmMatrixClient>;
     /**
-     * Sync and wait for a specific event type in a room.
-     * Returns event content as JSON string, or "null" if timeout.
+     * Wait for a specific event type to appear in a room.
+     * Returns the first new event matching the type, or "null" on timeout.
      */
     onRoomEvent(room_id: string, event_type: string, timeout_secs: number): Promise<string>;
     /**
@@ -129,7 +136,12 @@ export class WasmMatrixClient {
      */
     static restoreSession(session_json: string): Promise<WasmMatrixClient>;
     /**
-     * Send a custom event to a room.
+     * Send a custom event to a room (with E2EE encryption).
+     * Uses Room::send_raw() which handles encryption inline:
+     *   1. Syncs room members
+     *   2. Queries device keys for all members
+     *   3. Preshares the Megolm room key
+     *   4. Encrypts and sends via HTTP
      */
     sendEvent(room_id: string, event_type: string, content_json: string): Promise<void>;
     /**

@@ -1,17 +1,18 @@
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 
 /**
- * PtyBridge — manages a PTY session backed by tmux for persistence.
+ * PtyBridge — manages an interactive shell session using `script` for
+ * PTY allocation. This avoids the need for node-pty native bindings.
  *
- * Spawns: tmux new-session -d -s <id> -x <cols> -y <rows> <command>
- * Attaches a pipe process that reads/writes to the tmux session.
+ * Uses: script -q /dev/null -c <command>
+ * This allocates a real PTY for the child process.
  */
 export class PtyBridge {
-  #sessionId;
   #proc = null;
   #alive = false;
   #dataCallbacks = [];
+  #cols;
+  #rows;
 
   /**
    * @param {string} command - Shell command to run (e.g. "bash", "/bin/sh")
@@ -22,40 +23,23 @@ export class PtyBridge {
    * @param {Record<string,string>} [options.env={}]
    */
   constructor(command, { cols = 80, rows = 24, cwd = '/tmp', env = {} } = {}) {
-    this.#sessionId = `mxdx-${randomUUID().slice(0, 8)}`;
+    this.#cols = cols;
+    this.#rows = rows;
 
-    // Create tmux session in detached mode
-    const tmuxCreate = spawn('tmux', [
-      'new-session', '-d',
-      '-s', this.#sessionId,
-      '-x', String(cols),
-      '-y', String(rows),
-      command,
-    ], {
+    // Use script(1) to allocate a real PTY for the shell
+    this.#proc = spawn('script', ['-q', '/dev/null', '-c', command], {
       cwd,
-      env: { ...process.env, ...env },
-      stdio: 'ignore',
-    });
-
-    tmuxCreate.on('close', (code) => {
-      if (code !== 0) return;
-      this.#alive = true;
-      this.#attachPipe();
-    });
-
-    tmuxCreate.on('error', () => {
-      this.#alive = false;
-    });
-  }
-
-  #attachPipe() {
-    // Use script + tmux attach to get PTY output as a byte stream
-    this.#proc = spawn('tmux', [
-      'attach-session', '-t', this.#sessionId,
-    ], {
+      env: {
+        ...process.env,
+        ...env,
+        TERM: 'xterm-256color',
+        COLUMNS: String(cols),
+        LINES: String(rows),
+      },
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, TERM: 'xterm-256color' },
     });
+
+    this.#alive = true;
 
     this.#proc.stdout.on('data', (chunk) => {
       for (const cb of this.#dataCallbacks) {
@@ -79,17 +63,8 @@ export class PtyBridge {
   }
 
   write(data) {
-    if (!this.#alive) return;
-
-    if (this.#proc && this.#proc.stdin.writable) {
-      this.#proc.stdin.write(data instanceof Uint8Array ? Buffer.from(data) : data);
-    } else {
-      // Fallback: send keys via tmux send-keys
-      const text = data instanceof Uint8Array ? Buffer.from(data).toString() : data;
-      spawn('tmux', ['send-keys', '-t', this.#sessionId, '-l', text], {
-        stdio: 'ignore',
-      });
-    }
+    if (!this.#alive || !this.#proc?.stdin?.writable) return;
+    this.#proc.stdin.write(data instanceof Uint8Array ? Buffer.from(data) : data);
   }
 
   onData(callback) {
@@ -101,11 +76,15 @@ export class PtyBridge {
   }
 
   resize(cols, rows) {
-    if (!this.#alive) return;
-    spawn('tmux', [
-      'resize-window', '-t', this.#sessionId,
-      '-x', String(cols), '-y', String(rows),
-    ], { stdio: 'ignore' });
+    if (!this.#alive || !this.#proc?.pid) return;
+    this.#cols = cols;
+    this.#rows = rows;
+    // Send SIGWINCH to the script process with new size via stty
+    try {
+      spawn('kill', ['-WINCH', String(this.#proc.pid)], { stdio: 'ignore' });
+    } catch {
+      // Best effort
+    }
   }
 
   kill() {
@@ -114,14 +93,9 @@ export class PtyBridge {
       this.#proc.kill();
       this.#proc = null;
     }
-    spawn('tmux', ['kill-session', '-t', this.#sessionId], { stdio: 'ignore' });
   }
 
   get alive() {
     return this.#alive;
-  }
-
-  get sessionId() {
-    return this.#sessionId;
   }
 }

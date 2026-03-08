@@ -1,4 +1,4 @@
-import { connectWithSession, TerminalDataEvent } from '@mxdx/core';
+import { connectWithSession, TerminalDataEvent, saveIndexedDB } from '@mxdx/core';
 import { executeCommand } from './process-bridge.js';
 import { PtyBridge } from './pty-bridge.js';
 import { inflateSync } from 'node:zlib';
@@ -47,6 +47,7 @@ export class LauncherRuntime {
   #activeSessions = 0;
   #maxSessions;
   #backoffMs = 0;
+  #lastStoreSave = 0;
   #log;
 
   constructor(config) {
@@ -60,7 +61,7 @@ export class LauncherRuntime {
     const username = this.#config.username;
     const log = (msg) => this.#log.info(msg);
 
-    // ── 1. Connect with session persistence + cross-signing ─────
+    // ── 1. Connect (crypto store is persistent via IndexedDB snapshots) ──
     const { client, freshLogin, password } = await connectWithSession({
       username,
       server,
@@ -130,9 +131,29 @@ export class LauncherRuntime {
   async #syncLoop() {
     while (this.#running) {
       try {
-        await this.#client.syncOnce();
-        await this.#processCommands();
+        await Promise.race([
+          this.#client.syncOnce(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('syncOnce timed out after 30s')), 30000),
+          ),
+        ]);
+        await Promise.race([
+          this.#processCommands(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('processCommands timed out after 30s')), 30000),
+          ),
+        ]);
         this.#backoffMs = 0;
+
+        // Save crypto store every 5 minutes to persist new Megolm keys
+        if (Date.now() - this.#lastStoreSave > 300000) {
+          try {
+            await saveIndexedDB(this.#config.configDir);
+            this.#lastStoreSave = Date.now();
+          } catch {
+            // Non-fatal
+          }
+        }
       } catch (err) {
         this.#backoffMs = Math.min(Math.max(1000, this.#backoffMs * 2 || 1000), 30000);
         this.#log.error('Sync error', { error: err.message, backoff_ms: this.#backoffMs });
@@ -235,14 +256,15 @@ export class LauncherRuntime {
   }
 
   async #handleInteractiveSession(content, requestId, sender) {
-    const command = content.command || '/bin/bash';
+    const defaultShell = process.env.SHELL || '/bin/bash';
+    const command = content.command || defaultShell;
     const cols = content.cols || 80;
     const rows = content.rows || 24;
     const cwd = content.cwd || '/tmp';
     const env = content.env || {};
 
-    // Validate command
-    if (!this.#isCommandAllowed(command)) {
+    // Validate explicit command against allowlist; default shell is always permitted
+    if (content.command && !this.#isCommandAllowed(command)) {
       this.#log.warn(`Interactive command rejected: ${command}`, { request_id: requestId });
       await this.#sendSessionResponse(requestId, 'rejected', null);
       return;
@@ -315,8 +337,8 @@ export class LauncherRuntime {
             'org.mxdx.terminal.data',
             JSON.stringify({ data: encoded, encoding, seq }),
           );
-        } catch {
-          // Best effort
+        } catch (err) {
+          this.#log.warn('terminal.data send failed', { seq, error: String(err) });
         }
       });
 
@@ -399,15 +421,20 @@ export class LauncherRuntime {
   }
 
   async #sendSessionResponse(requestId, status, roomId) {
-    await this.#client.sendEvent(
-      this.#topology.exec_room_id,
-      'org.mxdx.terminal.session',
-      JSON.stringify({
-        request_id: requestId,
-        status,
-        room_id: roomId,
-      }),
-    );
+    await Promise.race([
+      this.#client.sendEvent(
+        this.#topology.exec_room_id,
+        'org.mxdx.terminal.session',
+        JSON.stringify({
+          request_id: requestId,
+          status,
+          room_id: roomId,
+        }),
+      ),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('sendSessionResponse timed out after 30s')), 30000),
+      ),
+    ]);
   }
 
   #isCommandAllowed(command) {

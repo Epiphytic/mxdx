@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { program } from 'commander';
+import { saveIndexedDB } from '@mxdx/core';
 import { LauncherConfig } from '../src/config.js';
 import { LauncherRuntime } from '../src/runtime.js';
 import { runOnboarding } from '../src/onboarding.js';
@@ -57,14 +58,18 @@ async function main() {
 
   const runtime = new LauncherRuntime(config);
 
-  // Graceful shutdown
+  // Graceful shutdown — save crypto store before exit
+  async function shutdown() {
+    await runtime.stop();
+    try { await saveIndexedDB(config.configDir); } catch { /* best effort */ }
+  }
   process.on('SIGINT', async () => {
     console.log('\n[launcher] Shutting down...');
-    await runtime.stop();
+    await shutdown();
     process.exit(0);
   });
   process.on('SIGTERM', async () => {
-    await runtime.stop();
+    await shutdown();
     process.exit(0);
   });
 

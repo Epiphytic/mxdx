@@ -61,8 +61,10 @@ impl WasmMatrixClient {
         password: &str,
         registration_token: &str,
     ) -> Result<WasmMatrixClient, JsValue> {
+        let store_name = format!("mxdx_{}_{}", username, homeserver_url.replace([':', '/', '.'], "_"));
         let client = Client::builder()
             .homeserver_url(homeserver_url)
+            .indexeddb_store(&store_name, None)
             .build()
             .await
             .map_err(to_js_err)?;
@@ -112,7 +114,9 @@ impl WasmMatrixClient {
         username: &str,
         password: &str,
     ) -> Result<WasmMatrixClient, JsValue> {
-        let builder = Client::builder();
+        let store_name = format!("mxdx_{}_{}", username, server_name.replace([':', '/', '.'], "_"));
+        let builder = Client::builder()
+            .indexeddb_store(&store_name, None);
         let client = if server_name.contains("://") {
             builder.homeserver_url(server_name)
         } else {
@@ -214,8 +218,10 @@ impl WasmMatrixClient {
         let access_token = parsed["access_token"].as_str()
             .ok_or_else(|| to_js_err("Missing access_token in session data"))?;
 
+        let store_name = format!("mxdx_{}_{}", user_id, homeserver_url.replace([':', '/', '.'], "_"));
         let client = Client::builder()
             .homeserver_url(homeserver_url)
+            .indexeddb_store(&store_name, None)
             .build()
             .await
             .map_err(to_js_err)?;
