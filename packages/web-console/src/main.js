@@ -1,13 +1,30 @@
 import init, { WasmMatrixClient } from '../wasm/mxdx_core_wasm.js';
 import { setupAuth } from './auth.js';
 import { setupDashboard, stopDashboardRefresh } from './dashboard.js';
-import { setupTerminalView } from './terminal-view.js';
+import { setupTerminalView, reconnectTerminalView } from './terminal-view.js';
 import { saveSession, loadSession, clearSession } from './session-store.js';
 
 // Persist state across Vite HMR reloads
 const hmrState = import.meta.hot?.data ?? {};
 let client = hmrState.client ?? null;
 let wasmReady = hmrState.wasmReady ?? false;
+
+// Session memory helpers (sessionStorage — survives page reload, not tab close)
+function saveTerminalSession(sessionId, dmRoomId, launcherExecRoomId, persistent) {
+  sessionStorage.setItem('mxdx-terminal-session', JSON.stringify({
+    sessionId, dmRoomId, launcherExecRoomId, persistent,
+  }));
+}
+
+function loadTerminalSession() {
+  const raw = sessionStorage.getItem('mxdx-terminal-session');
+  if (!raw) return null;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+
+function clearTerminalSession() {
+  sessionStorage.removeItem('mxdx-terminal-session');
+}
 
 async function boot() {
   // Skip boot if we already have a live client (HMR reload)
@@ -32,7 +49,17 @@ async function boot() {
   if (savedSession) {
     try {
       client = await WasmMatrixClient.restoreSession(savedSession);
-      showDashboard();
+
+      // Auto-reconnect if we had an active terminal session
+      const savedTerminal = loadTerminalSession();
+      if (savedTerminal) {
+        showReconnect(
+          { exec_room_id: savedTerminal.launcherExecRoomId, launcher_id: 'reconnecting...' },
+          { session_id: savedTerminal.sessionId, room_id: savedTerminal.dmRoomId, persistent: savedTerminal.persistent },
+        );
+      } else {
+        showDashboard();
+      }
       return;
     } catch (err) {
       console.warn('[boot] Session restore failed:', err);
@@ -55,9 +82,11 @@ function showDashboard() {
   document.getElementById('dashboard').hidden = false;
   document.getElementById('terminal').hidden = true;
   document.getElementById('header').hidden = false;
+  clearTerminalSession();
 
   setupDashboard(client, {
     onOpenTerminal: (launcher) => showTerminal(launcher),
+    onReconnect: (launcher, session) => showReconnect(launcher, session),
   });
 }
 
@@ -69,16 +98,54 @@ function showTerminal(launcher) {
   document.getElementById('terminal-title').textContent = launcher.launcher_id;
 
   setupTerminalView(client, launcher, {
-    onClose: () => showDashboard(),
+    onClose: () => {
+      clearTerminalSession();
+      showDashboard();
+    },
+    onSessionStarted: (sessionInfo) => {
+      saveTerminalSession(
+        sessionInfo.session_id,
+        sessionInfo.room_id,
+        launcher.exec_room_id,
+        sessionInfo.persistent,
+      );
+    },
+  });
+}
+
+function showReconnect(launcher, session) {
+  document.getElementById('login').hidden = true;
+  document.getElementById('dashboard').hidden = true;
+  document.getElementById('terminal').hidden = false;
+
+  document.getElementById('terminal-title').textContent = `${launcher.launcher_id} (reconnecting)`;
+
+  saveTerminalSession(session.session_id, session.room_id, launcher.exec_room_id, session.persistent);
+
+  reconnectTerminalView(client, launcher, session, {
+    onClose: () => {
+      clearTerminalSession();
+      showDashboard();
+    },
   });
 }
 
 async function handleLogout() {
   stopDashboardRefresh();
+  clearTerminalSession();
   await clearSession();
   client = null;
   showLogin();
 }
+
+// Warn before closing non-persistent terminal sessions
+window.addEventListener('beforeunload', (e) => {
+  const saved = loadTerminalSession();
+  if (saved && !saved.persistent) {
+    e.preventDefault();
+    e.returnValue = 'Terminal session will be lost — tmux is not available on this launcher.';
+  }
+});
 
 // Wire up auth
 setupAuth({
