@@ -3,6 +3,7 @@ import { setupAuth } from './auth.js';
 import { setupDashboard, stopDashboardRefresh } from './dashboard.js';
 import { setupTerminalView, reconnectTerminalView } from './terminal-view.js';
 import { saveSession, loadSession, clearSession } from './session-store.js';
+import { setupSettings } from './settings.js';
 
 // Persist state across Vite HMR reloads
 const hmrState = import.meta.hot?.data ?? {};
@@ -88,13 +89,34 @@ function showDashboard() {
   document.getElementById('login').hidden = true;
   document.getElementById('dashboard').hidden = false;
   document.getElementById('terminal').hidden = true;
+  document.getElementById('settings').hidden = true;
   document.getElementById('header').hidden = false;
   clearTerminalSession();
+
+  // Update nav active state
+  document.getElementById('nav-dashboard').classList.add('active');
+  document.getElementById('nav-settings').classList.remove('active');
 
   setupDashboard(client, {
     onOpenTerminal: (launcher) => showTerminal(launcher),
     onReconnect: (launcher, session) => showReconnect(launcher, session),
   });
+}
+
+function showSettings() {
+  document.getElementById('login').hidden = true;
+  document.getElementById('dashboard').hidden = true;
+  document.getElementById('terminal').hidden = true;
+  document.getElementById('settings').hidden = false;
+  document.getElementById('header').hidden = false;
+  clearTerminalSession();
+  stopDashboardRefresh();
+
+  // Update nav active state
+  document.getElementById('nav-dashboard').classList.remove('active');
+  document.getElementById('nav-settings').classList.add('active');
+
+  setupSettings(client);
 }
 
 function showTerminal(launcher) {
@@ -168,6 +190,9 @@ setupAuth({
 // Wire up nav
 document.getElementById('nav-dashboard').addEventListener('click', () => {
   if (client) showDashboard();
+});
+document.getElementById('nav-settings').addEventListener('click', () => {
+  if (client) showSettings();
 });
 document.getElementById('nav-logout').addEventListener('click', () => handleLogout());
 
