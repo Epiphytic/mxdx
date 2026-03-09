@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { program } from 'commander';
-import { saveIndexedDB, connectWithSession, parseOlderThan, cleanupDevices, cleanupRooms, cleanupEvents } from '@mxdx/core';
+import { saveIndexedDB, connectWithSession, parseOlderThan, cleanupDevices, cleanupRooms, cleanupEvents, logoutAll } from '@mxdx/core';
 import { LauncherConfig } from '../src/config.js';
 import { LauncherRuntime } from '../src/runtime.js';
 import { runOnboarding } from '../src/onboarding.js';
@@ -86,20 +86,10 @@ program
   .command('cleanup <targets>')
   .description('Clean up stale Matrix state (devices, events, rooms)')
   .option('--force-cleanup', 'Skip confirmation prompts')
-  .option('--older-than <duration>', 'Only clean items older than duration (e.g. 1d, 2w, 3m)')
+  .option('--older-than <duration>', 'Only clean items older than duration (e.g. 1h, 1d, 2w, 3m)')
+  .option('--delete-all-sessions', 'Log out ALL sessions and delete ALL devices (nuclear — requires re-login)')
   .action(async (targets, opts) => {
     const parentOpts = program.opts();
-    const validTargets = ['devices', 'events', 'rooms'];
-    const targetList = targets.split(',').map(t => t.trim()).filter(Boolean);
-
-    for (const t of targetList) {
-      if (!validTargets.includes(t)) {
-        console.error(`Invalid target: '${t}'. Valid targets: ${validTargets.join(', ')}`);
-        process.exit(1);
-      }
-    }
-
-    const olderThan = parseOlderThan(opts.olderThan);
     const log = (msg) => console.error(`[cleanup] ${msg}`);
 
     // Resolve config to get server/username
@@ -122,6 +112,31 @@ program
     const homeserverUrl = session.homeserver_url;
     const userId = client.userId();
     const currentDeviceId = client.deviceId();
+
+    // Handle --delete-all-sessions (nuclear device cleanup)
+    if (opts.deleteAllSessions) {
+      if (!opts.forceCleanup) {
+        const confirmed = await confirmPrompt('This will log out ALL sessions and delete ALL devices. You will need to re-login. Proceed?');
+        if (!confirmed) {
+          log('Aborted.');
+          process.exit(0);
+        }
+      }
+      await logoutAll({ accessToken, homeserverUrl, onProgress: log });
+      process.exit(0);
+    }
+
+    const validTargets = ['devices', 'events', 'rooms'];
+    const targetList = targets.split(',').map(t => t.trim()).filter(Boolean);
+
+    for (const t of targetList) {
+      if (!validTargets.includes(t)) {
+        console.error(`Invalid target: '${t}'. Valid targets: ${validTargets.join(', ')}`);
+        process.exit(1);
+      }
+    }
+
+    const olderThan = parseOlderThan(opts.olderThan);
 
     let launchersJson;
     if (targetList.includes('events') || targetList.includes('rooms')) {

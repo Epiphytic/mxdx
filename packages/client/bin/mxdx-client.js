@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { program } from 'commander';
-import { connectWithSession, parseOlderThan, cleanupDevices, cleanupRooms, cleanupEvents } from '@mxdx/core';
+import { connectWithSession, parseOlderThan, cleanupDevices, cleanupRooms, cleanupEvents, logoutAll } from '@mxdx/core';
 import { ClientConfig } from '../src/config.js';
 import { findLauncher } from '../src/discovery.js';
 import { execCommand } from '../src/exec.js';
@@ -164,9 +164,32 @@ program
   .command('cleanup <targets>')
   .description('Clean up stale Matrix state (devices, events, rooms)')
   .option('--force-cleanup', 'Skip confirmation prompts')
-  .option('--older-than <duration>', 'Only clean items older than duration (e.g. 1d, 2w, 3m)')
+  .option('--older-than <duration>', 'Only clean items older than duration (e.g. 1h, 1d, 2w, 3m)')
+  .option('--delete-all-sessions', 'Log out ALL sessions and delete ALL devices (nuclear — requires re-login)')
   .action(async (targets, opts) => {
     const parentOpts = program.opts();
+    const log = (msg) => console.error(`[cleanup] ${msg}`);
+    const result = await connect(parentOpts);
+    const { client, password } = result;
+
+    // Handle --delete-all-sessions (nuclear device cleanup)
+    if (opts.deleteAllSessions) {
+      const session = JSON.parse(client.exportSession());
+      if (!opts.forceCleanup) {
+        const confirmed = await confirmPrompt('This will log out ALL sessions and delete ALL devices. You will need to re-login. Proceed?');
+        if (!confirmed) {
+          log('Aborted.');
+          process.exit(0);
+        }
+      }
+      await logoutAll({
+        accessToken: session.access_token,
+        homeserverUrl: session.homeserver_url,
+        onProgress: log,
+      });
+      process.exit(0);
+    }
+
     const validTargets = ['devices', 'events', 'rooms'];
     const targetList = targets.split(',').map(t => t.trim()).filter(Boolean);
 
@@ -178,9 +201,6 @@ program
     }
 
     const olderThan = parseOlderThan(opts.olderThan);
-    const log = (msg) => console.error(`[cleanup] ${msg}`);
-    const result = await connect(parentOpts);
-    const { client, password } = result;
 
     const session = JSON.parse(client.exportSession());
     const accessToken = session.access_token;

@@ -153,6 +153,29 @@ export async function cleanupDevices({
 }
 
 /**
+ * Log out all sessions (nuclear option). Invalidates ALL access tokens
+ * and deletes ALL devices for the account. The current session becomes
+ * invalid after this call — caller must re-login.
+ *
+ * @param {object} opts
+ * @param {string} opts.accessToken
+ * @param {string} opts.homeserverUrl
+ * @param {function} [opts.onProgress]
+ */
+export async function logoutAll({ accessToken, homeserverUrl, onProgress = () => {} }) {
+  onProgress('Logging out all sessions (this will invalidate all devices)...');
+  const resp = await matrixFetch(
+    homeserverUrl, '/_matrix/client/v3/logout/all', accessToken,
+    { method: 'POST', body: '{}' },
+  );
+  if (!resp.ok) {
+    const body = await resp.text();
+    throw new Error(`logout/all failed: ${resp.status} ${body}`);
+  }
+  onProgress('All sessions logged out. All devices deleted. Re-login required.');
+}
+
+/**
  * Clean up mxdx rooms. Leaves and forgets all mxdx-related rooms
  * (spaces, exec, logs rooms identified by topic prefix).
  *
