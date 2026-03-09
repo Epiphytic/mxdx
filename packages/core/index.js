@@ -7,3 +7,4 @@ export { CredentialStore } from './credentials.js';
 export { connectWithSession } from './session.js';
 export { TerminalSocket } from './terminal-socket.js';
 export * from './terminal-types.js';
+export { parseOlderThan, cleanupDevices, cleanupRooms, cleanupEvents } from './cleanup.js';

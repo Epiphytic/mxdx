@@ -10,7 +10,8 @@
     "credentials.js",
     "session.js",
     "terminal-socket.js",
-    "terminal-types.js"
+    "terminal-types.js",
+    "cleanup.js"
   ],
   "dependencies": {
     "fake-indexeddb": "^6.2.5",

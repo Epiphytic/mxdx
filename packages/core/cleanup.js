@@ -225,3 +225,103 @@ export async function cleanupRooms({
     },
   };
 }
+
+/**
+ * Clean up mxdx events in exec/logs rooms by redacting them.
+ * Redacts org.mxdx.* event types and undecryptable encrypted events.
+ *
+ * @param {object} opts
+ * @param {string} opts.accessToken
+ * @param {string} opts.homeserverUrl
+ * @param {string} opts.launchersJson - JSON from client.listLauncherSpaces()
+ * @param {number} [opts.olderThan] - Cutoff timestamp (ms). Only redact events sent before this.
+ * @param {function} [opts.onProgress]
+ * @returns {{ preview: Array<{room_id, type, event_count}>, execute: function }}
+ */
+export async function cleanupEvents({
+  accessToken, homeserverUrl, launchersJson, olderThan, onProgress = () => {},
+}) {
+  const launchers = JSON.parse(launchersJson);
+
+  onProgress('Scanning rooms for mxdx events...');
+  const roomSummaries = [];
+
+  for (const l of launchers) {
+    for (const [type, roomId] of [['exec', l.exec_room_id], ['logs', l.logs_room_id]]) {
+      const events = await fetchMxdxEvents(homeserverUrl, accessToken, roomId, olderThan);
+      if (events.length > 0) {
+        roomSummaries.push({
+          room_id: roomId,
+          type,
+          launcher_id: l.launcher_id,
+          event_count: events.length,
+          _events: events,
+        });
+      }
+    }
+  }
+
+  return {
+    preview: roomSummaries.map(({ _events, ...rest }) => rest),
+    execute: async () => {
+      let redacted = 0;
+      let errors = 0;
+
+      for (const summary of roomSummaries) {
+        onProgress(`Redacting ${summary._events.length} event(s) in ${summary.type} room for ${summary.launcher_id}...`);
+        for (const event of summary._events) {
+          try {
+            const txnId = crypto.randomUUID();
+            const resp = await matrixFetch(
+              homeserverUrl,
+              `/_matrix/client/v3/rooms/${encodeURIComponent(summary.room_id)}/redact/${encodeURIComponent(event.event_id)}/${txnId}`,
+              accessToken,
+              { method: 'PUT', body: JSON.stringify({ reason: 'mxdx cleanup' }) },
+            );
+            if (!resp.ok) throw new Error(`${resp.status}`);
+            redacted++;
+          } catch (err) {
+            onProgress(`Error redacting ${event.event_id}: ${err.message}`);
+            errors++;
+          }
+        }
+      }
+
+      onProgress(`Done: ${redacted} event(s) redacted, ${errors} error(s)`);
+      return { redacted, errors };
+    },
+  };
+}
+
+async function fetchMxdxEvents(homeserverUrl, accessToken, roomId, olderThan) {
+  const events = [];
+  let from = '';
+
+  for (let page = 0; page < 10; page++) {
+    const params = new URLSearchParams({ dir: 'b', limit: '100' });
+    if (from) params.set('from', from);
+
+    const resp = await matrixFetch(
+      homeserverUrl,
+      `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages?${params}`,
+      accessToken,
+    );
+    if (!resp.ok) break;
+
+    const data = await resp.json();
+    for (const chunk of (data.chunk || [])) {
+      const t = chunk.type || '';
+      if (t.startsWith('org.mxdx.') || t === 'm.room.encrypted') {
+        if (olderThan && chunk.origin_server_ts && chunk.origin_server_ts >= olderThan) {
+          continue;
+        }
+        events.push({ event_id: chunk.event_id, type: t, origin_server_ts: chunk.origin_server_ts });
+      }
+    }
+
+    if (!data.end || data.chunk.length === 0) break;
+    from = data.end;
+  }
+
+  return events;
+}
