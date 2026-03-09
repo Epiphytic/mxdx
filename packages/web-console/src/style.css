@@ -324,3 +324,148 @@ body {
   background: #30363d;
   border-color: #8b949e;
 }
+
+/* Settings */
+#settings {
+  padding: 1.5rem;
+}
+
+.settings-title {
+  margin-bottom: 1rem;
+  color: var(--accent);
+}
+
+.settings-wrapper {
+  max-width: 600px;
+}
+
+.settings-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 1.5rem;
+}
+
+.settings-tab {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.settings-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
+.cleanup-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.cleanup-option {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text);
+  font-size: 0.875rem;
+  cursor: pointer;
+}
+
+.cleanup-option input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+.cleanup-pw-label {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+  margin-top: 0.5rem;
+}
+
+.cleanup-input {
+  display: block;
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 0.875rem;
+}
+
+.cleanup-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.cleanup-actions {
+  display: flex;
+  gap: 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.btn-danger {
+  background: var(--error);
+  color: #fff;
+  border-color: var(--error);
+}
+
+.btn-danger:hover {
+  opacity: 0.9;
+}
+
+.btn-danger:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.cleanup-output {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.75rem;
+  min-height: 100px;
+  max-height: 400px;
+  overflow-y: auto;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  color: var(--text);
+  margin-top: 0.5rem;
+}
+
+.cleanup-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.cleanup-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.5rem;
+  max-width: 400px;
+  width: 90%;
+}
+
+.cleanup-modal p {
+  margin-bottom: 1.25rem;
+  font-size: 0.9375rem;
+}
+
+.cleanup-modal-actions {
+  display: flex;
+  gap: 0.75rem;
+  justify-content: flex-end;
+}
