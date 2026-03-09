@@ -22,7 +22,8 @@ export function parseOlderThan(str) {
 }
 
 async function matrixFetch(homeserverUrl, path, accessToken, options = {}, _retries = 0) {
-  const url = `${homeserverUrl}${path}`;
+  const base = homeserverUrl.replace(/\/+$/, '');
+  const url = `${base}${path}`;
   const resp = await fetch(url, {
     ...options,
     headers: {
@@ -91,55 +92,62 @@ export async function cleanupDevices({
     execute: async () => {
       if (toDelete.length === 0) {
         onProgress('No devices to delete');
-        return { deleted: 0 };
+        return { deleted: 0, errors: 0 };
       }
 
-      const deviceIds = toDelete.map(d => d.device_id);
-      onProgress(`Deleting ${deviceIds.length} device(s)...`);
-
-      // First request without auth — gets UIA session
-      const resp1 = await matrixFetch(
-        homeserverUrl, '/_matrix/client/v3/delete_devices', accessToken,
-        { method: 'POST', body: JSON.stringify({ devices: deviceIds }) },
-      );
-
-      if (resp1.ok) {
-        onProgress(`Deleted ${deviceIds.length} device(s)`);
-        return { deleted: deviceIds.length };
-      }
-
-      if (resp1.status !== 401) {
-        throw new Error(`Device deletion failed: ${resp1.status} ${await resp1.text()}`);
-      }
-
-      // UIA required — extract session and retry with password
-      const uiaInfo = await resp1.json();
-      const session = uiaInfo.session;
-
+      onProgress(`Deleting ${toDelete.length} device(s)...`);
       const localpart = userId.split(':')[0].replace('@', '');
-      const resp2 = await matrixFetch(
-        homeserverUrl, '/_matrix/client/v3/delete_devices', accessToken,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            devices: deviceIds,
-            auth: {
-              type: 'm.login.password',
-              identifier: { type: 'm.id.user', user: localpart },
-              password,
-              session,
-            },
-          }),
-        },
-      );
+      let deleted = 0;
+      let errors = 0;
 
-      if (!resp2.ok) {
-        const errBody = await resp2.text();
-        throw new Error(`Device deletion UIA failed: ${resp2.status} ${errBody}`);
+      for (const device of toDelete) {
+        try {
+          const devicePath = `/_matrix/client/v3/devices/${encodeURIComponent(device.device_id)}`;
+
+          // First DELETE without auth — gets UIA session
+          const resp1 = await matrixFetch(
+            homeserverUrl, devicePath, accessToken,
+            { method: 'DELETE' },
+          );
+
+          if (resp1.ok) {
+            deleted++;
+            continue;
+          }
+
+          if (resp1.status !== 401) {
+            throw new Error(`${resp1.status}`);
+          }
+
+          // UIA required — extract session and retry with password
+          const uiaInfo = await resp1.json();
+          const resp2 = await matrixFetch(
+            homeserverUrl, devicePath, accessToken,
+            {
+              method: 'DELETE',
+              body: JSON.stringify({
+                auth: {
+                  type: 'm.login.password',
+                  identifier: { type: 'm.id.user', user: localpart },
+                  password,
+                  session: uiaInfo.session,
+                },
+              }),
+            },
+          );
+
+          if (!resp2.ok) {
+            throw new Error(`UIA failed: ${resp2.status}`);
+          }
+          deleted++;
+        } catch (err) {
+          onProgress(`Error deleting ${device.device_id}: ${err.message}`);
+          errors++;
+        }
       }
 
-      onProgress(`Deleted ${deviceIds.length} device(s)`);
-      return { deleted: deviceIds.length };
+      onProgress(`Done: ${deleted} device(s) deleted, ${errors} error(s)`);
+      return { deleted, errors };
     },
   };
 }
@@ -234,12 +242,13 @@ export async function cleanupRooms({
  * @param {string} opts.accessToken
  * @param {string} opts.homeserverUrl
  * @param {string} opts.launchersJson - JSON from client.listLauncherSpaces()
+ * @param {string} opts.userId - Only redact events sent by this user
  * @param {number} [opts.olderThan] - Cutoff timestamp (ms). Only redact events sent before this.
  * @param {function} [opts.onProgress]
  * @returns {{ preview: Array<{room_id, type, event_count}>, execute: function }}
  */
 export async function cleanupEvents({
-  accessToken, homeserverUrl, launchersJson, olderThan, onProgress = () => {},
+  accessToken, homeserverUrl, launchersJson, userId, olderThan, onProgress = () => {},
 }) {
   const launchers = JSON.parse(launchersJson);
 
@@ -248,7 +257,7 @@ export async function cleanupEvents({
 
   for (const l of launchers) {
     for (const [type, roomId] of [['exec', l.exec_room_id], ['logs', l.logs_room_id]]) {
-      const events = await fetchMxdxEvents(homeserverUrl, accessToken, roomId, olderThan);
+      const events = await fetchMxdxEvents(homeserverUrl, accessToken, roomId, olderThan, userId);
       if (events.length > 0) {
         roomSummaries.push({
           room_id: roomId,
@@ -293,7 +302,7 @@ export async function cleanupEvents({
   };
 }
 
-async function fetchMxdxEvents(homeserverUrl, accessToken, roomId, olderThan) {
+async function fetchMxdxEvents(homeserverUrl, accessToken, roomId, olderThan, userId) {
   const events = [];
   let from = '';
 
@@ -312,6 +321,8 @@ async function fetchMxdxEvents(homeserverUrl, accessToken, roomId, olderThan) {
     for (const chunk of (data.chunk || [])) {
       const t = chunk.type || '';
       if (t.startsWith('org.mxdx.') || t === 'm.room.encrypted') {
+        // Only redact events sent by the current user
+        if (userId && chunk.sender && chunk.sender !== userId) continue;
         if (olderThan && chunk.origin_server_ts && chunk.origin_server_ts >= olderThan) {
           continue;
         }

@@ -132,8 +132,9 @@ export function setupSettings(client) {
     runBtn.disabled = true;
 
     try {
-      const accessToken = client.accessToken();
-      const homeserverUrl = client.homeserverUrl();
+      const session = JSON.parse(client.exportSession());
+      const accessToken = session.access_token;
+      const homeserverUrl = session.homeserver_url;
       const userId = client.userId();
       const currentDeviceId = client.deviceId();
 
@@ -155,7 +156,8 @@ export function setupSettings(client) {
           }
         } else if (target === 'events') {
           previewResults.events = await cleanupEvents({
-            accessToken, homeserverUrl, launchersJson, olderThan, onProgress: appendOutput,
+            accessToken, homeserverUrl, launchersJson, userId,
+            olderThan, onProgress: appendOutput,
           });
           appendOutput(`\nEvents to redact:`);
           for (const r of previewResults.events.preview) {

@@ -182,8 +182,9 @@ program
     const result = await connect(parentOpts);
     const { client, password } = result;
 
-    const accessToken = client.accessToken();
-    const homeserverUrl = client.homeserverUrl();
+    const session = JSON.parse(client.exportSession());
+    const accessToken = session.access_token;
+    const homeserverUrl = session.homeserver_url;
     const userId = client.userId();
     const currentDeviceId = client.deviceId();
 
@@ -208,7 +209,7 @@ program
           }
         } else if (target === 'events') {
           results.events = await cleanupEvents({
-            accessToken, homeserverUrl, launchersJson,
+            accessToken, homeserverUrl, launchersJson, userId,
             olderThan, onProgress: log,
           });
           log(`\nEvents to redact:`);
