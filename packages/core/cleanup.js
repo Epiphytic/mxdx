@@ -39,6 +39,21 @@ async function matrixFetch(homeserverUrl, path, accessToken, options = {}, _retr
   return resp;
 }
 
+async function getLastEventTimestamp(homeserverUrl, accessToken, roomId) {
+  const params = new URLSearchParams({ dir: 'b', limit: '1' });
+  const resp = await matrixFetch(
+    homeserverUrl,
+    `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages?${params}`,
+    accessToken,
+  );
+  if (!resp.ok) return null;
+  const data = await resp.json();
+  if (data.chunk && data.chunk.length > 0) {
+    return data.chunk[0].origin_server_ts || null;
+  }
+  return null;
+}
+
 /**
  * Clean up old devices. Deletes all devices except the current one.
  * Requires password for UIA (User-Interactive Authentication).
@@ -125,6 +140,88 @@ export async function cleanupDevices({
 
       onProgress(`Deleted ${deviceIds.length} device(s)`);
       return { deleted: deviceIds.length };
+    },
+  };
+}
+
+/**
+ * Clean up mxdx rooms. Leaves and forgets all mxdx-related rooms
+ * (spaces, exec, logs rooms identified by topic prefix).
+ *
+ * @param {object} opts
+ * @param {string} opts.accessToken
+ * @param {string} opts.homeserverUrl
+ * @param {string} opts.launchersJson - JSON from client.listLauncherSpaces()
+ * @param {number} [opts.olderThan] - Cutoff timestamp (ms). Only clean rooms with no activity since before this.
+ * @param {function} [opts.onProgress]
+ * @returns {{ preview: Array<{room_id, type, launcher_id}>, execute: function }}
+ */
+export async function cleanupRooms({
+  accessToken, homeserverUrl, launchersJson, olderThan, onProgress = () => {},
+}) {
+  const launchers = JSON.parse(launchersJson);
+
+  // Collect all rooms: exec, logs, space — in that order (children first)
+  let rooms = [];
+  for (const l of launchers) {
+    rooms.push({ room_id: l.exec_room_id, type: 'exec', launcher_id: l.launcher_id });
+    rooms.push({ room_id: l.logs_room_id, type: 'logs', launcher_id: l.launcher_id });
+    rooms.push({ room_id: l.space_id, type: 'space', launcher_id: l.launcher_id });
+  }
+
+  // If olderThan set, check most recent event in each room and skip active rooms
+  if (olderThan) {
+    const filtered = [];
+    for (const room of rooms) {
+      const lastTs = await getLastEventTimestamp(homeserverUrl, accessToken, room.room_id);
+      if (lastTs === null || lastTs < olderThan) {
+        filtered.push(room);
+      } else {
+        onProgress(`Skipping ${room.type} room for ${room.launcher_id} (recent activity)`);
+      }
+    }
+    rooms = filtered;
+  }
+
+  return {
+    preview: rooms,
+    execute: async () => {
+      let left = 0;
+      let errors = 0;
+
+      for (const room of rooms) {
+        try {
+          onProgress(`Leaving ${room.type} room for ${room.launcher_id}...`);
+          const leaveResp = await matrixFetch(
+            homeserverUrl,
+            `/_matrix/client/v3/rooms/${encodeURIComponent(room.room_id)}/leave`,
+            accessToken,
+            { method: 'POST', body: '{}' },
+          );
+          if (!leaveResp.ok && leaveResp.status !== 403) {
+            throw new Error(`leave failed: ${leaveResp.status}`);
+          }
+
+          onProgress(`Forgetting ${room.type} room for ${room.launcher_id}...`);
+          const forgetResp = await matrixFetch(
+            homeserverUrl,
+            `/_matrix/client/v3/rooms/${encodeURIComponent(room.room_id)}/forget`,
+            accessToken,
+            { method: 'POST', body: '{}' },
+          );
+          if (!forgetResp.ok && forgetResp.status !== 403) {
+            throw new Error(`forget failed: ${forgetResp.status}`);
+          }
+
+          left++;
+        } catch (err) {
+          onProgress(`Error on ${room.room_id}: ${err.message}`);
+          errors++;
+        }
+      }
+
+      onProgress(`Done: ${left} room(s) left+forgotten, ${errors} error(s)`);
+      return { left, errors };
     },
   };
 }
