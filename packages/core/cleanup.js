@@ -5,19 +5,19 @@
 
 /**
  * Parse an --older-than duration string into a cutoff timestamp (ms).
- * Supports: Nd (days), Nw (weeks), Nm (months = 30 days).
+ * Supports: Nh (hours), Nd (days), Nw (weeks), Nm (months = 30 days).
  * Returns null if input is falsy.
- * @param {string} [str] - e.g. "2w", "1m", "7d"
+ * @param {string} [str] - e.g. "1h", "2w", "1m", "7d"
  * @returns {number|null} Unix timestamp cutoff in ms, or null
  */
 export function parseOlderThan(str) {
   if (!str) return null;
-  const match = str.trim().match(/^(\d+)([dwm])$/i);
-  if (!match) throw new Error(`Invalid --older-than format: "${str}". Use Nd, Nw, or Nm (e.g. 7d, 2w, 1m).`);
+  const match = str.trim().match(/^(\d+)([hdwm])$/i);
+  if (!match) throw new Error(`Invalid --older-than format: "${str}". Use Nh, Nd, Nw, or Nm (e.g. 1h, 7d, 2w, 1m).`);
   const n = parseInt(match[1], 10);
   const unit = match[2].toLowerCase();
-  const msPerDay = 86400000;
-  const multipliers = { d: msPerDay, w: 7 * msPerDay, m: 30 * msPerDay };
+  const msPerHour = 3600000;
+  const multipliers = { h: msPerHour, d: 24 * msPerHour, w: 7 * 24 * msPerHour, m: 30 * 24 * msPerHour };
   return Date.now() - (n * multipliers[unit]);
 }
 
