@@ -1,6 +1,8 @@
 import { runExecCommand } from './exec-view.js';
 
 let refreshTimer = null;
+let lastSessionFetchMs = 0;
+const SESSION_FETCH_INTERVAL_MS = 60_000; // Only fetch sessions once per minute
 
 export function stopDashboardRefresh() {
   if (refreshTimer) {
@@ -18,12 +20,13 @@ export function stopDashboardRefresh() {
 export function setupDashboard(client, { onOpenTerminal, onReconnect }) {
   stopDashboardRefresh();
 
+  lastSessionFetchMs = 0; // Force session fetch on first render
   render(client, onOpenTerminal, onReconnect);
 
-  // Auto-refresh every 10s
+  // Auto-refresh every 30s (10s was too aggressive for public homeservers)
   refreshTimer = setInterval(() => {
     render(client, onOpenTerminal, onReconnect);
-  }, 10000);
+  }, 30000);
 }
 
 async function render(client, onOpenTerminal, onReconnect) {
@@ -56,12 +59,13 @@ async function render(client, onOpenTerminal, onReconnect) {
       return;
     }
 
-    // Fetch telemetry for each launcher
+    // Fetch telemetry for each launcher (read-only, no sends)
+    const shouldFetchSessions = Date.now() - lastSessionFetchMs >= SESSION_FETCH_INTERVAL_MS;
     const launcherData = [];
     for (const launcher of launchers) {
       let telemetry = null;
       try {
-        const eventsJson = await client.collectRoomEvents(launcher.exec_room_id, 2);
+        const eventsJson = await client.collectRoomEvents(launcher.exec_room_id, 1);
         const events = JSON.parse(eventsJson);
         const telemetryEvent = events.find(e => e.type === 'org.mxdx.host_telemetry');
         if (telemetryEvent) {
@@ -71,24 +75,28 @@ async function render(client, onOpenTerminal, onReconnect) {
         // Telemetry not available
       }
       let sessions = [];
-      try {
-        const listRequestId = crypto.randomUUID();
-        await client.sendEvent(launcher.exec_room_id, 'org.mxdx.command', JSON.stringify({
-          action: 'list_sessions',
-          request_id: listRequestId,
-        }));
-        await client.syncOnce();
-        const sessionsJson = await client.onRoomEvent(
-          launcher.exec_room_id, 'org.mxdx.terminal.sessions', 5,
-        );
-        if (sessionsJson && sessionsJson !== 'null') {
-          const sessionsResponse = JSON.parse(sessionsJson);
-          const sessionsContent = sessionsResponse.content || sessionsResponse;
-          sessions = sessionsContent.sessions || [];
-        }
-      } catch { /* sessions not available */ }
+      // Only send list_sessions command periodically to avoid rate limits
+      if (shouldFetchSessions) {
+        try {
+          const listRequestId = crypto.randomUUID();
+          await client.sendEvent(launcher.exec_room_id, 'org.mxdx.command', JSON.stringify({
+            action: 'list_sessions',
+            request_id: listRequestId,
+          }));
+          await client.syncOnce();
+          const sessionsJson = await client.onRoomEvent(
+            launcher.exec_room_id, 'org.mxdx.terminal.sessions', 5,
+          );
+          if (sessionsJson && sessionsJson !== 'null') {
+            const sessionsResponse = JSON.parse(sessionsJson);
+            const sessionsContent = sessionsResponse.content || sessionsResponse;
+            sessions = sessionsContent.sessions || [];
+          }
+        } catch { /* sessions not available */ }
+      }
       launcherData.push({ ...launcher, telemetry, sessions });
     }
+    if (shouldFetchSessions) lastSessionFetchMs = Date.now();
 
     const grid = document.createElement('div');
     grid.className = 'launcher-grid';
