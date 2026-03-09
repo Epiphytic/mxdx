@@ -1,4 +1,5 @@
 use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 use matrix_sdk::{
     config::SyncSettings,
     room::MessagesOptions,
@@ -46,9 +47,46 @@ fn to_js_err(e: impl std::fmt::Display) -> JsValue {
     JsValue::from_str(&e.to_string())
 }
 
+/// Delete IndexedDB databases by name prefix. Clears stale crypto stores
+/// when the device_id from a previous session conflicts with a fresh login.
+async fn delete_indexeddb_store(name: &str) {
+    let global = js_sys::global();
+    let idb = js_sys::Reflect::get(&global, &"indexedDB".into())
+        .ok()
+        .and_then(|v| v.dyn_into::<web_sys::IdbFactory>().ok());
+
+    if let Some(factory) = idb {
+        for suffix in ["", "::matrix-sdk-crypto", "::matrix-sdk-state"] {
+            let db_name = format!("{name}{suffix}");
+            match factory.delete_database(&db_name) {
+                Ok(req) => {
+                    let promise = js_sys::Promise::new(&mut |resolve, _reject| {
+                        let resolve_clone = resolve.clone();
+                        let cb = wasm_bindgen::closure::Closure::once_into_js(move || {
+                            let _ = resolve_clone.call0(&JsValue::NULL);
+                        });
+                        req.set_onsuccess(Some(cb.unchecked_ref()));
+                        let resolve_clone2 = resolve.clone();
+                        let cb2 = wasm_bindgen::closure::Closure::once_into_js(move || {
+                            let _ = resolve_clone2.call0(&JsValue::NULL);
+                        });
+                        req.set_onerror(Some(cb2.unchecked_ref()));
+                    });
+                    let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
+                    web_sys::console::log_1(&format!("[mxdx] Deleted IndexedDB: {db_name}").into());
+                }
+                Err(e) => {
+                    web_sys::console::warn_1(&format!("[mxdx] Failed to delete IndexedDB {db_name}: {:?}", e).into());
+                }
+            }
+        }
+    }
+}
+
 #[wasm_bindgen]
 pub struct WasmMatrixClient {
     client: Client,
+    store_name: String,
 }
 
 #[wasm_bindgen]
@@ -104,10 +142,12 @@ impl WasmMatrixClient {
             .await
             .map_err(to_js_err)?;
 
-        Ok(WasmMatrixClient { client })
+        Ok(WasmMatrixClient { client, store_name })
     }
 
     /// Login to a Matrix server.
+    /// If a stale crypto store exists from a previous session (different device),
+    /// it is automatically cleared and the login is retried.
     #[wasm_bindgen(js_name = "login")]
     pub async fn login(
         server_name: &str,
@@ -115,30 +155,69 @@ impl WasmMatrixClient {
         password: &str,
     ) -> Result<WasmMatrixClient, JsValue> {
         let store_name = format!("mxdx_{}_{}", username, server_name.replace([':', '/', '.'], "_"));
-        let builder = Client::builder()
-            .indexeddb_store(&store_name, None);
-        let client = if server_name.contains("://") {
-            builder.homeserver_url(server_name)
-        } else {
-            builder.server_name_or_homeserver_url(server_name)
-        }
-        .build()
-        .await
-        .map_err(to_js_err)?;
 
-        client
-            .matrix_auth()
+        let build_client = |sn: &str| {
+            let builder = Client::builder()
+                .indexeddb_store(&store_name, None);
+            if sn.contains("://") {
+                builder.homeserver_url(sn)
+            } else {
+                builder.server_name_or_homeserver_url(sn)
+            }
+        };
+
+        // First attempt — may fail if IndexedDB has a stale crypto store
+        let client = match build_client(server_name).build().await {
+            Ok(c) => c,
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("doesn't match the account in the constructor") {
+                    // Stale crypto store from a previous device — delete and retry
+                    delete_indexeddb_store(&store_name).await;
+                    build_client(server_name).build().await.map_err(to_js_err)?
+                } else {
+                    return Err(to_js_err(e));
+                }
+            }
+        };
+
+        // Login may also fail with store mismatch after build succeeds
+        // (the check happens during login when crypto state is loaded)
+        match client.matrix_auth()
             .login_username(username, password)
             .initial_device_display_name("mxdx")
             .await
-            .map_err(to_js_err)?;
+        {
+            Ok(_) => {},
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("doesn't match the account in the constructor") {
+                    // Stale crypto store — delete, rebuild client, and retry login
+                    delete_indexeddb_store(&store_name).await;
+                    let client2 = build_client(server_name).build().await.map_err(to_js_err)?;
+                    client2.matrix_auth()
+                        .login_username(username, password)
+                        .initial_device_display_name("mxdx")
+                        .await
+                        .map_err(to_js_err)?;
+
+                    client2
+                        .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
+                        .await
+                        .map_err(to_js_err)?;
+
+                    return Ok(WasmMatrixClient { client: client2, store_name });
+                }
+                return Err(to_js_err(e));
+            }
+        }
 
         client
             .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
             .await
             .map_err(to_js_err)?;
 
-        Ok(WasmMatrixClient { client })
+        Ok(WasmMatrixClient { client, store_name })
     }
 
     #[wasm_bindgen(js_name = "isLoggedIn")]
@@ -198,6 +277,7 @@ impl WasmMatrixClient {
             "device_id": session.meta.device_id.to_string(),
             "access_token": session.tokens.access_token,
             "homeserver_url": self.client.homeserver().to_string(),
+            "store_name": self.store_name,
         });
         serde_json::to_string(&data).map_err(to_js_err)
     }
@@ -218,7 +298,11 @@ impl WasmMatrixClient {
         let access_token = parsed["access_token"].as_str()
             .ok_or_else(|| to_js_err("Missing access_token in session data"))?;
 
-        let store_name = format!("mxdx_{}_{}", user_id, homeserver_url.replace([':', '/', '.'], "_"));
+        // Use stored store_name if available (ensures same IndexedDB as login),
+        // fall back to old format for sessions exported before this fix
+        let store_name = parsed["store_name"].as_str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("mxdx_{}_{}", user_id, homeserver_url.replace([':', '/', '.'], "_")));
         let client = Client::builder()
             .homeserver_url(homeserver_url)
             .indexeddb_store(&store_name, None)
@@ -245,7 +329,7 @@ impl WasmMatrixClient {
             .await
             .map_err(to_js_err)?;
 
-        Ok(WasmMatrixClient { client })
+        Ok(WasmMatrixClient { client, store_name })
     }
 
     /// Bootstrap cross-signing for this device.
@@ -566,16 +650,24 @@ impl WasmMatrixClient {
             if let Some(room) = self.client.get_room(rid) {
                 let messages = room.messages(MessagesOptions::backward()).await.map_err(to_js_err)?;
                 let mut collected: Vec<serde_json::Value> = Vec::new();
+                let mut encrypted_count: u32 = 0;
                 for event in &messages.chunk {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(event.raw().json().get()) {
                         let event_type = json.get("type").and_then(|t| t.as_str());
-                        if event_type != Some("m.room.encrypted")
-                            && event_type != Some("m.room.encryption")
+                        if event_type == Some("m.room.encrypted") {
+                            encrypted_count += 1;
+                        } else if event_type != Some("m.room.encryption")
                             && event_type != Some("m.room.member")
                         {
                             collected.push(json);
                         }
                     }
+                }
+                if encrypted_count > 0 {
+                    web_sys::console::warn_1(&format!(
+                        "[mxdx] {} encrypted event(s) in room {} could not be decrypted (missing Megolm keys)",
+                        encrypted_count, room_id
+                    ).into());
                 }
                 if !collected.is_empty() {
                     return serde_json::to_string(&collected).map_err(to_js_err);
@@ -646,15 +738,26 @@ impl WasmMatrixClient {
 
             if let Some(room) = self.client.get_room(rid) {
                 let messages = room.messages(MessagesOptions::backward()).await.map_err(to_js_err)?;
+                let mut encrypted_count: u32 = 0;
                 for event in &messages.chunk {
                     if let Ok(json) = serde_json::from_str::<serde_json::Value>(event.raw().json().get()) {
                         let etype = json.get("type").and_then(|t| t.as_str());
                         let eid = json.get("event_id").and_then(|e| e.as_str()).unwrap_or("");
 
+                        if etype == Some("m.room.encrypted") && !seen_event_ids.contains(eid) {
+                            encrypted_count += 1;
+                        }
+
                         if etype == Some(event_type) && !seen_event_ids.contains(eid) {
                             return serde_json::to_string(&json).map_err(to_js_err);
                         }
                     }
+                }
+                if encrypted_count > 0 {
+                    web_sys::console::warn_1(&format!(
+                        "[mxdx] {} undecryptable event(s) in room {} while waiting for '{}'",
+                        encrypted_count, room_id, event_type
+                    ).into());
                 }
             }
         }

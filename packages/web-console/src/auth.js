@@ -1,3 +1,5 @@
+import { loadSession } from './session-store.js';
+
 /**
  * Set up the login form handlers.
  * @param {object} callbacks
@@ -47,24 +49,43 @@ export function setupAuth({ onLogin, getWasmClient }) {
         return;
       }
 
-      showStatus(`Connecting to ${server}...`);
-      const client = await WasmMatrixClient.login(server, username, password);
+      // Try restoring existing session first — preserves device_id and Megolm keys
+      let client;
+      let sessionJson;
+      const savedSession = await loadSession();
+      if (savedSession) {
+        try {
+          showStatus('Restoring session...');
+          client = await WasmMatrixClient.restoreSession(savedSession);
+          sessionJson = savedSession;
+          console.log('[auth] Session restored (reusing existing device)');
+        } catch (restoreErr) {
+          console.warn('[auth] Session restore failed, falling back to fresh login:', restoreErr);
+          client = null;
+        }
+      }
 
-      showStatus('Setting up encryption...');
-      try {
-        await Promise.race([
-          (async () => {
-            await client.bootstrapCrossSigningIfNeeded(password);
-            await client.verifyOwnIdentity();
-          })(),
-          new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000)),
-        ]);
-      } catch (csErr) {
-        console.warn('[auth] Cross-signing skipped (non-fatal):', csErr);
+      if (!client) {
+        showStatus(`Connecting to ${server}...`);
+        client = await WasmMatrixClient.login(server, username, password);
+
+        showStatus('Setting up encryption...');
+        try {
+          await Promise.race([
+            (async () => {
+              await client.bootstrapCrossSigningIfNeeded(password);
+              await client.verifyOwnIdentity();
+            })(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000)),
+          ]);
+        } catch (csErr) {
+          console.warn('[auth] Cross-signing skipped (non-fatal):', csErr);
+        }
+
+        sessionJson = client.exportSession();
       }
 
       showStatus('Saving session...');
-      const sessionJson = client.exportSession();
 
       statusEl.hidden = true;
       form.reset();

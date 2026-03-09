@@ -133,7 +133,8 @@ function showReconnect(launcher, session) {
 async function handleLogout() {
   stopDashboardRefresh();
   clearTerminalSession();
-  await clearSession();
+  // Keep session in IndexedDB — preserves device_id and Megolm keys
+  // so restoreSession() can reuse them on next login
   client = null;
   showLogin();
 }
