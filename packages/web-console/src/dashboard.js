@@ -1,8 +1,7 @@
 import { runExecCommand } from './exec-view.js';
 
 let refreshTimer = null;
-let lastSessionFetchMs = 0;
-const SESSION_FETCH_INTERVAL_MS = 60_000; // Only fetch sessions once per minute
+const cachedSessions = {}; // { exec_room_id: [session, ...] }
 
 export function stopDashboardRefresh() {
   if (refreshTimer) {
@@ -20,7 +19,6 @@ export function stopDashboardRefresh() {
 export function setupDashboard(client, { onOpenTerminal, onReconnect }) {
   stopDashboardRefresh();
 
-  lastSessionFetchMs = 0; // Force session fetch on first render
   render(client, onOpenTerminal, onReconnect);
 
   // Auto-refresh every 30s (10s was too aggressive for public homeservers)
@@ -33,17 +31,21 @@ async function render(client, onOpenTerminal, onReconnect) {
   const dashboard = document.getElementById('dashboard');
 
   try {
+    // Single sync — all subsequent reads use local cache (O(1) network calls)
     await client.syncOnce();
 
     // Auto-join any invited rooms (launcher invites client to space/exec/logs)
     try {
       const invited = client.invitedRoomIds();
-      for (const roomId of invited) {
-        try { await client.joinRoom(roomId); } catch { /* may fail */ }
+      if (invited.length > 0) {
+        await Promise.all(invited.map(roomId =>
+          client.joinRoom(roomId).catch(() => { /* may fail */ }),
+        ));
+        await client.syncOnce();
       }
-      if (invited.length > 0) await client.syncOnce();
     } catch { /* invitedRoomIds may not be available */ }
 
+    // listLauncherSpaces does its own syncOnce internally — TODO: make it cache-only too
     const launchersJson = await client.listLauncherSpaces();
     const launchers = JSON.parse(launchersJson);
 
@@ -59,44 +61,27 @@ async function render(client, onOpenTerminal, onReconnect) {
       return;
     }
 
-    // Fetch telemetry for each launcher (read-only, no sends)
-    const shouldFetchSessions = Date.now() - lastSessionFetchMs >= SESSION_FETCH_INTERVAL_MS;
-    const launcherData = [];
-    for (const launcher of launchers) {
-      let telemetry = null;
-      try {
-        const eventsJson = await client.collectRoomEvents(launcher.exec_room_id, 1);
-        const events = JSON.parse(eventsJson);
-        const telemetryEvent = events.find(e => e.type === 'org.mxdx.host_telemetry');
-        if (telemetryEvent) {
-          telemetry = telemetryEvent.content;
-        }
-      } catch {
-        // Telemetry not available
-      }
-      let sessions = [];
-      // Only send list_sessions command periodically to avoid rate limits
-      if (shouldFetchSessions) {
+    // Read telemetry from local cache in parallel — no syncs, no network per launcher
+    const telemetryResults = await Promise.all(
+      launchers.map(async (launcher) => {
         try {
-          const listRequestId = crypto.randomUUID();
-          await client.sendEvent(launcher.exec_room_id, 'org.mxdx.command', JSON.stringify({
-            action: 'list_sessions',
-            request_id: listRequestId,
-          }));
-          await client.syncOnce();
-          const sessionsJson = await client.onRoomEvent(
-            launcher.exec_room_id, 'org.mxdx.terminal.sessions', 5,
-          );
-          if (sessionsJson && sessionsJson !== 'null') {
-            const sessionsResponse = JSON.parse(sessionsJson);
-            const sessionsContent = sessionsResponse.content || sessionsResponse;
-            sessions = sessionsContent.sessions || [];
-          }
-        } catch { /* sessions not available */ }
-      }
-      launcherData.push({ ...launcher, telemetry, sessions });
-    }
-    if (shouldFetchSessions) lastSessionFetchMs = Date.now();
+          const eventsJson = await client.readRoomEvents(launcher.exec_room_id);
+          const events = JSON.parse(eventsJson);
+          const telemetryEvent = events.find(e => e.type === 'org.mxdx.host_telemetry');
+          return telemetryEvent ? telemetryEvent.content : null;
+        } catch {
+          return null;
+        }
+      }),
+    );
+
+    // Session fetching: only on first load, then on-demand per card
+    // (sending an encrypted command to 100 launchers is not viable)
+    const launcherData = launchers.map((launcher, i) => ({
+      ...launcher,
+      telemetry: telemetryResults[i],
+      sessions: cachedSessions[launcher.exec_room_id] || [],
+    }));
 
     const grid = document.createElement('div');
     grid.className = 'launcher-grid';
@@ -114,6 +99,28 @@ async function render(client, onOpenTerminal, onReconnect) {
     errDiv.appendChild(p);
     dashboard.replaceChildren(errDiv);
   }
+}
+
+async function fetchSessions(client, launcher) {
+  try {
+    const listRequestId = crypto.randomUUID();
+    await client.sendEvent(launcher.exec_room_id, 'org.mxdx.command', JSON.stringify({
+      action: 'list_sessions',
+      request_id: listRequestId,
+    }));
+    await client.syncOnce();
+    const sessionsJson = await client.onRoomEvent(
+      launcher.exec_room_id, 'org.mxdx.terminal.sessions', 5,
+    );
+    if (sessionsJson && sessionsJson !== 'null') {
+      const sessionsResponse = JSON.parse(sessionsJson);
+      const sessionsContent = sessionsResponse.content || sessionsResponse;
+      const sessions = sessionsContent.sessions || [];
+      cachedSessions[launcher.exec_room_id] = sessions;
+      return sessions;
+    }
+  } catch { /* sessions not available */ }
+  return [];
 }
 
 function renderCard(launcher, client, onOpenTerminal, onReconnect) {
@@ -159,37 +166,56 @@ function renderCard(launcher, client, onOpenTerminal, onReconnect) {
   actions.appendChild(termBtn);
   card.appendChild(actions);
 
-  // Active sessions
-  if (launcher.sessions && launcher.sessions.length > 0) {
-    const sessionsDiv = document.createElement('div');
-    sessionsDiv.className = 'sessions';
+  // Sessions section (populated on-demand)
+  const sessionsDiv = document.createElement('div');
+  sessionsDiv.className = 'sessions';
+  card.appendChild(sessionsDiv);
 
-    const sessionsTitle = document.createElement('h4');
-    sessionsTitle.textContent = 'Active Sessions';
-    sessionsDiv.appendChild(sessionsTitle);
+  function renderSessions(sessions) {
+    sessionsDiv.replaceChildren();
+    if (sessions.length > 0) {
+      const sessionsTitle = document.createElement('h4');
+      sessionsTitle.textContent = 'Active Sessions';
+      sessionsDiv.appendChild(sessionsTitle);
 
-    for (const session of launcher.sessions) {
-      const sessionRow = document.createElement('div');
-      sessionRow.className = 'session-row';
+      for (const session of sessions) {
+        const sessionRow = document.createElement('div');
+        sessionRow.className = 'session-row';
 
-      const label = document.createElement('span');
-      const age = Math.floor((Date.now() - new Date(session.created_at).getTime()) / 60000);
-      label.textContent = `${session.session_id} (${age}m ago)${session.persistent ? '' : ' — non-persistent'}`;
-      sessionRow.appendChild(label);
+        const label = document.createElement('span');
+        const age = Math.floor((Date.now() - new Date(session.created_at).getTime()) / 60000);
+        label.textContent = `${session.session_id} (${age}m ago)${session.persistent ? '' : ' — non-persistent'}`;
+        sessionRow.appendChild(label);
 
-      const reconnBtn = document.createElement('button');
-      reconnBtn.className = 'btn btn-secondary';
-      reconnBtn.textContent = 'Reconnect';
-      reconnBtn.addEventListener('click', () => {
-        if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
-        onReconnect(launcher, session);
-      });
-      sessionRow.appendChild(reconnBtn);
+        const reconnBtn = document.createElement('button');
+        reconnBtn.className = 'btn btn-secondary';
+        reconnBtn.textContent = 'Reconnect';
+        reconnBtn.addEventListener('click', () => {
+          if (refreshTimer) { clearInterval(refreshTimer); refreshTimer = null; }
+          onReconnect(launcher, session);
+        });
+        sessionRow.appendChild(reconnBtn);
 
-      sessionsDiv.appendChild(sessionRow);
+        sessionsDiv.appendChild(sessionRow);
+      }
     }
-    card.appendChild(sessionsDiv);
   }
+
+  // Show cached sessions if available, add refresh button
+  renderSessions(launcher.sessions || []);
+
+  const refreshBtn = document.createElement('button');
+  refreshBtn.className = 'btn btn-secondary';
+  refreshBtn.textContent = 'Refresh Sessions';
+  refreshBtn.addEventListener('click', async () => {
+    refreshBtn.disabled = true;
+    refreshBtn.textContent = 'Loading...';
+    const sessions = await fetchSessions(client, launcher);
+    renderSessions(sessions);
+    refreshBtn.disabled = false;
+    refreshBtn.textContent = 'Refresh Sessions';
+  });
+  sessionsDiv.appendChild(refreshBtn);
 
   // Exec input
   const execForm = document.createElement('form');

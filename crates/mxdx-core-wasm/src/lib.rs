@@ -559,10 +559,9 @@ impl WasmMatrixClient {
 
     /// List all launcher spaces by scanning joined rooms for matching topic patterns.
     /// Returns JSON string: array of { space_id, exec_room_id, logs_room_id, launcher_id }.
+    /// Reads from local cache — call syncOnce() before this if you need fresh data.
     #[wasm_bindgen(js_name = "listLauncherSpaces")]
     pub async fn list_launcher_spaces(&self) -> Result<String, JsValue> {
-        self.sync_once().await?;
-
         let space_prefix = "org.mxdx.launcher.space:";
         let exec_prefix = "org.mxdx.launcher.exec:";
         let logs_prefix = "org.mxdx.launcher.logs:";
@@ -631,6 +630,33 @@ impl WasmMatrixClient {
         let content: serde_json::Value = serde_json::from_str(content_json).map_err(to_js_err)?;
         room.send_state_event_raw(event_type, state_key, content).await.map_err(to_js_err)?;
         Ok(())
+    }
+
+    /// Read events from a room's local cache without syncing.
+    /// Use this for batch reads after a single syncOnce() call.
+    /// Returns JSON string of event array (excluding m.room.encrypted, m.room.encryption, m.room.member).
+    #[wasm_bindgen(js_name = "readRoomEvents")]
+    pub async fn read_room_events(&self, room_id: &str) -> Result<String, JsValue> {
+        let rid = <&matrix_sdk::ruma::RoomId>::try_from(room_id).map_err(to_js_err)?;
+
+        if let Some(room) = self.client.get_room(rid) {
+            let messages = room.messages(MessagesOptions::backward()).await.map_err(to_js_err)?;
+            let mut collected: Vec<serde_json::Value> = Vec::new();
+            for event in &messages.chunk {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(event.raw().json().get()) {
+                    let event_type = json.get("type").and_then(|t| t.as_str());
+                    if event_type != Some("m.room.encrypted")
+                        && event_type != Some("m.room.encryption")
+                        && event_type != Some("m.room.member")
+                    {
+                        collected.push(json);
+                    }
+                }
+            }
+            return serde_json::to_string(&collected).map_err(to_js_err);
+        }
+
+        Ok("[]".to_string())
     }
 
     /// Sync and collect events from a room. Returns JSON string of event array.
