@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { program } from 'commander';
-import { connectWithSession } from '@mxdx/core';
+import { connectWithSession, parseOlderThan, cleanupDevices, cleanupRooms, cleanupEvents } from '@mxdx/core';
 import { ClientConfig } from '../src/config.js';
 import { findLauncher } from '../src/discovery.js';
 import { execCommand } from '../src/exec.js';
@@ -160,11 +160,129 @@ program
     console.log('No telemetry data available');
   });
 
+program
+  .command('cleanup <targets>')
+  .description('Clean up stale Matrix state (devices, events, rooms)')
+  .option('--force-cleanup', 'Skip confirmation prompts')
+  .option('--older-than <duration>', 'Only clean items older than duration (e.g. 1d, 2w, 3m)')
+  .action(async (targets, opts) => {
+    const parentOpts = program.opts();
+    const validTargets = ['devices', 'events', 'rooms'];
+    const targetList = targets.split(',').map(t => t.trim()).filter(Boolean);
+
+    for (const t of targetList) {
+      if (!validTargets.includes(t)) {
+        console.error(`Invalid target: '${t}'. Valid targets: ${validTargets.join(', ')}`);
+        process.exit(1);
+      }
+    }
+
+    const olderThan = parseOlderThan(opts.olderThan);
+    const log = (msg) => console.error(`[cleanup] ${msg}`);
+    const result = await connect(parentOpts);
+    const { client, password } = result;
+
+    const accessToken = client.accessToken();
+    const homeserverUrl = client.homeserverUrl();
+    const userId = client.userId();
+    const currentDeviceId = client.deviceId();
+
+    let launchersJson;
+    if (targetList.includes('events') || targetList.includes('rooms')) {
+      launchersJson = await client.listLauncherSpaces();
+    }
+
+    // Preview phase
+    const results = {};
+    for (const target of targetList) {
+      try {
+        if (target === 'devices') {
+          results.devices = await cleanupDevices({
+            accessToken, homeserverUrl, currentDeviceId, userId, password,
+            olderThan, onProgress: log,
+          });
+          log(`\nDevices to delete (${results.devices.preview.length}):`);
+          for (const d of results.devices.preview) {
+            const ts = d.last_seen_ts ? new Date(d.last_seen_ts).toISOString() : 'unknown';
+            log(`  ${d.device_id} — ${d.display_name} (last seen: ${ts})`);
+          }
+        } else if (target === 'events') {
+          results.events = await cleanupEvents({
+            accessToken, homeserverUrl, launchersJson,
+            olderThan, onProgress: log,
+          });
+          log(`\nEvents to redact:`);
+          for (const r of results.events.preview) {
+            log(`  ${r.type} room for ${r.launcher_id}: ${r.event_count} event(s)`);
+          }
+        } else if (target === 'rooms') {
+          results.rooms = await cleanupRooms({
+            accessToken, homeserverUrl, launchersJson,
+            olderThan, onProgress: log,
+          });
+          log(`\nRooms to leave+forget (${results.rooms.preview.length}):`);
+          for (const r of results.rooms.preview) {
+            log(`  ${r.type} — ${r.launcher_id} (${r.room_id})`);
+          }
+        }
+      } catch (err) {
+        console.error(`Error previewing ${target}: ${err.message}`);
+        process.exit(1);
+      }
+    }
+
+    // Check if there's anything to do
+    const totalItems = Object.values(results).reduce((sum, r) => {
+      if (r.preview) return sum + (Array.isArray(r.preview) ? r.preview.length : 0);
+      return sum;
+    }, 0);
+
+    if (totalItems === 0) {
+      log('Nothing to clean up.');
+      process.exit(0);
+    }
+
+    // Confirmation
+    if (!opts.forceCleanup) {
+      const confirmed = await confirmPrompt('\nProceed with cleanup? This cannot be undone.');
+      if (!confirmed) {
+        log('Aborted.');
+        process.exit(0);
+      }
+    }
+
+    // Execute phase
+    for (const target of targetList) {
+      if (results[target]) {
+        try {
+          const outcome = await results[target].execute();
+          log(`${target}: ${JSON.stringify(outcome)}`);
+        } catch (err) {
+          console.error(`Error executing ${target} cleanup: ${err.message}`);
+        }
+      }
+    }
+
+    process.exit(0);
+  });
+
 program.parse();
 
 // If no command given, show help
 if (!process.argv.slice(2).length) {
   program.help();
+}
+
+async function confirmPrompt(message) {
+  if (!process.stdin.isTTY) return false;
+  const { createInterface } = await import('node:readline/promises');
+  const rl = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const answer = await rl.question(`${message} (y/N) `);
+    return answer.trim().toLowerCase() === 'y';
+  } finally {
+    rl.close();
+  }
 }
 
 async function connect(opts) {
