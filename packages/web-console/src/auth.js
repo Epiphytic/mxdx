@@ -55,37 +55,57 @@ export function setupAuth({ onLogin, getWasmClient }) {
       const savedSession = await loadSession();
       if (savedSession) {
         try {
-          showStatus('Restoring session...');
+          const parsed = JSON.parse(savedSession);
+          showStatus(`Restoring session for ${parsed.user_id} (device: ${parsed.device_id})...`);
+          console.log(`[auth] Restoring saved session — device: ${parsed.device_id}, store: ${parsed.store_name || 'legacy'}`);
           client = await WasmMatrixClient.restoreSession(savedSession);
           sessionJson = savedSession;
-          console.log('[auth] Session restored (reusing existing device)');
+          console.log(`[auth] Session restored — reusing device ${parsed.device_id}`);
+          showStatus(`Session restored (device: ${parsed.device_id})`);
         } catch (restoreErr) {
           console.warn('[auth] Session restore failed, falling back to fresh login:', restoreErr);
+          showStatus('Saved session expired, logging in fresh...');
           client = null;
         }
       }
 
       if (!client) {
-        showStatus(`Connecting to ${server}...`);
+        showStatus(`Resolving homeserver for ${server}...`);
+        console.log(`[auth] No saved session — fresh login to ${server} as ${username}`);
+        console.warn('[auth] Creating new device ID — this should only happen on first login');
+
+        showStatus(`Authenticating with ${server}...`);
         client = await WasmMatrixClient.login(server, username, password);
 
-        showStatus('Setting up encryption...');
+        const deviceId = client.deviceId();
+        const userId = client.userId();
+        console.warn(`[auth] New device created: ${deviceId} for ${userId}`);
+        showStatus(`Logged in as ${userId} (new device: ${deviceId})`);
+
+        showStatus('Setting up encryption (cross-signing)...');
+        console.log('[auth] Bootstrapping cross-signing keys...');
         try {
           await Promise.race([
             (async () => {
               await client.bootstrapCrossSigningIfNeeded(password);
+              console.log('[auth] Cross-signing keys bootstrapped');
+              showStatus('Verifying device identity...');
               await client.verifyOwnIdentity();
+              console.log('[auth] Own identity verified');
             })(),
             new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000)),
           ]);
+          showStatus('Encryption ready');
         } catch (csErr) {
           console.warn('[auth] Cross-signing skipped (non-fatal):', csErr);
+          showStatus('Encryption setup skipped (non-fatal)');
         }
 
         sessionJson = client.exportSession();
+        console.log('[auth] Session exported for persistence');
       }
 
-      showStatus('Saving session...');
+      showStatus('Saving session to browser...');
 
       statusEl.hidden = true;
       form.reset();

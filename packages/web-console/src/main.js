@@ -48,11 +48,15 @@ async function boot() {
   const savedSession = await loadSession();
   if (savedSession) {
     try {
+      const parsed = JSON.parse(savedSession);
+      console.log(`[boot] Found saved session — restoring device ${parsed.device_id} for ${parsed.user_id}`);
       client = await WasmMatrixClient.restoreSession(savedSession);
+      console.log(`[boot] Session restored — reusing device ${parsed.device_id}`);
 
       // Auto-reconnect if we had an active terminal session
       const savedTerminal = loadTerminalSession();
       if (savedTerminal) {
+        console.log(`[boot] Reconnecting to terminal session ${savedTerminal.sessionId}`);
         showReconnect(
           { exec_room_id: savedTerminal.launcherExecRoomId, launcher_id: 'reconnecting...' },
           { session_id: savedTerminal.sessionId, room_id: savedTerminal.dmRoomId, persistent: savedTerminal.persistent },
@@ -63,8 +67,11 @@ async function boot() {
       return;
     } catch (err) {
       console.warn('[boot] Session restore failed:', err);
+      console.log('[boot] Clearing invalid session — next login will create a new device');
       await clearSession();
     }
+  } else {
+    console.log('[boot] No saved session found — showing login form');
   }
 
   showLogin();
