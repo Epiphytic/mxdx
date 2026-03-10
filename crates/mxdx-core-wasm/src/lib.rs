@@ -698,6 +698,71 @@ impl WasmMatrixClient {
         Ok(response.room_id().to_string())
     }
 
+    /// Create a room with configurable options (topic, invites, preset).
+    /// Always adds E2EE and history_visibility: joined.
+    /// config_json: { "invite": ["@user:server"], "topic": "...", "preset": "trusted_private_chat", "is_direct": false }
+    #[wasm_bindgen(js_name = "createRoom")]
+    pub async fn create_room(&self, config_json: &str) -> Result<String, JsValue> {
+        #[derive(Deserialize)]
+        struct RoomConfig {
+            #[serde(default)]
+            invite: Vec<String>,
+            #[serde(default)]
+            topic: Option<String>,
+            #[serde(default)]
+            preset: Option<String>,
+            #[serde(default)]
+            is_direct: bool,
+        }
+
+        let config: RoomConfig = serde_json::from_str(config_json)
+            .map_err(|e| to_js_err(format!("Invalid room config: {e}")))?;
+
+        let encryption_event = InitialStateEvent::new(
+            EmptyStateKey,
+            RoomEncryptionEventContent::with_recommended_defaults(),
+        );
+        let history_event = InitialStateEvent::new(
+            EmptyStateKey,
+            RoomHistoryVisibilityEventContent::new(HistoryVisibility::Joined),
+        );
+
+        let mut initial_state = vec![
+            encryption_event.to_raw_any(),
+            history_event.to_raw_any(),
+        ];
+
+        // Add topic as initial state if provided
+        if let Some(ref topic) = config.topic {
+            let topic_event = InitialStateEvent::new(
+                EmptyStateKey,
+                RoomTopicEventContent::new(topic.clone()),
+            );
+            initial_state.push(topic_event.to_raw_any());
+        }
+
+        let mut request = CreateRoomRequest::new();
+        request.is_direct = config.is_direct;
+        request.invite = config.invite.iter()
+            .filter_map(|u| u.as_str().try_into().ok())
+            .collect();
+        request.initial_state = initial_state;
+
+        // Handle preset
+        if let Some(ref preset) = config.preset {
+            use matrix_sdk::ruma::api::client::room::create_room::v3::RoomPreset;
+            request.preset = match preset.as_str() {
+                "trusted_private_chat" => Some(RoomPreset::TrustedPrivateChat),
+                "private_chat" => Some(RoomPreset::PrivateChat),
+                "public_chat" => Some(RoomPreset::PublicChat),
+                _ => None,
+            };
+        }
+
+        let response = self.client.create_room(request).await.map_err(to_js_err)?;
+        Ok(response.room_id().to_string())
+    }
+
     /// Sync and wait for a specific event type in a room.
     /// Returns event content as JSON string, or "null" if timeout.
     #[wasm_bindgen(js_name = "onRoomEvent")]
