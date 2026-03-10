@@ -60,6 +60,34 @@ describe('TURN credentials', () => {
     assert.equal(result, null);
   });
 
+  it('rejects http: for non-loopback hosts (token exfiltration prevention)', async () => {
+    const mockFetch = async () => { throw new Error('should not be called'); };
+    const result = await fetchTurnCredentials('http://evil.com', 'syt_token', mockFetch);
+    assert.equal(result, null);
+  });
+
+  it('allows http: for localhost (loopback)', async () => {
+    let calledUrl = null;
+    const mockFetch = async (url) => {
+      calledUrl = url;
+      return { ok: true, json: async () => ({ username: 'u', password: 'p', uris: ['turn:t:3478'], ttl: 86400 }) };
+    };
+    const result = await fetchTurnCredentials('http://localhost:8008', 'tok', mockFetch);
+    assert.ok(calledUrl.includes('localhost'));
+    assert.equal(result.username, 'u');
+  });
+
+  it('allows http: for 127.0.0.1 (loopback)', async () => {
+    let calledUrl = null;
+    const mockFetch = async (url) => {
+      calledUrl = url;
+      return { ok: true, json: async () => ({ username: 'u', password: 'p', uris: ['turn:t:3478'], ttl: 86400 }) };
+    };
+    const result = await fetchTurnCredentials('http://127.0.0.1:8008', 'tok', mockFetch);
+    assert.ok(calledUrl.includes('127.0.0.1'));
+    assert.equal(result.username, 'u');
+  });
+
   it('uses URL constructor for safe path building', async () => {
     let calledUrl = null;
     const mockFetch = async (url) => {

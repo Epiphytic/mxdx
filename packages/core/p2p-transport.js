@@ -9,10 +9,13 @@
  * Falls back to Matrix transparently on any P2P failure.
  */
 
+import { randomBytes } from 'node:crypto';
+
 const MAX_FRAME_SIZE = 64 * 1024; // 64KB
 const INITIAL_BACKOFF_MS = 10_000;
 const MAX_BACKOFF_MS = 300_000; // 5 minutes
 const ACK_TIMEOUT_MS = 2_000;
+const VERIFY_TIMEOUT_MS = 10_000;
 
 // Event types that carry terminal content and MUST be encrypted
 const ENCRYPTED_EVENT_TYPES = new Set([
@@ -36,6 +39,13 @@ export class P2PTransport {
   #peerVerified = false;
   #status = 'matrix';
   #closed = false;
+
+  // Peer verification state
+  #localNonce = null;
+  #remoteNonce = null;
+  #localVerified = false;   // We verified the remote peer
+  #remoteVerified = false;  // Remote peer verified us (they sent response, we confirmed)
+  #verifyTimer = null;
 
   // P2P inbox: Map<eventType, Array<resolvedJson>>
   #p2pInbox = new Map();
@@ -91,10 +101,16 @@ export class P2PTransport {
 
   /**
    * Attach a WebRTC data channel. Registers message/close handlers.
-   * The channel is NOT used for terminal data until peer verification completes.
+   * Automatically initiates peer verification challenge-response.
+   * The channel is NOT used for terminal data until both sides verify.
    */
   setDataChannel(channel) {
     this.#dataChannel = channel;
+    this.#peerVerified = false;
+    this.#localVerified = false;
+    this.#remoteVerified = false;
+    this.#localNonce = null;
+    this.#remoteNonce = null;
 
     channel.onMessage((msg) => {
       this.#handleDataChannelMessage(msg);
@@ -104,25 +120,8 @@ export class P2PTransport {
       this.#handleChannelClose();
     });
 
-    // If peer is already verified (e.g., test shortcut), go to p2p
-    if (this.#peerVerified) {
-      this.#setStatus('p2p');
-      this.#resetIdleTimer();
-    }
-  }
-
-  /**
-   * Test helper — set peer verification state directly.
-   * In production, verification happens via challenge-response after channel opens.
-   */
-  _setPeerVerified(verified) {
-    this.#peerVerified = verified;
-    if (verified && this.#dataChannel) {
-      this.#setStatus('p2p');
-      this.#hadSuccessfulP2P = true;
-      this.#reconnectBackoffMs = INITIAL_BACKOFF_MS;
-      this.#resetIdleTimer();
-    }
+    // Start peer verification automatically
+    this.#startVerification();
   }
 
   /**
@@ -205,9 +204,100 @@ export class P2PTransport {
   close() {
     this.#closed = true;
     this.#clearIdleTimer();
+    this.#clearVerifyTimer();
     this.#clearAllWaiters();
     if (this.#dataChannel) {
       try { this.#dataChannel.close(); } catch { /* already closed */ }
+    }
+  }
+
+  // --- Peer Verification ---
+
+  #startVerification() {
+    // Generate a random nonce and send challenge
+    this.#localNonce = randomBytes(32).toString('hex');
+    this.#sendControlFrame({
+      type: 'peer_verify',
+      nonce: this.#localNonce,
+      device_id: this.#localDeviceId,
+    });
+
+    // Set verification timeout — 10 seconds
+    this.#verifyTimer = setTimeout(() => {
+      this.#verifyTimer = null;
+      if (!this.#peerVerified) {
+        // Verification timed out — close channel, fall back to Matrix
+        if (this.#dataChannel) {
+          try { this.#dataChannel.close(); } catch { /* already closed */ }
+          this.#dataChannel = null;
+        }
+        this.#peerVerified = false;
+        this.#setStatus('matrix');
+      }
+    }, VERIFY_TIMEOUT_MS);
+  }
+
+  #handlePeerVerify(frame) {
+    // Remote sent us their nonce — sign it and respond
+    this.#remoteNonce = frame.nonce;
+    const remoteDeviceId = frame.device_id;
+
+    if (!this.#remoteNonce || !remoteDeviceId) return;
+
+    // Sign the remote's nonce with our device key
+    const signature = this.#signFn(this.#remoteNonce);
+    this.#sendControlFrame({
+      type: 'peer_verify_response',
+      nonce: this.#remoteNonce,
+      device_id: this.#localDeviceId,
+      signature,
+    });
+  }
+
+  #handlePeerVerifyResponse(frame) {
+    // Remote signed our nonce — verify their signature
+    if (!frame.nonce || !frame.signature || !frame.device_id) return;
+
+    // Must be responding to our nonce
+    if (frame.nonce !== this.#localNonce) return;
+
+    const valid = this.#verifySignatureFn(frame.nonce, frame.signature, frame.device_id);
+    if (!valid) {
+      // Verification failed — close channel
+      if (this.#dataChannel) {
+        try { this.#dataChannel.close(); } catch { /* already closed */ }
+        this.#dataChannel = null;
+      }
+      this.#peerVerified = false;
+      this.#clearVerifyTimer();
+      this.#setStatus('matrix');
+      return;
+    }
+
+    // We have verified the remote peer
+    this.#localVerified = true;
+    this.#checkVerificationComplete();
+  }
+
+  #checkVerificationComplete() {
+    // Both sides must have completed: we verified them (localVerified)
+    // AND they verified us (we sent our response when we got their nonce)
+    // localVerified = we verified their signature on our nonce
+    // remoteNonce being set = they sent us a challenge, and we responded
+    if (this.#localVerified && this.#remoteNonce) {
+      this.#peerVerified = true;
+      this.#clearVerifyTimer();
+      this.#hadSuccessfulP2P = true;
+      this.#reconnectBackoffMs = INITIAL_BACKOFF_MS;
+      this.#setStatus('p2p');
+      this.#resetIdleTimer();
+    }
+  }
+
+  #clearVerifyTimer() {
+    if (this.#verifyTimer) {
+      clearTimeout(this.#verifyTimer);
+      this.#verifyTimer = null;
     }
   }
 
@@ -249,7 +339,10 @@ export class P2PTransport {
         // Keepalive response — nothing to do
         break;
       case 'peer_verify':
-        // Peer verification handled by higher-level protocol
+        this.#handlePeerVerify(frame);
+        break;
+      case 'peer_verify_response':
+        this.#handlePeerVerifyResponse(frame);
         break;
       default:
         // Unknown frame type, ignore
@@ -302,6 +395,9 @@ export class P2PTransport {
     const wasP2P = this.#status === 'p2p';
     this.#dataChannel = null;
     this.#peerVerified = false;
+    this.#localVerified = false;
+    this.#remoteVerified = false;
+    this.#clearVerifyTimer();
     this.#setStatus('matrix');
     this.#clearIdleTimer();
 

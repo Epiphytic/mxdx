@@ -164,16 +164,15 @@ describe('P2P E2E with loopback WebRTC', () => {
       idleTimeoutMs: 60000,
     });
 
-    // Attach data channels
+    // Attach data channels — triggers automatic peer verification
     transportA.setDataChannel(channelA);
     transportB.setDataChannel(channelB);
 
-    // Simulate peer verification
-    transportA._setPeerVerified(true);
-    transportB._setPeerVerified(true);
+    // Wait for peer verification to complete via challenge-response
+    await new Promise(r => setTimeout(r, 500));
 
-    assert.equal(transportA.status, 'p2p');
-    assert.equal(transportB.status, 'p2p');
+    assert.equal(transportA.status, 'p2p', 'A should be verified and in p2p mode');
+    assert.equal(transportB.status, 'p2p', 'B should be verified and in p2p mode');
 
     // Send terminal data A -> B
     await transportA.sendEvent('!test:room', 'org.mxdx.terminal.data',
@@ -228,18 +227,36 @@ describe('P2P E2E with loopback WebRTC', () => {
       signFn: mockSign,
       verifySignatureFn: mockVerifySignature,
       localDeviceId: 'DEVICE_A',
-      idleTimeoutMs: 100, // Short timeout for testing
+      idleTimeoutMs: 500, // Short timeout for testing (must be > verification time)
+    });
+
+    // Need a transport on B side so verification challenge-response works
+    const transportB = P2PTransport.create({
+      matrixClient: clientB,
+      encryptFn: mockEncrypt,
+      decryptFn: mockDecrypt,
+      signFn: mockSign,
+      verifySignatureFn: mockVerifySignature,
+      localDeviceId: 'DEVICE_B',
+      idleTimeoutMs: 60000,
     });
 
     transportA.setDataChannel(channelA);
-    transportA._setPeerVerified(true);
-    assert.equal(transportA.status, 'p2p');
+    transportB.setDataChannel(channelB);
 
-    // Wait for idle timeout
-    await new Promise(r => setTimeout(r, 200));
+    // Wait for verification to complete
+    for (let i = 0; i < 20; i++) {
+      if (transportA.status === 'p2p') break;
+      await new Promise(r => setTimeout(r, 50));
+    }
+    assert.equal(transportA.status, 'p2p', 'A should reach p2p after verification');
+
+    // Wait for idle timeout (500ms from last activity)
+    await new Promise(r => setTimeout(r, 700));
     assert.equal(transportA.status, 'matrix', 'Should fall back to Matrix after idle timeout');
 
     transportA.close();
+    transportB.close();
     channelA.close();
     channelB.close();
   });
@@ -267,6 +284,17 @@ describe('P2P E2E with loopback WebRTC', () => {
       channelB.waitForDataChannel(),
     ]);
 
+    // Need both transports for verification to complete
+    const transportA = P2PTransport.create({
+      matrixClient: clientA,
+      encryptFn: mockEncrypt,
+      decryptFn: mockDecrypt,
+      signFn: mockSign,
+      verifySignatureFn: mockVerifySignature,
+      localDeviceId: 'DEVICE_A',
+      idleTimeoutMs: 60000,
+    });
+
     const transportB = P2PTransport.create({
       matrixClient: clientB,
       encryptFn: mockEncrypt,
@@ -277,8 +305,12 @@ describe('P2P E2E with loopback WebRTC', () => {
       idleTimeoutMs: 60000,
     });
 
+    transportA.setDataChannel(channelA);
     transportB.setDataChannel(channelB);
-    transportB._setPeerVerified(true);
+
+    // Wait for verification
+    await new Promise(r => setTimeout(r, 500));
+    assert.equal(transportB.status, 'p2p');
 
     // Send oversized frame directly on the wire (bypassing P2PTransport.sendEvent)
     const oversized = JSON.stringify({ type: 'encrypted', ciphertext: 'x'.repeat(65 * 1024) });
@@ -288,6 +320,7 @@ describe('P2P E2E with loopback WebRTC', () => {
     const result = await transportB.onRoomEvent('!test:room', 'org.mxdx.terminal.data', 0.3);
     assert.equal(result, 'null', 'Oversized frame should be dropped');
 
+    transportA.close();
     transportB.close();
     channelA.close();
     channelB.close();

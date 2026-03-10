@@ -3,12 +3,20 @@
  * Returns null if the homeserver doesn't provide TURN.
  *
  * Uses URL() constructor for safe path construction (no string concatenation).
- * Validates https: scheme to prevent credential exfiltration via SSRF.
+ * Validates scheme to prevent credential exfiltration:
+ *   - https: always allowed
+ *   - http: only allowed for loopback addresses (localhost, 127.0.0.1, ::1)
  * Disables redirect following to prevent credential leakage to non-homeserver domains.
  */
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1']);
+
 export async function fetchTurnCredentials(homeserverUrl, accessToken, fetchFn = fetch) {
   try {
     const parsed = new URL(homeserverUrl);
+    if (parsed.protocol === 'http:' && !LOOPBACK_HOSTS.has(parsed.hostname)) {
+      // http: with Bearer token only safe over loopback
+      return null;
+    }
     if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
       return null;
     }

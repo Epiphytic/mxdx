@@ -889,6 +889,23 @@ export class LauncherRuntime {
 
     await channel.acceptAnswer({ sdp: answerContent.answer.sdp, type: answerContent.answer.type });
 
+    // Poll for remote ICE candidates in background
+    const pollCandidates = async () => {
+      for (let i = 0; i < 30; i++) { // Poll for up to 30 seconds
+        const candJson = await this.#client.onRoomEvent(dmRoomId, 'm.call.candidates', 1);
+        if (!candJson || candJson === 'null') continue;
+        try {
+          const candEvent = JSON.parse(candJson);
+          const candContent = candEvent.content || candEvent;
+          if (candContent.call_id !== callId) continue;
+          for (const c of (candContent.candidates || [])) {
+            channel.addIceCandidate(c);
+          }
+        } catch { /* malformed candidate event */ }
+      }
+    };
+    pollCandidates().catch(() => {});
+
     // Wait for data channel to open
     await channel.waitForDataChannel();
 
