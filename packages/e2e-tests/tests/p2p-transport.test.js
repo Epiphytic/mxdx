@@ -12,27 +12,24 @@ function mockClient() {
   };
 }
 
-function mockEncrypt(roomId, type, content) {
-  return JSON.stringify({ encrypted: true, original: content });
-}
-
-function mockDecrypt(ciphertext) {
-  const parsed = JSON.parse(ciphertext);
-  return parsed.original;
-}
-
-function mockSign(nonce) {
-  return 'sig_' + nonce;
-}
-
-function mockVerifySignature(nonce, signature, deviceId) {
-  return signature === 'sig_' + nonce;
+/** Mock P2PCrypto that uses simple JSON wrapping (no real AES-GCM). */
+function mockP2PCrypto() {
+  return {
+    async encrypt(plaintext) {
+      return JSON.stringify({ mock_encrypted: true, original: plaintext });
+    },
+    async decrypt(ciphertextJson) {
+      const parsed = JSON.parse(ciphertextJson);
+      if (!parsed.mock_encrypted) throw new Error('Not mock-encrypted');
+      return parsed.original;
+    },
+  };
 }
 
 /**
  * Create a mock channel that auto-completes peer verification.
  * When the transport sends a peer_verify frame, the mock responds
- * with the correct challenge-response to make verification succeed.
+ * with the correct handshake to make verification succeed.
  */
 function mockChannel() {
   let messageCallback = null;
@@ -47,7 +44,6 @@ function mockChannel() {
       try {
         const frame = JSON.parse(data);
         if (frame.type === 'peer_verify' && messageCallback) {
-          // Remote received our challenge — respond with their challenge + response to ours
           // 1. Send back a peer_verify (their challenge to us)
           setTimeout(() => {
             messageCallback(JSON.stringify({
@@ -56,13 +52,12 @@ function mockChannel() {
               device_id: 'REMOTE_DEVICE',
             }));
           }, 1);
-          // 2. Send back a peer_verify_response (their signature on our nonce)
+          // 2. Send back a peer_verify_response (acknowledgement of our nonce)
           setTimeout(() => {
             messageCallback(JSON.stringify({
               type: 'peer_verify_response',
               nonce: frame.nonce,
               device_id: 'REMOTE_DEVICE',
-              signature: 'sig_' + frame.nonce,
             }));
           }, 2);
         }
@@ -78,7 +73,7 @@ function mockChannel() {
 }
 
 /**
- * Create a mock channel that does NOT auto-verify (for testing pre-verification behavior).
+ * Create a mock channel that does NOT auto-verify.
  */
 function mockChannelNoVerify() {
   let messageCallback = null;
@@ -100,10 +95,7 @@ function createTransport(overrides = {}) {
   const client = mockClient();
   const transport = P2PTransport.create({
     matrixClient: client,
-    encryptFn: mockEncrypt,
-    decryptFn: mockDecrypt,
-    signFn: mockSign,
-    verifySignatureFn: mockVerifySignature,
+    p2pCrypto: mockP2PCrypto(),
     localDeviceId: 'TESTDEVICE',
     ...overrides,
   });
@@ -132,7 +124,6 @@ describe('P2PTransport', () => {
     assert.equal(transport.status, 'p2p');
     await transport.sendEvent('!room:ex', 'org.mxdx.terminal.data', '{"data":"aGk=","encoding":"base64","seq":0}');
     assert.equal(client.sent.length, 0, 'should not send via Matrix');
-    // p2pSent includes verification frames + the encrypted frame
     const encryptedFrames = channel.p2pSent.filter(d => {
       try { return JSON.parse(d).type === 'encrypted'; } catch { return false; }
     });
@@ -147,7 +138,6 @@ describe('P2PTransport', () => {
     const { client, transport } = createTransport();
     const channel = mockChannelNoVerify();
     transport.setDataChannel(channel);
-    // Do NOT wait for verification — it won't complete with this mock
     await transport.sendEvent('!room:ex', 'org.mxdx.terminal.data', '{"data":"aGk=","encoding":"base64","seq":0}');
     assert.equal(client.sent.length, 1, 'should fall back to Matrix before verification');
     const encryptedFrames = channel.p2pSent.filter(d => {
@@ -162,12 +152,15 @@ describe('P2PTransport', () => {
     const channel = mockChannel();
     transport.setDataChannel(channel);
     await waitForVerification();
-    const encrypted = mockEncrypt('!room:ex', 'org.mxdx.terminal.data',
+    const p2pCrypto = mockP2PCrypto();
+    const encrypted = await p2pCrypto.encrypt(
       JSON.stringify({ type: 'org.mxdx.terminal.data', content: { data: 'aGk=', encoding: 'base64', seq: 0 } }));
     channel.simulateMessage(JSON.stringify({
       type: 'encrypted',
       ciphertext: encrypted,
     }));
+    // Allow async decryption to complete
+    await new Promise(r => setTimeout(r, 10));
     const result = await transport.onRoomEvent('!room:ex', 'org.mxdx.terminal.data', 1);
     const parsed = JSON.parse(result);
     assert.equal(parsed.content.seq, 0);
@@ -192,9 +185,8 @@ describe('P2PTransport', () => {
     const channel = mockChannel();
     transport.setDataChannel(channel);
     await waitForVerification();
-    const oversized = 'x'.repeat(65 * 1024);  // 65KB
+    const oversized = 'x'.repeat(65 * 1024);
     channel.simulateMessage(oversized);
-    // Should not crash, should not deliver
     const result = await transport.onRoomEvent('!room:ex', 'org.mxdx.terminal.data', 0.1);
     assert.equal(result, 'null', 'oversized frame should be dropped');
     transport.close();
@@ -234,26 +226,22 @@ describe('P2PTransport', () => {
     const channel = mockChannel();
     transport.setDataChannel(channel);
     await waitForVerification();
-    await new Promise(r => setTimeout(r, 100));  // idle hangup
+    await new Promise(r => setTimeout(r, 100));
     assert.equal(transport.status, 'matrix');
-    // First send triggers reconnect (backoff starts at 10s)
     await transport.sendEvent('!room:ex', 'org.mxdx.terminal.data', '{"data":"aGk=","encoding":"base64","seq":0}');
     assert.equal(reconnectCount, 1);
-    // Second send within backoff window should NOT trigger reconnect
     await transport.sendEvent('!room:ex', 'org.mxdx.terminal.data', '{"data":"aGk=","encoding":"base64","seq":1}');
     assert.equal(reconnectCount, 1, 'should respect backoff');
     transport.close();
   });
 
-  it('completes peer verification via challenge-response protocol', async () => {
+  it('completes peer verification via handshake protocol', async () => {
     const { client, transport } = createTransport();
     const channel = mockChannel();
     assert.equal(transport.status, 'matrix');
     transport.setDataChannel(channel);
-    // Verification should complete automatically via mock
     await waitForVerification();
     assert.equal(transport.status, 'p2p', 'should transition to p2p after verification');
-    // Verify that a peer_verify frame was sent
     const verifyFrames = channel.p2pSent.filter(d => {
       try { return JSON.parse(d).type === 'peer_verify'; } catch { return false; }
     });
@@ -261,15 +249,19 @@ describe('P2PTransport', () => {
     transport.close();
   });
 
-  it('fails verification on bad signature and falls back to Matrix', async () => {
-    const { client, transport } = createTransport({
-      // verifySignatureFn always returns false — bad signature
-      verifySignatureFn: () => false,
-    });
+  it('drops encrypted frames with wrong session key', async () => {
+    const { client, transport } = createTransport();
     const channel = mockChannel();
     transport.setDataChannel(channel);
     await waitForVerification();
-    assert.equal(transport.status, 'matrix', 'should stay on matrix when verification fails');
+    // Send a frame encrypted with a different "key" (not mock-encrypted format)
+    channel.simulateMessage(JSON.stringify({
+      type: 'encrypted',
+      ciphertext: JSON.stringify({ wrong_format: true, data: 'hello' }),
+    }));
+    await new Promise(r => setTimeout(r, 10));
+    const result = await transport.onRoomEvent('!room:ex', 'org.mxdx.terminal.data', 0.1);
+    assert.equal(result, 'null', 'frame with wrong key should be dropped');
     transport.close();
   });
 });

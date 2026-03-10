@@ -4,6 +4,7 @@ import { TerminalSocket } from './terminal-socket.js';
 import { BrowserWebRTCChannel } from './webrtc-channel.js';
 import { P2PSignaling } from '../../core/p2p-signaling.js';
 import { P2PTransport } from '../../core/p2p-transport.js';
+import { generateSessionKey, createP2PCrypto } from '../../core/p2p-crypto.js';
 import { fetchTurnCredentials, turnToIceServers } from '../../core/turn-credentials.js';
 
 let activeSocket = null;
@@ -126,16 +127,17 @@ async function setupBrowserP2P(client, dmRoomId, batchSender) {
 
   updateP2PStatus('connecting');
 
+  // Generate session key for P2P encryption (will be sent via E2EE Matrix signaling)
+  const sessionKey = await generateSessionKey();
+  const p2pCrypto = await createP2PCrypto(sessionKey);
+
   const transport = P2PTransport.create({
     matrixClient: {
       sendEvent: (roomId, type, content) => client.sendEvent(roomId, type, content),
       onRoomEvent: (roomId, type, timeout) => client.onRoomEvent(roomId, type, timeout),
       userId: () => client.userId(),
     },
-    encryptFn: (roomId, type, content) => client.encryptRoomEvent(roomId, type, content),
-    decryptFn: (ciphertext) => client.decryptEvent(ciphertext),
-    signFn: (nonce) => client.signWithDeviceKey(nonce),
-    verifySignatureFn: (nonce, signature, deviceId) => client.verifyDeviceSignature(nonce, signature, deviceId),
+    p2pCrypto,
     localDeviceId: client.deviceId(),
     idleTimeoutMs: settings.idleTimeoutS * 1000,
     onStatusChange: (status) => {
@@ -148,7 +150,7 @@ async function setupBrowserP2P(client, dmRoomId, batchSender) {
       }
     },
     onReconnectNeeded: () => {
-      attemptBrowserP2P(client, transport, dmRoomId).catch(() => {
+      attemptBrowserP2P(client, transport, dmRoomId, sessionKey).catch(() => {
         updateP2PStatus('matrix');
       });
     },
@@ -160,7 +162,7 @@ async function setupBrowserP2P(client, dmRoomId, batchSender) {
   });
 
   // Attempt P2P in background — terminal works on Matrix immediately
-  attemptBrowserP2P(client, transport, dmRoomId).catch(() => {
+  attemptBrowserP2P(client, transport, dmRoomId, sessionKey).catch(() => {
     updateP2PStatus('matrix');
   });
 
@@ -170,7 +172,7 @@ async function setupBrowserP2P(client, dmRoomId, batchSender) {
 /**
  * Attempt to establish browser P2P WebRTC connection.
  */
-async function attemptBrowserP2P(client, transport, dmRoomId) {
+async function attemptBrowserP2P(client, transport, dmRoomId, sessionKey) {
   const homeserverUrl = client.homeserverUrl();
   const accessToken = client.accessToken();
   let iceServers = [];

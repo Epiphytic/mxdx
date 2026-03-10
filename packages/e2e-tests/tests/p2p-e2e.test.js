@@ -72,17 +72,18 @@ function createMockPair() {
   return { clientA, clientB };
 }
 
-function mockEncrypt(roomId, type, content) {
-  return JSON.stringify({ encrypted: true, original: content });
+/** Mock P2PCrypto using simple JSON wrapping. */
+function mockP2PCrypto() {
+  return {
+    async encrypt(plaintext) {
+      return JSON.stringify({ encrypted: true, original: plaintext });
+    },
+    async decrypt(ciphertextJson) {
+      const parsed = JSON.parse(ciphertextJson);
+      return parsed.original;
+    },
+  };
 }
-
-function mockDecrypt(ciphertext) {
-  const parsed = JSON.parse(ciphertext);
-  return parsed.original;
-}
-
-function mockSign(nonce) { return 'sig_' + nonce; }
-function mockVerifySignature(nonce, signature) { return signature === 'sig_' + nonce; }
 
 describe('P2P E2E with loopback WebRTC', () => {
   it('establishes P2P channel and exchanges encrypted terminal data', async () => {
@@ -143,23 +144,20 @@ describe('P2P E2E with loopback WebRTC', () => {
       channelB.waitForDataChannel(),
     ]);
 
+    // Shared mock crypto (simulates session key exchange via Matrix)
+    const sharedCrypto = mockP2PCrypto();
+
     // Create P2PTransport on both sides
     const transportA = P2PTransport.create({
       matrixClient: clientA,
-      encryptFn: mockEncrypt,
-      decryptFn: mockDecrypt,
-      signFn: mockSign,
-      verifySignatureFn: mockVerifySignature,
+      p2pCrypto: sharedCrypto,
       localDeviceId: 'DEVICE_A',
       idleTimeoutMs: 60000,
     });
 
     const transportB = P2PTransport.create({
       matrixClient: clientB,
-      encryptFn: mockEncrypt,
-      decryptFn: mockDecrypt,
-      signFn: mockSign,
-      verifySignatureFn: mockVerifySignature,
+      p2pCrypto: sharedCrypto,
       localDeviceId: 'DEVICE_B',
       idleTimeoutMs: 60000,
     });
@@ -168,7 +166,7 @@ describe('P2P E2E with loopback WebRTC', () => {
     transportA.setDataChannel(channelA);
     transportB.setDataChannel(channelB);
 
-    // Wait for peer verification to complete via challenge-response
+    // Wait for peer verification to complete via handshake
     await new Promise(r => setTimeout(r, 500));
 
     assert.equal(transportA.status, 'p2p', 'A should be verified and in p2p mode');
@@ -182,7 +180,8 @@ describe('P2P E2E with loopback WebRTC', () => {
     assert.equal(clientA.sent.filter(e => e.type === 'org.mxdx.terminal.data').length, 0,
       'Terminal data should NOT go via Matrix when P2P is active');
 
-    // B receives via P2P inbox
+    // B receives via P2P inbox (allow async decryption)
+    await new Promise(r => setTimeout(r, 50));
     const received = await transportB.onRoomEvent('!test:room', 'org.mxdx.terminal.data', 2);
     assert.notEqual(received, 'null', 'B should receive terminal data via P2P');
     const parsed = JSON.parse(received);
@@ -220,23 +219,18 @@ describe('P2P E2E with loopback WebRTC', () => {
       channelB.waitForDataChannel(),
     ]);
 
+    const sharedCrypto = mockP2PCrypto();
+
     const transportA = P2PTransport.create({
       matrixClient: clientA,
-      encryptFn: mockEncrypt,
-      decryptFn: mockDecrypt,
-      signFn: mockSign,
-      verifySignatureFn: mockVerifySignature,
+      p2pCrypto: sharedCrypto,
       localDeviceId: 'DEVICE_A',
-      idleTimeoutMs: 500, // Short timeout for testing (must be > verification time)
+      idleTimeoutMs: 500, // Short timeout for testing
     });
 
-    // Need a transport on B side so verification challenge-response works
     const transportB = P2PTransport.create({
       matrixClient: clientB,
-      encryptFn: mockEncrypt,
-      decryptFn: mockDecrypt,
-      signFn: mockSign,
-      verifySignatureFn: mockVerifySignature,
+      p2pCrypto: sharedCrypto,
       localDeviceId: 'DEVICE_B',
       idleTimeoutMs: 60000,
     });
@@ -284,23 +278,18 @@ describe('P2P E2E with loopback WebRTC', () => {
       channelB.waitForDataChannel(),
     ]);
 
-    // Need both transports for verification to complete
+    const sharedCrypto = mockP2PCrypto();
+
     const transportA = P2PTransport.create({
       matrixClient: clientA,
-      encryptFn: mockEncrypt,
-      decryptFn: mockDecrypt,
-      signFn: mockSign,
-      verifySignatureFn: mockVerifySignature,
+      p2pCrypto: sharedCrypto,
       localDeviceId: 'DEVICE_A',
       idleTimeoutMs: 60000,
     });
 
     const transportB = P2PTransport.create({
       matrixClient: clientB,
-      encryptFn: mockEncrypt,
-      decryptFn: mockDecrypt,
-      signFn: mockSign,
-      verifySignatureFn: mockVerifySignature,
+      p2pCrypto: sharedCrypto,
       localDeviceId: 'DEVICE_B',
       idleTimeoutMs: 60000,
     });
@@ -312,7 +301,7 @@ describe('P2P E2E with loopback WebRTC', () => {
     await new Promise(r => setTimeout(r, 500));
     assert.equal(transportB.status, 'p2p');
 
-    // Send oversized frame directly on the wire (bypassing P2PTransport.sendEvent)
+    // Send oversized frame directly on the wire
     const oversized = JSON.stringify({ type: 'encrypted', ciphertext: 'x'.repeat(65 * 1024) });
     channelA.send(oversized);
 

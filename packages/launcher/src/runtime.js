@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { connectWithSession, TerminalDataEvent, saveIndexedDB, BatchedSender, fetchTurnCredentials, turnToIceServers, NodeWebRTCChannel, P2PSignaling, P2PTransport } from '@mxdx/core';
+import { connectWithSession, TerminalDataEvent, saveIndexedDB, BatchedSender, fetchTurnCredentials, turnToIceServers, NodeWebRTCChannel, P2PSignaling, P2PTransport, generateSessionKey, createP2PCrypto } from '@mxdx/core';
 import { executeCommand } from './process-bridge.js';
 import { PtyBridge } from './pty-bridge.js';
 import { inflateSync } from 'node:zlib';
@@ -781,6 +781,10 @@ export class LauncherRuntime {
     const idleTimeoutMs = (this.#config.p2pIdleTimeoutS || 300) * 1000;
     const p2pBatchMs = this.#config.p2pBatchMs || 10;
 
+    // Generate session key for P2P encryption (sent via E2EE Matrix signaling)
+    const sessionKey = await generateSessionKey();
+    const p2pCrypto = await createP2PCrypto(sessionKey);
+
     // Create P2PTransport with Matrix fallback
     const transport = P2PTransport.create({
       matrixClient: {
@@ -788,18 +792,7 @@ export class LauncherRuntime {
         onRoomEvent: (roomId, type, timeout) => this.#client.onRoomEvent(roomId, type, timeout),
         userId: () => this.#client.userId(),
       },
-      encryptFn: (roomId, type, content) => {
-        return this.#client.encryptRoomEvent(roomId, type, content);
-      },
-      decryptFn: (ciphertext) => {
-        return this.#client.decryptEvent(ciphertext);
-      },
-      signFn: (nonce) => {
-        return this.#client.signWithDeviceKey(nonce);
-      },
-      verifySignatureFn: (nonce, signature, deviceId) => {
-        return this.#client.verifyDeviceSignature(nonce, signature, deviceId);
-      },
+      p2pCrypto,
       localDeviceId: this.#client.deviceId(),
       idleTimeoutMs,
       onStatusChange: (status) => {
