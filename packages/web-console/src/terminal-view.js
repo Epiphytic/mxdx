@@ -9,7 +9,7 @@ import { fetchTurnCredentials, turnToIceServers } from '../../core/turn-credenti
 
 let activeSocket = null;
 let activeTerminal = null;
-const p2pCooldowns = new Map(); // dmRoomId -> timestamp (rate-limits P2P attempts)
+const roomTransports = new Map(); // roomId -> { transport, p2pCrypto, refCount, lastP2PAttempt }
 
 function base64Decode(str) {
   const binary = atob(str);
@@ -113,29 +113,37 @@ function updateP2PStatus(status, detail) {
 }
 
 /**
- * Set up P2P transport for a browser terminal session.
+ * Get or create a shared P2P transport for a room.
  * Returns a P2PTransport (with Matrix fallback) or a thin Matrix wrapper.
+ * Multiple sessions in the same room share one transport via refcounting.
  */
-async function setupBrowserP2P(client, dmRoomId, batchSender) {
+async function getOrCreateRoomTransport(client, roomId) {
+  const existing = roomTransports.get(roomId);
+  if (existing) {
+    existing.refCount++;
+    return existing.transport;
+  }
+
   const settings = getP2PSettings();
   if (!settings.enabled) {
-    return {
-      sendEvent: (roomId, type, content) => client.sendEvent(roomId, type, content),
-      onRoomEvent: (roomId, type, timeout) => client.onRoomEvent(roomId, type, timeout),
+    const transport = {
+      sendEvent: (rid, type, content) => client.sendEvent(rid, type, content),
+      onRoomEvent: (rid, type, timeout) => client.onRoomEvent(rid, type, timeout),
       close: () => {},
     };
+    // Don't cache disabled transport — no refcount needed
+    return transport;
   }
 
   updateP2PStatus('connecting');
 
-  // Generate session key for P2P encryption (will be sent via E2EE Matrix signaling)
   const sessionKey = await generateSessionKey();
   const p2pCrypto = await createP2PCrypto(sessionKey);
 
   const transport = P2PTransport.create({
     matrixClient: {
-      sendEvent: (roomId, type, content) => client.sendEvent(roomId, type, content),
-      onRoomEvent: (roomId, type, timeout) => client.onRoomEvent(roomId, type, timeout),
+      sendEvent: (rid, type, content) => client.sendEvent(rid, type, content),
+      onRoomEvent: (rid, type, timeout) => client.onRoomEvent(rid, type, timeout),
       userId: () => client.userId(),
     },
     p2pCrypto,
@@ -144,17 +152,17 @@ async function setupBrowserP2P(client, dmRoomId, batchSender) {
     onStatusChange: (status) => {
       if (status === 'p2p') {
         updateP2PStatus('p2p');
-        if (batchSender) batchSender.batchMs = settings.batchMs;
       } else {
         updateP2PStatus('matrix-lost');
-        if (batchSender) batchSender.batchMs = parseInt(localStorage.getItem('mxdx-batch-ms') || '200', 10);
       }
     },
     onReconnectNeeded: () => {
-      const lastAttempt = p2pCooldowns.get(dmRoomId) || 0;
-      if (Date.now() - lastAttempt < 60000) return; // max 1 attempt per 60s per room
-      p2pCooldowns.set(dmRoomId, Date.now());
-      attemptBrowserP2P(client, transport, dmRoomId, sessionKey).catch(() => {
+      const entry = roomTransports.get(roomId);
+      if (!entry) return;
+      const now = Date.now();
+      if (now - entry.lastP2PAttempt < 60000) return;
+      entry.lastP2PAttempt = now;
+      attemptBrowserP2P(client, transport, roomId, sessionKey).catch(() => {
         updateP2PStatus('matrix');
       });
     },
@@ -165,18 +173,29 @@ async function setupBrowserP2P(client, dmRoomId, batchSender) {
     },
   });
 
-  // Attempt P2P once per room (not per session), max 1 per 60s
-  const lastAttempt = p2pCooldowns.get(dmRoomId) || 0;
-  if (Date.now() - lastAttempt >= 60000) {
-    p2pCooldowns.set(dmRoomId, Date.now());
-    attemptBrowserP2P(client, transport, dmRoomId, sessionKey).catch(() => {
-      updateP2PStatus('matrix');
-    });
-  } else {
+  const entry = { transport, p2pCrypto, refCount: 1, lastP2PAttempt: Date.now() };
+  roomTransports.set(roomId, entry);
+
+  // Attempt P2P (non-blocking)
+  attemptBrowserP2P(client, transport, roomId, sessionKey).catch(() => {
     updateP2PStatus('matrix');
-  }
+  });
 
   return transport;
+}
+
+/**
+ * Release a reference to a room's shared P2P transport.
+ * Closes the transport when the last session in the room ends.
+ */
+function releaseRoomTransport(roomId) {
+  const entry = roomTransports.get(roomId);
+  if (!entry) return;
+  entry.refCount--;
+  if (entry.refCount <= 0) {
+    entry.transport.close();
+    roomTransports.delete(roomId);
+  }
 }
 
 /**
@@ -398,7 +417,7 @@ export async function setupTerminalView(client, launcher, { onClose, onSessionSt
     const sessionId = sessionContent.session_id;
 
     // Set up P2P transport (or Matrix-only wrapper) — non-blocking
-    const p2pTransport = await setupBrowserP2P(client, dmRoomId, null);
+    const p2pTransport = await getOrCreateRoomTransport(client, dmRoomId);
     const socket = new TerminalSocket(p2pTransport, dmRoomId, { pollIntervalMs: 100, batchMs: negotiatedBatchMs, sessionId });
     activeSocket = socket;
 
@@ -439,6 +458,7 @@ export async function setupTerminalView(client, launcher, { onClose, onSessionSt
     // Handle socket close
     socket.onclose = () => {
       window.removeEventListener('resize', onWindowResize);
+      releaseRoomTransport(dmRoomId);
       term.writeln('\r\n\r\n[Session ended]');
       activeSocket = null;
     };
@@ -544,7 +564,7 @@ export async function reconnectTerminalView(client, launcher, session, { onClose
     const negotiatedBatchMs = sessionContent.batch_ms || 200;
 
     // Set up P2P transport (or Matrix-only wrapper) — non-blocking
-    const p2pTransport = await setupBrowserP2P(client, dmRoomId, null);
+    const p2pTransport = await getOrCreateRoomTransport(client, dmRoomId);
     const socket = new TerminalSocket(p2pTransport, dmRoomId, { pollIntervalMs: 100, batchMs: negotiatedBatchMs, sessionId: session.session_id });
     activeSocket = socket;
 
@@ -574,6 +594,7 @@ export async function reconnectTerminalView(client, launcher, session, { onClose
 
     socket.onclose = () => {
       window.removeEventListener('resize', onWindowResize);
+      releaseRoomTransport(dmRoomId);
       term.writeln('\r\n\r\n[Session ended]');
       activeSocket = null;
     };
