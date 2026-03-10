@@ -9,7 +9,7 @@ import { inflateSync } from 'node:zlib';
 
 const DEFAULT_SESSION_DIR = path.join(os.homedir(), '.mxdx');
 const SESSIONS_FILE = 'sessions.json';
-const DM_ROOMS_FILE = 'dm-rooms.json';
+const SESSION_ROOMS_FILE = 'session-rooms.json';
 
 const MAX_DECOMPRESSED_SIZE = 1024 * 1024; // 1MB zlib bomb protection
 
@@ -152,7 +152,7 @@ export class LauncherRuntime {
   #lastStoreSave = 0;
   #log;
   #sessionRegistry = new Map(); // sessionId -> { tmuxName, dmRoomId, sender, persistent, pty, createdAt }
-  #userDmRooms = new Map(); // userId -> dmRoomId
+  #sessionRooms = new Map(); // "hostname:clientUserId" -> roomId
   #roomMuxes = new Map(); // dmRoomId -> SessionMux
   #p2pCooldowns = new Map(); // dmRoomId -> true (rate-limits P2P attempts to 1 per 60s per room)
   #telemetryTimer = null;
@@ -205,32 +205,36 @@ export class LauncherRuntime {
     }
   }
 
-  get #dmRoomsFilePath() {
-    return path.join(this.#sessionDir, DM_ROOMS_FILE);
+  get #sessionRoomsFilePath() {
+    return path.join(this.#sessionDir, SESSION_ROOMS_FILE);
   }
 
-  #saveDmRooms() {
+  #sessionRoomKey(clientUserId) {
+    return `${this.#config.username}:${clientUserId}`;
+  }
+
+  #saveSessionRooms() {
     try {
-      const data = Object.fromEntries(this.#userDmRooms);
+      const data = Object.fromEntries(this.#sessionRooms);
       fs.mkdirSync(this.#sessionDir, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(this.#dmRoomsFilePath, JSON.stringify(data, null, 2), { mode: 0o600 });
+      fs.writeFileSync(this.#sessionRoomsFilePath, JSON.stringify(data, null, 2), { mode: 0o600 });
     } catch (err) {
-      this.#log.warn('Failed to save DM rooms file', { error: err.message });
+      this.#log.warn('Failed to save session rooms file', { error: err.message });
     }
   }
 
-  #loadDmRooms() {
+  #loadSessionRooms() {
     try {
-      if (!fs.existsSync(this.#dmRoomsFilePath)) return;
-      const data = JSON.parse(fs.readFileSync(this.#dmRoomsFilePath, 'utf8'));
-      for (const [userId, roomId] of Object.entries(data)) {
-        this.#userDmRooms.set(userId, roomId);
+      if (!fs.existsSync(this.#sessionRoomsFilePath)) return;
+      const data = JSON.parse(fs.readFileSync(this.#sessionRoomsFilePath, 'utf8'));
+      for (const [key, roomId] of Object.entries(data)) {
+        this.#sessionRooms.set(key, roomId);
       }
     } catch { /* ignore */ }
   }
 
   #recoverSessions() {
-    this.#loadDmRooms();
+    this.#loadSessionRooms();
 
     const saved = this.#loadSessionsFile();
     const liveTmux = PtyBridge.list(this.#socketDir);
@@ -246,14 +250,20 @@ export class LauncherRuntime {
           pty: null, // no attached PtyBridge yet — will attach on reconnect
           createdAt: entry.createdAt,
         });
-        // Rebuild user DM room cache from recovered sessions
-        if (entry.sender && entry.dmRoomId) {
-          this.#userDmRooms.set(entry.sender, entry.dmRoomId);
-        }
         recovered++;
         this.#log.info('Recovered tmux session', { session_id: sessionId, tmux: entry.tmuxName });
       } else {
         this.#log.info('Stale session removed (tmux gone)', { session_id: sessionId, tmux: entry.tmuxName });
+      }
+    }
+
+    // Rebuild session rooms cache from recovered sessions
+    for (const [, session] of this.#sessionRegistry) {
+      if (session.dmRoomId && session.sender) {
+        const key = this.#sessionRoomKey(session.sender);
+        if (!this.#sessionRooms.has(key)) {
+          this.#sessionRooms.set(key, session.dmRoomId);
+        }
       }
     }
 
@@ -265,15 +275,22 @@ export class LauncherRuntime {
     return recovered;
   }
 
-  /** Get or create a DM room for a user. Cached per user. */
-  async #getDmRoom(userId) {
-    const existing = this.#userDmRooms.get(userId);
+  /** Get or create a session room for a client user. Keyed by hostname:clientUserId. */
+  async #getSessionRoom(clientUserId) {
+    const key = this.#sessionRoomKey(clientUserId);
+    const existing = this.#sessionRooms.get(key);
     if (existing) return existing;
 
-    const dmRoomId = await this.#client.createDmRoom(userId);
-    this.#userDmRooms.set(userId, dmRoomId);
-    this.#saveDmRooms();
-    return dmRoomId;
+    const topic = `org.mxdx.launcher.sessions:${this.#config.username}:${clientUserId}`;
+    const roomId = await this.#client.createRoom(JSON.stringify({
+      invite: [clientUserId],
+      topic,
+      preset: 'trusted_private_chat',
+    }));
+
+    this.#sessionRooms.set(key, roomId);
+    this.#saveSessionRooms();
+    return roomId;
   }
 
   async start() {
@@ -561,7 +578,7 @@ export class LauncherRuntime {
     this.#activeSessions++;
 
     try {
-      const dmRoomId = await this.#getDmRoom(sender);
+      const dmRoomId = await this.#getSessionRoom(sender);
       this.#log.info('DM room for session', { request_id: requestId, room_id: dmRoomId, sender });
 
       // Spawn PTY bridge with tmux support
