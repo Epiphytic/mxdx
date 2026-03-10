@@ -14,7 +14,9 @@
     "cleanup.js",
     "batched-sender.js",
     "turn-credentials.js",
-    "webrtc-channel-node.js"
+    "webrtc-channel-node.js",
+    "p2p-signaling.js",
+    "p2p-transport.js"
   ],
   "dependencies": {
     "fake-indexeddb": "^6.2.5",

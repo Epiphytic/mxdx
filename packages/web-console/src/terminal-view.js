@@ -1,6 +1,10 @@
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { TerminalSocket } from './terminal-socket.js';
+import { BrowserWebRTCChannel } from './webrtc-channel.js';
+import { P2PSignaling } from '../../core/p2p-signaling.js';
+import { P2PTransport } from '../../core/p2p-transport.js';
+import { fetchTurnCredentials, turnToIceServers } from '../../core/turn-credentials.js';
 
 let activeSocket = null;
 let activeTerminal = null;
@@ -36,6 +40,205 @@ async function decompress(data) {
     offset += chunk.length;
   }
   return result;
+}
+
+/** Read P2P settings from localStorage with sane clamping. */
+function getP2PSettings() {
+  const enabled = localStorage.getItem('mxdx-p2p-enabled');
+  const batchMs = parseInt(localStorage.getItem('mxdx-p2p-batch-ms') || '10', 10);
+  const idleTimeoutS = parseInt(localStorage.getItem('mxdx-p2p-idle-timeout-s') || '300', 10);
+  return {
+    enabled: enabled !== 'false',
+    batchMs: Math.max(1, Math.min(1000, isNaN(batchMs) ? 10 : batchMs)),
+    idleTimeoutS: Math.max(30, Math.min(3600, isNaN(idleTimeoutS) ? 300 : idleTimeoutS)),
+  };
+}
+
+/** Update the #terminal-status element with P2P status info. */
+function updateP2PStatus(status, detail) {
+  const el = document.getElementById('terminal-status');
+  if (!el) return;
+
+  // Remove all status classes
+  el.className = '';
+
+  switch (status) {
+    case 'p2p':
+      el.textContent = 'P2P';
+      el.classList.add('status-p2p');
+      el.hidden = false;
+      break;
+    case 'connecting':
+      el.textContent = 'P2P connecting...';
+      el.classList.add('status-connecting');
+      el.hidden = false;
+      break;
+    case 'matrix':
+      el.textContent = detail || 'Matrix';
+      el.classList.add('status-matrix');
+      el.hidden = false;
+      break;
+    case 'matrix-lost':
+      el.textContent = 'Matrix (P2P lost)';
+      el.classList.add('status-matrix-lost');
+      el.hidden = false;
+      // Fade to dim after 5s
+      setTimeout(() => {
+        el.textContent = 'Matrix';
+        el.classList.remove('status-matrix-lost');
+        el.classList.add('status-matrix');
+      }, 5000);
+      break;
+    case 'turn-limit':
+      el.textContent = 'P2P unavailable (TURN limit)';
+      el.classList.add('status-turn-limit');
+      el.hidden = false;
+      break;
+    case 'turn-unreachable':
+      el.textContent = 'P2P unavailable';
+      el.classList.add('status-turn-unreachable');
+      el.hidden = false;
+      break;
+    case 'rate-limited':
+      el.textContent = detail || 'Rate-limited';
+      el.classList.add('status-rate-limited');
+      el.hidden = false;
+      break;
+    default:
+      el.hidden = true;
+      break;
+  }
+}
+
+/**
+ * Set up P2P transport for a browser terminal session.
+ * Returns a P2PTransport (with Matrix fallback) or a thin Matrix wrapper.
+ */
+async function setupBrowserP2P(client, dmRoomId, batchSender) {
+  const settings = getP2PSettings();
+  if (!settings.enabled) {
+    return {
+      sendEvent: (roomId, type, content) => client.sendEvent(roomId, type, content),
+      onRoomEvent: (roomId, type, timeout) => client.onRoomEvent(roomId, type, timeout),
+      close: () => {},
+    };
+  }
+
+  updateP2PStatus('connecting');
+
+  const transport = P2PTransport.create({
+    matrixClient: {
+      sendEvent: (roomId, type, content) => client.sendEvent(roomId, type, content),
+      onRoomEvent: (roomId, type, timeout) => client.onRoomEvent(roomId, type, timeout),
+      userId: () => client.userId(),
+    },
+    encryptFn: (roomId, type, content) => client.encryptRoomEvent(roomId, type, content),
+    decryptFn: (ciphertext) => client.decryptEvent(ciphertext),
+    signFn: (nonce) => client.signWithDeviceKey(nonce),
+    verifySignatureFn: (nonce, signature, deviceId) => client.verifyDeviceSignature(nonce, signature, deviceId),
+    localDeviceId: client.deviceId(),
+    idleTimeoutMs: settings.idleTimeoutS * 1000,
+    onStatusChange: (status) => {
+      if (status === 'p2p') {
+        updateP2PStatus('p2p');
+        if (batchSender) batchSender.batchMs = settings.batchMs;
+      } else {
+        updateP2PStatus('matrix-lost');
+        if (batchSender) batchSender.batchMs = parseInt(localStorage.getItem('mxdx-batch-ms') || '200', 10);
+      }
+    },
+    onReconnectNeeded: () => {
+      attemptBrowserP2P(client, transport, dmRoomId).catch(() => {
+        updateP2PStatus('matrix');
+      });
+    },
+    onHangup: (reason) => {
+      if (reason === 'idle_timeout') {
+        updateP2PStatus('matrix', 'Matrix');
+      }
+    },
+  });
+
+  // Attempt P2P in background — terminal works on Matrix immediately
+  attemptBrowserP2P(client, transport, dmRoomId).catch(() => {
+    updateP2PStatus('matrix');
+  });
+
+  return transport;
+}
+
+/**
+ * Attempt to establish browser P2P WebRTC connection.
+ */
+async function attemptBrowserP2P(client, transport, dmRoomId) {
+  const homeserverUrl = client.homeserverUrl();
+  const accessToken = client.accessToken();
+  let iceServers = [];
+
+  const turnCreds = await fetchTurnCredentials(homeserverUrl, accessToken);
+  if (turnCreds) {
+    iceServers = turnToIceServers(turnCreds);
+  }
+
+  const channel = new BrowserWebRTCChannel({ iceServers });
+
+  // Detect TURN-specific errors (browser only)
+  channel.onIceCandidateError((err) => {
+    if (err.errorCode === 486 || err.errorCode === 508) {
+      updateP2PStatus('turn-limit');
+    } else if (err.errorCode === 701) {
+      updateP2PStatus('turn-unreachable');
+    }
+  });
+
+  const signaling = new P2PSignaling(
+    {
+      sendEvent: (roomId, type, content) => client.sendEvent(roomId, type, content),
+      onRoomEvent: (roomId, cb) => client.onRoomEvent(roomId, cb),
+    },
+    dmRoomId,
+    client.userId(),
+  );
+
+  const callId = P2PSignaling.generateCallId();
+  const partyId = P2PSignaling.generatePartyId();
+
+  // Batch ICE candidates
+  const candidates = [];
+  let candidateTimer = null;
+  channel.onIceCandidate((candidate) => {
+    candidates.push(candidate);
+    if (candidateTimer) clearTimeout(candidateTimer);
+    candidateTimer = setTimeout(async () => {
+      const batch = candidates.splice(0);
+      if (batch.length > 0) {
+        await signaling.sendCandidates({ callId, partyId, candidates: batch }).catch(() => {});
+      }
+    }, 100);
+  });
+
+  const offer = await channel.createOffer();
+  await signaling.sendInvite({ callId, partyId, sdp: offer.sdp, lifetime: 30000 });
+
+  // Wait for answer
+  const answerJson = await client.onRoomEvent(dmRoomId, 'm.call.answer', 30);
+  if (!answerJson || answerJson === 'null') {
+    channel.close();
+    throw new Error('No P2P answer received');
+  }
+
+  const answerEvent = JSON.parse(answerJson);
+  const answerContent = answerEvent.content || answerEvent;
+  if (answerContent.call_id !== callId) {
+    channel.close();
+    throw new Error('Answer call_id mismatch');
+  }
+
+  await channel.acceptAnswer({ sdp: answerContent.answer.sdp, type: answerContent.answer.type });
+  await channel.waitForDataChannel();
+
+  transport.setDataChannel(channel);
+  updateP2PStatus('p2p');
 }
 
 /**
@@ -153,13 +356,16 @@ export async function setupTerminalView(client, launcher, { onClose, onSessionSt
 
     // Create TerminalSocket on DM room (use negotiated batch window)
     const negotiatedBatchMs = sessionContent.batch_ms || 200;
-    const socket = new TerminalSocket(client, dmRoomId, { pollIntervalMs: 100, batchMs: negotiatedBatchMs });
+
+    // Set up P2P transport (or Matrix-only wrapper) — non-blocking
+    const p2pTransport = await setupBrowserP2P(client, dmRoomId, null);
+    const socket = new TerminalSocket(p2pTransport, dmRoomId, { pollIntervalMs: 100, batchMs: negotiatedBatchMs });
     activeSocket = socket;
 
     // Wire: buffering status indicator
     const statusEl = document.getElementById('terminal-status');
     socket.onbuffering = (buffering) => {
-      if (statusEl) {
+      if (statusEl && !statusEl.classList.contains('status-p2p')) {
         statusEl.textContent = buffering ? 'Buffering...' : '';
         statusEl.hidden = !buffering;
       }
@@ -296,13 +502,16 @@ export async function reconnectTerminalView(client, launcher, session, { onClose
 
     // Go live (use negotiated batch window from reconnect response)
     const negotiatedBatchMs = sessionContent.batch_ms || 200;
-    const socket = new TerminalSocket(client, dmRoomId, { pollIntervalMs: 100, batchMs: negotiatedBatchMs });
+
+    // Set up P2P transport (or Matrix-only wrapper) — non-blocking
+    const p2pTransport = await setupBrowserP2P(client, dmRoomId, null);
+    const socket = new TerminalSocket(p2pTransport, dmRoomId, { pollIntervalMs: 100, batchMs: negotiatedBatchMs });
     activeSocket = socket;
 
     // Wire: buffering status indicator
     const statusEl = document.getElementById('terminal-status');
     socket.onbuffering = (buffering) => {
-      if (statusEl) {
+      if (statusEl && !statusEl.classList.contains('status-p2p')) {
         statusEl.textContent = buffering ? 'Buffering...' : '';
         statusEl.hidden = !buffering;
       }
