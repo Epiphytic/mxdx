@@ -1,4 +1,9 @@
-import { randomBytes } from 'node:crypto';
+/** Cross-platform random hex string (works in browser + Node 19+). */
+function randomHex(byteCount) {
+  const buf = new Uint8Array(byteCount);
+  globalThis.crypto.getRandomValues(buf);
+  return Array.from(buf, b => b.toString(16).padStart(2, '0')).join('');
+}
 
 /**
  * P2P signaling layer using standard Matrix VoIP call events (m.call.*).
@@ -25,12 +30,12 @@ export class P2PSignaling {
 
   /** Generate a random call ID (16 hex chars). */
   static generateCallId() {
-    return randomBytes(8).toString('hex');
+    return randomHex(8);
   }
 
   /** Generate a random party ID (8 hex chars). */
   static generatePartyId() {
-    return randomBytes(4).toString('hex');
+    return randomHex(4);
   }
 
   /**

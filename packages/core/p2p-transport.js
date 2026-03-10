@@ -9,7 +9,12 @@
  * Falls back to Matrix transparently on any P2P failure.
  */
 
-import { randomBytes } from 'node:crypto';
+/** Cross-platform random hex string (works in browser + Node 19+). */
+function randomHex(byteCount) {
+  const buf = new Uint8Array(byteCount);
+  globalThis.crypto.getRandomValues(buf);
+  return Array.from(buf, b => b.toString(16).padStart(2, '0')).join('');
+}
 
 const MAX_FRAME_SIZE = 64 * 1024; // 64KB
 const INITIAL_BACKOFF_MS = 10_000;
@@ -215,7 +220,7 @@ export class P2PTransport {
 
   #startVerification() {
     // Generate a random nonce and send challenge
-    this.#localNonce = randomBytes(32).toString('hex');
+    this.#localNonce = randomHex(32);
     this.#sendControlFrame({
       type: 'peer_verify',
       nonce: this.#localNonce,
