@@ -366,9 +366,9 @@ export async function setupTerminalView(client, launcher, { onClose, onSessionSt
 
     term.writeln(`Session started. Joining room...`);
 
-    // Accept DM invitation
+    // Accept DM invitation (may already be joined from a previous session)
     await client.syncOnce();
-    await client.joinRoom(dmRoomId);
+    try { await client.joinRoom(dmRoomId); } catch { /* already joined */ }
     await client.syncOnce();
 
     term.writeln('Connected.\r\n');

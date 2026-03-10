@@ -577,12 +577,8 @@ export class LauncherRuntime {
         batch_ms: negotiatedBatchMs,
       });
 
-      // Wait for the client to join the DM
-      await new Promise((r) => setTimeout(r, 2000));
+      // Sync to pick up any join events (client may already be in room)
       await this.#client.syncOnce();
-
-      // Wait for PTY to initialize
-      await new Promise((r) => setTimeout(r, 500));
 
       // Set up transport — P2PTransport if enabled, raw Matrix client otherwise
       const transport = await this.#setupSessionTransport(dmRoomId, sender, negotiatedBatchMs);
@@ -693,7 +689,6 @@ export class LauncherRuntime {
         persistent: true,
       });
 
-      await new Promise((r) => setTimeout(r, 2000));
       await this.#client.syncOnce();
 
       const batchMs = this.#config.batchMs || 200;
