@@ -1,5 +1,15 @@
 import { spawn, execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
+import path from 'node:path';
+import os from 'node:os';
+import fs from 'node:fs';
+
+// Default tmux socket directory — isolates mxdx sessions from user's regular tmux
+const DEFAULT_SOCKET_DIR = path.join(os.homedir(), '.mxdx', 'tmux');
+
+function ensureDir(dir) {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+}
 
 function detectTmux() {
   try {
@@ -24,14 +34,16 @@ export class PtyBridge {
   #rows;
   #tmuxName = null;
   #persistent = false;
+  #socketDir = null;
 
   static tmuxInfo() {
     return detectTmux();
   }
 
-  static list() {
+  static list(socketDir = DEFAULT_SOCKET_DIR) {
     try {
-      const output = execFileSync('tmux', ['list-sessions', '-F', '#{session_name}'], {
+      const socketPath = path.join(socketDir, 'mxdx');
+      const output = execFileSync('tmux', ['-S', socketPath, 'list-sessions', '-F', '#{session_name}'], {
         encoding: 'utf8',
         timeout: 5000,
       }).trim();
@@ -41,6 +53,10 @@ export class PtyBridge {
     } catch {
       return [];
     }
+  }
+
+  static get defaultSocketDir() {
+    return DEFAULT_SOCKET_DIR;
   }
 
   /**
@@ -53,7 +69,7 @@ export class PtyBridge {
    * @param {string|null} [options.sessionName=null] - tmux session name (for reconnect)
    * @param {string} [options.useTmux='auto'] - 'auto'|'always'|'never'
    */
-  constructor(command, { cols = 80, rows = 24, cwd = '/tmp', env = {}, sessionName = null, useTmux = 'auto' } = {}) {
+  constructor(command, { cols = 80, rows = 24, cwd = '/tmp', env = {}, sessionName = null, useTmux = 'auto', socketDir = DEFAULT_SOCKET_DIR } = {}) {
     this.#cols = cols;
     this.#rows = rows;
 
@@ -75,26 +91,31 @@ export class PtyBridge {
     };
 
     if (wantTmux) {
+      this.#socketDir = socketDir;
+      ensureDir(socketDir);
+      const socketPath = path.join(socketDir, 'mxdx');
       this.#tmuxName = sessionName || `mxdx-${crypto.randomUUID().slice(0, 8)}`;
 
-      const existing = PtyBridge.list().includes(this.#tmuxName);
+      const existing = PtyBridge.list(socketDir).includes(this.#tmuxName);
 
       if (!existing) {
-        // Create detached tmux session — execFileSync (no shell)
+        // Create detached tmux session using dedicated socket
         execFileSync('tmux', [
+          '-S', socketPath,
           'new-session', '-d', '-s', this.#tmuxName,
           '-x', String(cols), '-y', String(rows),
           command,
         ], { env: shellEnv, cwd, timeout: 5000 });
       } else {
         execFileSync('tmux', [
+          '-S', socketPath,
           'resize-window', '-t', this.#tmuxName,
           '-x', String(cols), '-y', String(rows),
         ], { timeout: 5000 });
       }
 
       // Attach via script for piped stdio
-      this.#proc = spawn('script', ['-q', '/dev/null', '-c', `tmux attach -t ${this.#tmuxName}`], {
+      this.#proc = spawn('script', ['-q', '/dev/null', '-c', `tmux -S ${socketPath} attach -t ${this.#tmuxName}`], {
         cwd,
         env: shellEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
@@ -143,9 +164,10 @@ export class PtyBridge {
     this.#cols = cols;
     this.#rows = rows;
 
-    if (this.#tmuxName) {
+    if (this.#tmuxName && this.#socketDir) {
       try {
-        execFileSync('tmux', ['resize-window', '-t', this.#tmuxName, '-x', String(cols), '-y', String(rows)], { timeout: 5000 });
+        const socketPath = path.join(this.#socketDir, 'mxdx');
+        execFileSync('tmux', ['-S', socketPath, 'resize-window', '-t', this.#tmuxName, '-x', String(cols), '-y', String(rows)], { timeout: 5000 });
       } catch { /* best effort */ }
     } else if (this.#proc?.pid) {
       try {
@@ -156,6 +178,13 @@ export class PtyBridge {
 
   detach() {
     if (this.#proc) {
+      if (this.#tmuxName && this.#socketDir) {
+        // Detach the tmux client cleanly so the session survives
+        try {
+          const socketPath = path.join(this.#socketDir, 'mxdx');
+          execFileSync('tmux', ['-S', socketPath, 'detach-client', '-s', this.#tmuxName], { timeout: 5000 });
+        } catch { /* best effort */ }
+      }
       this.#proc.kill();
       this.#proc = null;
     }
@@ -170,9 +199,10 @@ export class PtyBridge {
       this.#proc.kill();
       this.#proc = null;
     }
-    if (this.#tmuxName) {
+    if (this.#tmuxName && this.#socketDir) {
       try {
-        execFileSync('tmux', ['kill-session', '-t', this.#tmuxName], { timeout: 5000 });
+        const socketPath = path.join(this.#socketDir, 'mxdx');
+        execFileSync('tmux', ['-S', socketPath, 'kill-session', '-t', this.#tmuxName], { timeout: 5000 });
       } catch { /* session may already be dead */ }
       this.#tmuxName = null;
     }

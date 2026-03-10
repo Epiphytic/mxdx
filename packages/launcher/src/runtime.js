@@ -1,8 +1,14 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
 import { connectWithSession, TerminalDataEvent, saveIndexedDB, BatchedSender } from '@mxdx/core';
 import { executeCommand } from './process-bridge.js';
 import { PtyBridge } from './pty-bridge.js';
 import { inflateSync } from 'node:zlib';
+
+const DEFAULT_SESSION_DIR = path.join(os.homedir(), '.mxdx');
+const SESSIONS_FILE = 'sessions.json';
 
 const MAX_DECOMPRESSED_SIZE = 1024 * 1024; // 1MB zlib bomb protection
 
@@ -58,6 +64,78 @@ export class LauncherRuntime {
     this.#log = new Logger(config.logFormat || 'json');
   }
 
+  get #sessionDir() {
+    return this.#config.sessionDir || DEFAULT_SESSION_DIR;
+  }
+
+  get #socketDir() {
+    return this.#config.tmuxSocketDir || path.join(this.#sessionDir, 'tmux');
+  }
+
+  get #sessionsFilePath() {
+    return path.join(this.#sessionDir, SESSIONS_FILE);
+  }
+
+  #saveSessionsFile() {
+    const data = {};
+    for (const [id, entry] of this.#sessionRegistry) {
+      if (entry.persistent && entry.tmuxName) {
+        data[id] = {
+          tmuxName: entry.tmuxName,
+          dmRoomId: entry.dmRoomId,
+          sender: entry.sender,
+          persistent: true,
+          createdAt: entry.createdAt,
+        };
+      }
+    }
+    try {
+      fs.mkdirSync(this.#sessionDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(this.#sessionsFilePath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    } catch (err) {
+      this.#log.warn('Failed to save sessions file', { error: err.message });
+    }
+  }
+
+  #loadSessionsFile() {
+    try {
+      if (!fs.existsSync(this.#sessionsFilePath)) return {};
+      return JSON.parse(fs.readFileSync(this.#sessionsFilePath, 'utf8'));
+    } catch {
+      return {};
+    }
+  }
+
+  #recoverSessions() {
+    const saved = this.#loadSessionsFile();
+    const liveTmux = PtyBridge.list(this.#socketDir);
+    let recovered = 0;
+
+    for (const [sessionId, entry] of Object.entries(saved)) {
+      if (liveTmux.includes(entry.tmuxName)) {
+        this.#sessionRegistry.set(sessionId, {
+          tmuxName: entry.tmuxName,
+          dmRoomId: entry.dmRoomId,
+          sender: entry.sender,
+          persistent: true,
+          pty: null, // no attached PtyBridge yet — will attach on reconnect
+          createdAt: entry.createdAt,
+        });
+        recovered++;
+        this.#log.info('Recovered tmux session', { session_id: sessionId, tmux: entry.tmuxName });
+      } else {
+        this.#log.info('Stale session removed (tmux gone)', { session_id: sessionId, tmux: entry.tmuxName });
+      }
+    }
+
+    // Clean up sessions file to remove stale entries
+    if (recovered > 0 || Object.keys(saved).length > 0) {
+      this.#saveSessionsFile();
+    }
+
+    return recovered;
+  }
+
   async start() {
     const server = this.#config.servers[0];
     const username = this.#config.username;
@@ -110,6 +188,12 @@ export class LauncherRuntime {
       }
     }
 
+    // Recover tmux sessions from previous launcher instance
+    const recovered = this.#recoverSessions();
+    if (recovered > 0) {
+      log(`Recovered ${recovered} tmux session(s) from previous instance`);
+    }
+
     // Post initial telemetry
     await this.#postTelemetry();
 
@@ -120,6 +204,17 @@ export class LauncherRuntime {
 
   async stop() {
     this.#running = false;
+
+    // Detach persistent sessions so tmux sessions survive launcher restart
+    for (const [id, entry] of this.#sessionRegistry) {
+      if (entry.persistent && entry.pty) {
+        this.#log.info('Detaching persistent session for restart survival', { sessionId: id, tmuxName: entry.tmuxName });
+        entry.pty.detach();
+      }
+    }
+
+    // Save session metadata for recovery on next start
+    this.#saveSessionsFile();
   }
 
   get topology() {
@@ -329,6 +424,7 @@ export class LauncherRuntime {
       const pty = new PtyBridge(command, {
         cols, rows, cwd, env,
         useTmux: this.#config.useTmux || 'auto',
+        socketDir: this.#socketDir,
       });
 
       this.#sessionRegistry.set(sessionId, {
@@ -339,6 +435,7 @@ export class LauncherRuntime {
         pty,
         createdAt: new Date().toISOString(),
       });
+      this.#saveSessionsFile();
 
       // Respond with DM room ID and negotiated batch window
       await this.#sendSessionResponse(requestId, 'started', dmRoomId, {
@@ -416,6 +513,7 @@ export class LauncherRuntime {
           });
         } else {
           this.#sessionRegistry.delete(sessionId);
+          this.#saveSessionsFile();
           this.#log.info('Interactive session ended', { request_id: requestId, session_id: sessionId });
         }
         this.#sendSessionResponse(requestId, 'ended', dmRoomId).catch(() => {});
@@ -434,10 +532,14 @@ export class LauncherRuntime {
   async #handleListSessions(requestId) {
     const sessions = [];
     for (const [sessionId, entry] of this.#sessionRegistry) {
+      // Check if tmux session is still alive
+      const alive = entry.pty?.alive ?? (entry.tmuxName ? PtyBridge.list(this.#socketDir).includes(entry.tmuxName) : false);
       sessions.push({
         session_id: sessionId,
         room_id: entry.dmRoomId,
         persistent: entry.persistent,
+        tmux_name: entry.tmuxName || null,
+        alive,
         created_at: entry.createdAt,
       });
     }
@@ -469,6 +571,7 @@ export class LauncherRuntime {
         cols, rows,
         sessionName: entry.tmuxName,
         useTmux: 'always',
+        socketDir: this.#socketDir,
       });
 
       entry.pty = pty;
@@ -528,6 +631,7 @@ export class LauncherRuntime {
           this.#log.info('Reconnected session bridge detached', { session_id: sessionId });
         } else {
           this.#sessionRegistry.delete(sessionId);
+          this.#saveSessionsFile();
         }
         this.#sendSessionResponse(requestId, 'ended', entry.dmRoomId).catch(() => {});
         this.#activeSessions--;
