@@ -154,7 +154,7 @@ export class LauncherRuntime {
   #sessionRegistry = new Map(); // sessionId -> { tmuxName, dmRoomId, sender, persistent, pty, createdAt }
   #sessionRooms = new Map(); // "hostname:clientUserId" -> roomId
   #roomMuxes = new Map(); // dmRoomId -> SessionMux
-  #p2pCooldowns = new Map(); // dmRoomId -> true (rate-limits P2P attempts to 1 per 60s per room)
+  #roomTransports = new Map(); // roomId -> { transport, p2pCrypto, refCount, lastP2PAttempt }
   #telemetryTimer = null;
 
   constructor(config) {
@@ -641,6 +641,7 @@ export class LauncherRuntime {
       watchPty().finally(() => {
         mux.removeSession(sessionId);
         batchSender.destroy();
+        this.#releaseRoomTransport(dmRoomId);
         if (mux.sessionCount === 0) this.#roomMuxes.delete(dmRoomId);
 
         if (pty.persistent) {
@@ -750,6 +751,7 @@ export class LauncherRuntime {
       watchPty().finally(() => {
         mux.removeSession(sessionId);
         batchSender.destroy();
+        this.#releaseRoomTransport(entry.dmRoomId);
         if (mux.sessionCount === 0) this.#roomMuxes.delete(entry.dmRoomId);
 
         if (pty.persistent) {
@@ -870,6 +872,7 @@ export class LauncherRuntime {
    * Set up transport for a terminal session.
    * Returns P2PTransport (with Matrix fallback) when P2P is enabled,
    * or a thin Matrix client wrapper when P2P is disabled.
+   * One P2PTransport is shared across all sessions in a room.
    */
   async #setupSessionTransport(dmRoomId, remotePeer, batchMs) {
     // When P2P is disabled, return raw Matrix client interface
@@ -881,13 +884,18 @@ export class LauncherRuntime {
       };
     }
 
-    const idleTimeoutMs = (this.#config.p2pIdleTimeoutS || 300) * 1000;
+    // Check for existing room transport
+    const existing = this.#roomTransports.get(dmRoomId);
+    if (existing) {
+      existing.refCount++;
+      return existing.transport;
+    }
 
-    // Generate session key for P2P encryption (sent via E2EE Matrix signaling)
+    // Create new room-scoped transport
+    const idleTimeoutMs = (this.#config.p2pIdleTimeoutS || 300) * 1000;
     const sessionKey = await generateSessionKey();
     const p2pCrypto = await createP2PCrypto(sessionKey);
 
-    // Create P2PTransport with Matrix fallback
     const transport = P2PTransport.create({
       matrixClient: {
         sendEvent: (roomId, type, content) => this.#client.sendEvent(roomId, type, content),
@@ -901,39 +909,53 @@ export class LauncherRuntime {
         this.#log.info('P2P transport status changed', { status, room_id: dmRoomId });
       },
       onReconnectNeeded: () => {
-        // Only attempt P2P reconnect if no recent attempt for this room
-        if (!this.#p2pCooldowns.has(dmRoomId)) {
-          this.#p2pCooldowns.set(dmRoomId, true);
-          setTimeout(() => this.#p2pCooldowns.delete(dmRoomId), 60000);
-          this.#attemptP2PConnection(transport, dmRoomId, remotePeer).catch((err) => {
-            this.#log.warn('P2P reconnect failed', { error: err.message, room_id: dmRoomId });
-          });
-        }
+        this.#attemptP2PConnection(dmRoomId).catch((err) => {
+          this.#log.warn('P2P reconnect failed', { error: err.message, room_id: dmRoomId });
+        });
       },
       onHangup: (reason) => {
         this.#log.info('P2P hangup', { reason, room_id: dmRoomId });
       },
     });
 
-    // Only attempt P2P once per room (not per session)
-    if (!this.#p2pCooldowns.has(dmRoomId)) {
-      this.#p2pCooldowns.set(dmRoomId, true);
-      setTimeout(() => this.#p2pCooldowns.delete(dmRoomId), 60000);
-      this.#attemptP2PConnection(transport, dmRoomId, remotePeer).catch((err) => {
-        this.#log.warn('Initial P2P connection failed, continuing on Matrix', {
-          error: err.message, room_id: dmRoomId,
-        });
+    this.#roomTransports.set(dmRoomId, { transport, p2pCrypto, refCount: 1, lastP2PAttempt: 0 });
+
+    // Attempt P2P (non-blocking, rate-limited)
+    this.#attemptP2PConnection(dmRoomId).catch((err) => {
+      this.#log.warn('Initial P2P connection failed, continuing on Matrix', {
+        error: err.message, room_id: dmRoomId,
       });
-    }
+    });
 
     return transport;
   }
 
+  #releaseRoomTransport(roomId) {
+    const entry = this.#roomTransports.get(roomId);
+    if (!entry) return;
+    entry.refCount--;
+    if (entry.refCount <= 0) {
+      entry.transport.close();
+      this.#roomTransports.delete(roomId);
+    }
+  }
+
   /**
-   * Attempt to establish a P2P WebRTC connection for a session.
+   * Attempt to establish a P2P WebRTC connection for a room.
    * Non-blocking — the terminal session works on Matrix while this runs.
+   * Rate-limited to one attempt per 60 seconds per room.
    */
-  async #attemptP2PConnection(transport, dmRoomId, remotePeer) {
+  async #attemptP2PConnection(dmRoomId) {
+    const entry = this.#roomTransports.get(dmRoomId);
+    if (!entry) return;
+
+    // Rate limit: 60s cooldown per room
+    const now = Date.now();
+    if (now - entry.lastP2PAttempt < 60_000) return;
+    entry.lastP2PAttempt = now;
+
+    const { transport } = entry;
+
     // Fetch TURN credentials from homeserver
     const session = JSON.parse(this.#client.exportSession());
     const server = session.homeserver_url;
