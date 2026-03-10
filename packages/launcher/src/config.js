@@ -35,7 +35,7 @@ export class LauncherConfig {
     this.p2pBatchMs = p2pBatchMs;
     this.p2pIdleTimeoutS = p2pIdleTimeoutS;
     this.p2pAdvertiseIps = p2pAdvertiseIps;
-    this.telemetryIntervalS = telemetryIntervalS;
+    this.telemetryIntervalS = Math.max(10, telemetryIntervalS);
   }
 
   static fromArgs(args) {

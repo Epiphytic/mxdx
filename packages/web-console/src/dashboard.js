@@ -7,7 +7,7 @@ function computeAvailability(telemetry) {
   if (!telemetry || !telemetry.timestamp || !telemetry.heartbeat_interval_ms) {
     return { status: 'unavailable', label: 'Unavailable' };
   }
-  const age = Date.now() - new Date(telemetry.timestamp).getTime();
+  const age = Math.max(0, Date.now() - new Date(telemetry.timestamp).getTime());
   const interval = telemetry.heartbeat_interval_ms;
   const ratio = age / interval;
 

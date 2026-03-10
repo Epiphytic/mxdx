@@ -380,6 +380,12 @@ export class LauncherRuntime {
       }
     }
 
+    // Close all room transports
+    for (const [, entry] of this.#roomTransports) {
+      entry.transport.close();
+    }
+    this.#roomTransports.clear();
+
     // Save session metadata for recovery on next start
     this.#saveSessionsFile();
   }
@@ -660,6 +666,7 @@ export class LauncherRuntime {
 
       return;
     } catch (err) {
+      this.#releaseRoomTransport(dmRoomId);
       this.#log.error('Interactive session failed', { request_id: requestId, error: err.message || String(err), stack: err.stack });
       await this.#sendSessionResponse(requestId, 'error', null);
       this.#activeSessions--;

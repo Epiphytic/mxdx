@@ -464,6 +464,7 @@ export async function setupTerminalView(client, launcher, { onClose, onSessionSt
     };
 
   } catch (err) {
+    if (typeof dmRoomId !== 'undefined') releaseRoomTransport(dmRoomId);
     term.writeln(`\r\nError: ${err}`);
   }
 }
@@ -600,6 +601,7 @@ export async function reconnectTerminalView(client, launcher, session, { onClose
     };
 
   } catch (err) {
+    if (typeof dmRoomId !== 'undefined') releaseRoomTransport(dmRoomId);
     term.writeln(`\r\nError: ${err}`);
   }
 }
