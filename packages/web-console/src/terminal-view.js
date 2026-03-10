@@ -9,6 +9,7 @@ import { fetchTurnCredentials, turnToIceServers } from '../../core/turn-credenti
 
 let activeSocket = null;
 let activeTerminal = null;
+const p2pCooldowns = new Map(); // dmRoomId -> timestamp (rate-limits P2P attempts)
 
 function base64Decode(str) {
   const binary = atob(str);
@@ -150,6 +151,9 @@ async function setupBrowserP2P(client, dmRoomId, batchSender) {
       }
     },
     onReconnectNeeded: () => {
+      const lastAttempt = p2pCooldowns.get(dmRoomId) || 0;
+      if (Date.now() - lastAttempt < 60000) return; // max 1 attempt per 60s per room
+      p2pCooldowns.set(dmRoomId, Date.now());
       attemptBrowserP2P(client, transport, dmRoomId, sessionKey).catch(() => {
         updateP2PStatus('matrix');
       });
@@ -161,10 +165,16 @@ async function setupBrowserP2P(client, dmRoomId, batchSender) {
     },
   });
 
-  // Attempt P2P in background — terminal works on Matrix immediately
-  attemptBrowserP2P(client, transport, dmRoomId, sessionKey).catch(() => {
+  // Attempt P2P once per room (not per session), max 1 per 60s
+  const lastAttempt = p2pCooldowns.get(dmRoomId) || 0;
+  if (Date.now() - lastAttempt >= 60000) {
+    p2pCooldowns.set(dmRoomId, Date.now());
+    attemptBrowserP2P(client, transport, dmRoomId, sessionKey).catch(() => {
+      updateP2PStatus('matrix');
+    });
+  } else {
     updateP2PStatus('matrix');
-  });
+  }
 
   return transport;
 }
@@ -221,7 +231,16 @@ async function attemptBrowserP2P(client, transport, dmRoomId, sessionKey) {
   });
 
   const offer = await channel.createOffer();
-  await signaling.sendInvite({ callId, partyId, sdp: offer.sdp, lifetime: 30000 });
+  try {
+    await signaling.sendInvite({ callId, partyId, sdp: offer.sdp, lifetime: 30000 });
+  } catch (err) {
+    channel.close();
+    if (String(err).includes('429') || String(err).includes('M_LIMIT_EXCEEDED')) {
+      updateP2PStatus('rate-limited', 'Matrix (rate-limited)');
+      throw new Error('P2P signaling rate-limited');
+    }
+    throw err;
+  }
 
   // Wait for answer
   const answerJson = await client.onRoomEvent(dmRoomId, 'm.call.answer', 30);

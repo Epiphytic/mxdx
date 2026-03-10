@@ -154,6 +154,7 @@ export class LauncherRuntime {
   #sessionRegistry = new Map(); // sessionId -> { tmuxName, dmRoomId, sender, persistent, pty, createdAt }
   #userDmRooms = new Map(); // userId -> dmRoomId
   #roomMuxes = new Map(); // dmRoomId -> SessionMux
+  #p2pCooldowns = new Map(); // dmRoomId -> true (rate-limits P2P attempts to 1 per 60s per room)
 
   constructor(config) {
     this.#config = config;
@@ -851,7 +852,6 @@ export class LauncherRuntime {
     }
 
     const idleTimeoutMs = (this.#config.p2pIdleTimeoutS || 300) * 1000;
-    const p2pBatchMs = this.#config.p2pBatchMs || 10;
 
     // Generate session key for P2P encryption (sent via E2EE Matrix signaling)
     const sessionKey = await generateSessionKey();
@@ -871,22 +871,30 @@ export class LauncherRuntime {
         this.#log.info('P2P transport status changed', { status, room_id: dmRoomId });
       },
       onReconnectNeeded: () => {
-        // Attempt to re-establish P2P in background
-        this.#attemptP2PConnection(transport, dmRoomId, remotePeer).catch((err) => {
-          this.#log.warn('P2P reconnect failed', { error: err.message, room_id: dmRoomId });
-        });
+        // Only attempt P2P reconnect if no recent attempt for this room
+        if (!this.#p2pCooldowns.has(dmRoomId)) {
+          this.#p2pCooldowns.set(dmRoomId, true);
+          setTimeout(() => this.#p2pCooldowns.delete(dmRoomId), 60000);
+          this.#attemptP2PConnection(transport, dmRoomId, remotePeer).catch((err) => {
+            this.#log.warn('P2P reconnect failed', { error: err.message, room_id: dmRoomId });
+          });
+        }
       },
       onHangup: (reason) => {
         this.#log.info('P2P hangup', { reason, room_id: dmRoomId });
       },
     });
 
-    // Attempt P2P connection in background — session works on Matrix immediately
-    this.#attemptP2PConnection(transport, dmRoomId, remotePeer).catch((err) => {
-      this.#log.warn('Initial P2P connection failed, continuing on Matrix', {
-        error: err.message, room_id: dmRoomId,
+    // Only attempt P2P once per room (not per session)
+    if (!this.#p2pCooldowns.has(dmRoomId)) {
+      this.#p2pCooldowns.set(dmRoomId, true);
+      setTimeout(() => this.#p2pCooldowns.delete(dmRoomId), 60000);
+      this.#attemptP2PConnection(transport, dmRoomId, remotePeer).catch((err) => {
+        this.#log.warn('Initial P2P connection failed, continuing on Matrix', {
+          error: err.message, room_id: dmRoomId,
+        });
       });
-    });
+    }
 
     return transport;
   }
