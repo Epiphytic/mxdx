@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { BatchedSender } from '../../core/batched-sender.js';
 
 const TerminalDataEvent = z.object({
   data: z.string(),
@@ -6,16 +7,7 @@ const TerminalDataEvent = z.object({
   seq: z.number().int().nonnegative(),
 });
 
-const COMPRESSION_THRESHOLD = 32;
 const MAX_DECOMPRESSED_SIZE = 1024 * 1024; // 1MB zlib bomb protection
-
-function base64Encode(data) {
-  let binary = '';
-  for (let i = 0; i < data.length; i++) {
-    binary += String.fromCharCode(data[i]);
-  }
-  return btoa(binary);
-}
 
 function base64Decode(str) {
   const binary = atob(str);
@@ -24,29 +16,6 @@ function base64Decode(str) {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
-}
-
-async function compress(data) {
-  const cs = new CompressionStream('deflate');
-  const writer = cs.writable.getWriter();
-  const reader = cs.readable.getReader();
-  writer.write(data);
-  writer.close();
-  const chunks = [];
-  let totalLength = 0;
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    totalLength += value.length;
-  }
-  const result = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return result;
 }
 
 async function decompress(data) {
@@ -75,8 +44,6 @@ async function decompress(data) {
   return result;
 }
 
-const textEncoder = new TextEncoder();
-
 /**
  * Browser-compatible TerminalSocket over Matrix events.
  */
@@ -86,10 +53,10 @@ export class TerminalSocket {
   onmessage = null;
   onclose = null;
   onerror = null;
+  onbuffering = null;
 
   #client;
   #roomId;
-  #sendSeq = 0;
   #expectedSeq = 0;
   #buffer = [];
   #closed = false;
@@ -97,11 +64,25 @@ export class TerminalSocket {
   #pollInterval;
   #gapTimer = null;
   #retransmitTimer = null;
+  #sender = null;
 
-  constructor(client, roomId, { pollIntervalMs = 200 } = {}) {
+  constructor(client, roomId, { pollIntervalMs = 200, batchMs = 200 } = {}) {
     this.#client = client;
     this.#roomId = roomId;
     this.#pollInterval = pollIntervalMs;
+
+    this.#sender = new BatchedSender({
+      sendEvent: (rid, type, content) => client.sendEvent(rid, type, content),
+      roomId,
+      batchMs,
+      onError: (err) => {
+        if (this.onerror) this.onerror(err);
+      },
+      onBuffering: (buffering) => {
+        if (this.onbuffering) this.onbuffering(buffering);
+      },
+    });
+
     this.#startPolling();
   }
 
@@ -202,21 +183,7 @@ export class TerminalSocket {
 
   async send(data) {
     if (this.#closed) throw new Error('TerminalSocket is closed');
-    const bytes = typeof data === 'string' ? textEncoder.encode(data) : new Uint8Array(data);
-    let encoded, encoding;
-    if (bytes.length >= COMPRESSION_THRESHOLD) {
-      const compressed = await compress(bytes);
-      encoded = base64Encode(compressed);
-      encoding = 'zlib+base64';
-    } else {
-      encoded = base64Encode(bytes);
-      encoding = 'base64';
-    }
-    const seq = this.#sendSeq++;
-    await this.#client.sendEvent(
-      this.#roomId, 'org.mxdx.terminal.data',
-      JSON.stringify({ data: encoded, encoding, seq }),
-    );
+    this.#sender.push(data);
   }
 
   async resize(cols, rows) {
@@ -230,6 +197,7 @@ export class TerminalSocket {
   close() {
     if (this.#closed) return;
     this.#closed = true;
+    if (this.#sender) this.#sender.destroy();
     if (this.#pollTimer) { clearTimeout(this.#pollTimer); this.#pollTimer = null; }
     this.#clearGapTimers();
     if (this.onclose) this.onclose({ code: 1000, reason: 'Normal closure' });

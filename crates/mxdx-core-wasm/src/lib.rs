@@ -146,8 +146,9 @@ impl WasmMatrixClient {
     }
 
     /// Login to a Matrix server.
-    /// If a stale crypto store exists from a previous session (different device),
-    /// it is automatically cleared and the login is retried.
+    /// Always clears any existing IndexedDB crypto store first — a fresh login
+    /// creates a new device, so any prior crypto state is stale by definition.
+    /// Session restore (restoreSession) is the path that preserves crypto state.
     #[wasm_bindgen(js_name = "login")]
     pub async fn login(
         server_name: &str,
@@ -156,61 +157,26 @@ impl WasmMatrixClient {
     ) -> Result<WasmMatrixClient, JsValue> {
         let store_name = format!("mxdx_{}_{}", username, server_name.replace([':', '/', '.'], "_"));
 
-        let build_client = |sn: &str| {
-            let builder = Client::builder()
-                .indexeddb_store(&store_name, None);
-            if sn.contains("://") {
-                builder.homeserver_url(sn)
-            } else {
-                builder.server_name_or_homeserver_url(sn)
-            }
+        // Fresh login = new device. Any existing crypto store is stale
+        // (previous device may have been deleted, keys are invalid).
+        // Clear it unconditionally to prevent sync hangs.
+        delete_indexeddb_store(&store_name).await;
+
+        let builder = Client::builder()
+            .indexeddb_store(&store_name, None);
+        let builder = if server_name.contains("://") {
+            builder.homeserver_url(server_name)
+        } else {
+            builder.server_name_or_homeserver_url(server_name)
         };
 
-        // First attempt — may fail if IndexedDB has a stale crypto store
-        let client = match build_client(server_name).build().await {
-            Ok(c) => c,
-            Err(e) => {
-                let err_str = e.to_string();
-                if err_str.contains("doesn't match the account in the constructor") {
-                    // Stale crypto store from a previous device — delete and retry
-                    delete_indexeddb_store(&store_name).await;
-                    build_client(server_name).build().await.map_err(to_js_err)?
-                } else {
-                    return Err(to_js_err(e));
-                }
-            }
-        };
+        let client = builder.build().await.map_err(to_js_err)?;
 
-        // Login may also fail with store mismatch after build succeeds
-        // (the check happens during login when crypto state is loaded)
-        match client.matrix_auth()
+        client.matrix_auth()
             .login_username(username, password)
             .initial_device_display_name("mxdx")
             .await
-        {
-            Ok(_) => {},
-            Err(e) => {
-                let err_str = e.to_string();
-                if err_str.contains("doesn't match the account in the constructor") {
-                    // Stale crypto store — delete, rebuild client, and retry login
-                    delete_indexeddb_store(&store_name).await;
-                    let client2 = build_client(server_name).build().await.map_err(to_js_err)?;
-                    client2.matrix_auth()
-                        .login_username(username, password)
-                        .initial_device_display_name("mxdx")
-                        .await
-                        .map_err(to_js_err)?;
-
-                    client2
-                        .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
-                        .await
-                        .map_err(to_js_err)?;
-
-                    return Ok(WasmMatrixClient { client: client2, store_name });
-                }
-                return Err(to_js_err(e));
-            }
-        }
+            .map_err(to_js_err)?;
 
         client
             .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))

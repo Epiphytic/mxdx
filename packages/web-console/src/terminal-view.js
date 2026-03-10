@@ -88,6 +88,7 @@ export async function setupTerminalView(client, launcher, { onClose, onSessionSt
     const requestId = crypto.randomUUID();
     const cols = term.cols;
     const rows = term.rows;
+    const batchMs = parseInt(localStorage.getItem('mxdx-batch-ms') || '200', 10);
 
     try {
       await client.sendEvent(
@@ -98,6 +99,7 @@ export async function setupTerminalView(client, launcher, { onClose, onSessionSt
           request_id: requestId,
           cols,
           rows,
+          batch_ms: batchMs,
         }),
       );
     } catch (sendErr) {
@@ -149,9 +151,19 @@ export async function setupTerminalView(client, launcher, { onClose, onSessionSt
     term.writeln('Connected.\r\n');
     term.clear();
 
-    // Create TerminalSocket on DM room
-    const socket = new TerminalSocket(client, dmRoomId, { pollIntervalMs: 100 });
+    // Create TerminalSocket on DM room (use negotiated batch window)
+    const negotiatedBatchMs = sessionContent.batch_ms || 200;
+    const socket = new TerminalSocket(client, dmRoomId, { pollIntervalMs: 100, batchMs: negotiatedBatchMs });
     activeSocket = socket;
+
+    // Wire: buffering status indicator
+    const statusEl = document.getElementById('terminal-status');
+    socket.onbuffering = (buffering) => {
+      if (statusEl) {
+        statusEl.textContent = buffering ? 'Buffering...' : '';
+        statusEl.hidden = !buffering;
+      }
+    };
 
     // Wire: terminal input -> socket
     term.onData(async (data) => {
@@ -282,9 +294,19 @@ export async function reconnectTerminalView(client, launcher, session, { onClose
       term.writeln(`\r\n(History replay failed: ${err})`);
     }
 
-    // Go live
-    const socket = new TerminalSocket(client, dmRoomId, { pollIntervalMs: 100 });
+    // Go live (use negotiated batch window from reconnect response)
+    const negotiatedBatchMs = sessionContent.batch_ms || 200;
+    const socket = new TerminalSocket(client, dmRoomId, { pollIntervalMs: 100, batchMs: negotiatedBatchMs });
     activeSocket = socket;
+
+    // Wire: buffering status indicator
+    const statusEl = document.getElementById('terminal-status');
+    socket.onbuffering = (buffering) => {
+      if (statusEl) {
+        statusEl.textContent = buffering ? 'Buffering...' : '';
+        statusEl.hidden = !buffering;
+      }
+    };
 
     term.onData(async (data) => {
       try { await socket.send(data); } catch { /* closed */ }

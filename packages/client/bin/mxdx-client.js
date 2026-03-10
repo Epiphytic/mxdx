@@ -14,7 +14,8 @@ program
   .option('--password <pass>', 'Password (first run only — stored in keyring)')
   .option('--registration-token <tok>', 'Registration token')
   .option('--format <text|json>', 'Output format', 'text')
-  .option('--config <path>', 'Config file path');
+  .option('--config <path>', 'Config file path')
+  .option('--batch-ms <ms>', 'Terminal output batch window in ms', '200');
 
 program
   .command('exec <launcher> [cmd...]')
@@ -69,6 +70,7 @@ program
         command: command || '/bin/bash',
         cols: opts.cols ? parseInt(opts.cols, 10) : undefined,
         rows: opts.rows ? parseInt(opts.rows, 10) : undefined,
+        batchMs: parseInt(parentOpts.batchMs, 10),
         log,
       });
     } catch (err) {

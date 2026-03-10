@@ -1,18 +1,7 @@
 import { TerminalDataEvent } from './terminal-types.js';
+import { BatchedSender } from './batched-sender.js';
 
-const COMPRESSION_THRESHOLD = 32;
 const MAX_DECOMPRESSED_SIZE = 1024 * 1024; // 1MB zlib bomb protection
-
-function base64Encode(data) {
-  if (typeof Buffer !== 'undefined') {
-    return Buffer.from(data).toString('base64');
-  }
-  let binary = '';
-  for (let i = 0; i < data.length; i++) {
-    binary += String.fromCharCode(data[i]);
-  }
-  return btoa(binary);
-}
 
 function base64Decode(str) {
   if (typeof Buffer !== 'undefined') {
@@ -26,33 +15,6 @@ function base64Decode(str) {
   return bytes;
 }
 
-async function compress(data) {
-  if (typeof globalThis.CompressionStream !== 'undefined') {
-    const cs = new CompressionStream('deflate');
-    const writer = cs.writable.getWriter();
-    const reader = cs.readable.getReader();
-    writer.write(data);
-    writer.close();
-    const chunks = [];
-    let totalLength = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      totalLength += value.length;
-    }
-    const result = new Uint8Array(totalLength);
-    let offset = 0;
-    for (const chunk of chunks) {
-      result.set(chunk, offset);
-      offset += chunk.length;
-    }
-    return result;
-  }
-  const { deflateSync } = await import('node:zlib');
-  return new Uint8Array(deflateSync(Buffer.from(data)));
-}
-
 async function decompress(data) {
   // Use node:zlib with bounded decompression for safety
   const { inflateSync } = await import('node:zlib');
@@ -60,14 +22,12 @@ async function decompress(data) {
   return new Uint8Array(result);
 }
 
-const textEncoder = new TextEncoder();
-
 /**
  * TerminalSocket — WebSocket-like interface over Matrix events.
  *
  * Wraps a WasmMatrixClient to send/receive terminal data in a DM room.
- * Uses compression for payloads >= 32 bytes, sequence numbers for ordering,
- * and gap detection with retransmit requests.
+ * Uses BatchedSender for rate-limit-aware sending with coalescing,
+ * sequence numbers for ordering, and gap detection with retransmit requests.
  */
 export class TerminalSocket {
   binaryType = 'arraybuffer';
@@ -78,7 +38,6 @@ export class TerminalSocket {
 
   #client;
   #roomId;
-  #sendSeq = 0;
   #expectedSeq = 0;
   #buffer = [];
   #closed = false;
@@ -86,17 +45,30 @@ export class TerminalSocket {
   #pollInterval;
   #gapTimer = null;
   #retransmitTimer = null;
+  #sender = null;
 
   /**
    * @param {object} client - WasmMatrixClient instance with sendEvent/onRoomEvent
    * @param {string} roomId - Matrix room ID for terminal I/O
    * @param {object} [options]
    * @param {number} [options.pollIntervalMs=200] - Poll interval for incoming events
+   * @param {number} [options.batchMs=200] - Send batch window in ms
+   * @param {function} [options.onBuffering] - Called with true/false when rate-limit buffering starts/stops
    */
-  constructor(client, roomId, { pollIntervalMs = 200 } = {}) {
+  constructor(client, roomId, { pollIntervalMs = 200, batchMs = 200, onBuffering = null } = {}) {
     this.#client = client;
     this.#roomId = roomId;
     this.#pollInterval = pollIntervalMs;
+
+    this.#sender = new BatchedSender({
+      sendEvent: (rid, type, content) => client.sendEvent(rid, type, content),
+      roomId,
+      batchMs,
+      onError: (err) => {
+        if (this.onerror) this.onerror(err);
+      },
+    });
+
     this.#startPolling();
   }
 
@@ -221,31 +193,7 @@ export class TerminalSocket {
 
   async send(data) {
     if (this.#closed) throw new Error('TerminalSocket is closed');
-
-    const bytes = typeof data === 'string'
-      ? textEncoder.encode(data)
-      : new Uint8Array(data);
-
-    let encoded;
-    let encoding;
-
-    if (bytes.length >= COMPRESSION_THRESHOLD) {
-      const compressed = await compress(bytes);
-      encoded = base64Encode(compressed);
-      encoding = 'zlib+base64';
-    } else {
-      encoded = base64Encode(bytes);
-      encoding = 'base64';
-    }
-
-    const seq = this.#sendSeq++;
-    const content = { data: encoded, encoding, seq };
-
-    await this.#client.sendEvent(
-      this.#roomId,
-      'org.mxdx.terminal.data',
-      JSON.stringify(content),
-    );
+    this.#sender.push(data);
   }
 
   async resize(cols, rows) {
@@ -261,6 +209,8 @@ export class TerminalSocket {
   close() {
     if (this.#closed) return;
     this.#closed = true;
+
+    if (this.#sender) this.#sender.destroy();
 
     if (this.#pollTimer) {
       clearTimeout(this.#pollTimer);

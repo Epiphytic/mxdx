@@ -4,11 +4,12 @@ import path from 'node:path';
 import * as TOML from 'smol-toml';
 
 export class ClientConfig {
-  constructor({ username, server, password, registrationToken } = {}) {
+  constructor({ username, server, password, registrationToken, batchMs = 200 } = {}) {
     this.username = username || os.hostname();
     this.server = server;
     this.password = password;
     this.registrationToken = registrationToken;
+    this.batchMs = batchMs;
   }
 
   static fromArgs(args) {
@@ -17,6 +18,7 @@ export class ClientConfig {
       server: args.server,
       password: args.password,
       registrationToken: args.registrationToken,
+      batchMs: args.batchMs ? parseInt(args.batchMs, 10) : 200,
     });
   }
 
@@ -27,6 +29,7 @@ export class ClientConfig {
       client: {
         username: this.username,
         server: this.server,
+        batch_ms: this.batchMs,
       },
     });
     fs.writeFileSync(filePath, toml, { mode: 0o600 });
@@ -40,6 +43,7 @@ export class ClientConfig {
     return new ClientConfig({
       username: c.username,
       server: c.server,
+      batchMs: c.batch_ms || 200,
     });
   }
 

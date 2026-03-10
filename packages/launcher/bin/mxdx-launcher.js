@@ -19,7 +19,8 @@ program
   .option('--max-sessions <n>', 'Max concurrent sessions', '5')
   .option('--password <pass>', 'Password (first run only — stored in keyring)')
   .option('--log-format <json|text>', 'Log output format', 'json')
-  .option('--use-tmux <mode>', 'tmux mode: auto|always|never', 'auto');
+  .option('--use-tmux <mode>', 'tmux mode: auto|always|never', 'auto')
+  .option('--batch-ms <ms>', 'Terminal output batch window in ms', '200');
 
 async function resolveConfig(opts) {
   const configPath = opts.config || LauncherConfig.defaultPath();
@@ -50,6 +51,10 @@ async function resolveConfig(opts) {
 
   if (opts.useTmux) {
     config.useTmux = opts.useTmux;
+  }
+
+  if (opts.batchMs) {
+    config.batchMs = parseInt(opts.batchMs, 10);
   }
 
   return config;

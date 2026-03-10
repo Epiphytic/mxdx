@@ -273,6 +273,15 @@ body {
   font-size: 0.875rem;
 }
 
+#terminal-status {
+  color: #f0ad4e;
+  font-size: 0.75rem;
+  margin-left: auto;
+  padding: 0.125rem 0.5rem;
+  border-radius: 3px;
+  background: rgba(240, 173, 78, 0.15);
+}
+
 #terminal-container {
   flex: 1;
   padding: 0.5rem;

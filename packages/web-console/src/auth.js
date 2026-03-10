@@ -1,4 +1,4 @@
-import { loadSession } from './session-store.js';
+import { loadSession, clearSession } from './session-store.js';
 
 /**
  * Set up the login form handlers.
@@ -64,6 +64,7 @@ export function setupAuth({ onLogin, getWasmClient }) {
           showStatus(`Session restored (device: ${parsed.device_id})`);
         } catch (restoreErr) {
           console.warn('[auth] Session restore failed, falling back to fresh login:', restoreErr);
+          await clearSession();
           showStatus('Saved session expired, logging in fresh...');
           client = null;
         }

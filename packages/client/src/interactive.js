@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
  * @param {string} [options.command='/bin/bash'] - Shell command
  * @param {number} [options.cols] - Terminal columns (default: terminal width)
  * @param {number} [options.rows] - Terminal rows (default: terminal height)
+ * @param {number} [options.batchMs=200] - Preferred batch window in ms
  * @param {function} [options.log] - Logger function
  */
 export async function startInteractiveSession(client, topology, options = {}) {
@@ -20,6 +21,7 @@ export async function startInteractiveSession(client, topology, options = {}) {
     command = '/bin/bash',
     cols = process.stdout.columns || 80,
     rows = process.stdout.rows || 24,
+    batchMs = 200,
     log = () => {},
   } = options;
 
@@ -36,6 +38,7 @@ export async function startInteractiveSession(client, topology, options = {}) {
       request_id: requestId,
       cols,
       rows,
+      batch_ms: batchMs,
     }),
   );
 

@@ -1,5 +1,5 @@
 import crypto from 'node:crypto';
-import { connectWithSession, TerminalDataEvent, saveIndexedDB } from '@mxdx/core';
+import { connectWithSession, TerminalDataEvent, saveIndexedDB, BatchedSender } from '@mxdx/core';
 import { executeCommand } from './process-bridge.js';
 import { PtyBridge } from './pty-bridge.js';
 import { inflateSync } from 'node:zlib';
@@ -278,6 +278,14 @@ export class LauncherRuntime {
     const cwd = content.cwd || '/tmp';
     const env = content.env || {};
 
+    // Negotiate batch window: use the longest of client and launcher preferences
+    const clientBatchMs = content.batch_ms || 200;
+    const launcherBatchMs = this.#config.batchMs || 200;
+    const negotiatedBatchMs = Math.max(clientBatchMs, launcherBatchMs);
+    this.#log.info('Batch window negotiated', {
+      client: clientBatchMs, launcher: launcherBatchMs, negotiated: negotiatedBatchMs,
+    });
+
     // Validate explicit command against allowlist; default shell is always permitted
     if (content.command && !this.#isCommandAllowed(command)) {
       this.#log.warn(`Interactive command rejected: ${command}`, { request_id: requestId });
@@ -332,10 +340,11 @@ export class LauncherRuntime {
         createdAt: new Date().toISOString(),
       });
 
-      // Respond with DM room ID
+      // Respond with DM room ID and negotiated batch window
       await this.#sendSessionResponse(requestId, 'started', dmRoomId, {
         session_id: sessionId,
         persistent: pty.persistent,
+        batch_ms: negotiatedBatchMs,
       });
 
       // Wait for the client to join the DM
@@ -345,33 +354,14 @@ export class LauncherRuntime {
       // Wait for PTY to initialize
       await new Promise((r) => setTimeout(r, 500));
 
-      // Forward PTY output -> DM room as terminal.data events
-      let sendSeq = 0;
-      pty.onData(async (data) => {
-        const seq = sendSeq++;
-        let encoded;
-        let encoding;
-
-        if (data.length >= 32) {
-          const { deflateSync } = await import('node:zlib');
-          const compressed = deflateSync(Buffer.from(data));
-          encoded = Buffer.from(compressed).toString('base64');
-          encoding = 'zlib+base64';
-        } else {
-          encoded = Buffer.from(data).toString('base64');
-          encoding = 'base64';
-        }
-
-        try {
-          await this.#client.sendEvent(
-            dmRoomId,
-            'org.mxdx.terminal.data',
-            JSON.stringify({ data: encoded, encoding, seq }),
-          );
-        } catch (err) {
-          this.#log.warn('terminal.data send failed', { seq, error: String(err) });
-        }
+      // Forward PTY output -> DM room as batched terminal.data events
+      const batchSender = new BatchedSender({
+        sendEvent: (roomId, type, content) => this.#client.sendEvent(roomId, type, content),
+        roomId: dmRoomId,
+        batchMs: negotiatedBatchMs,
+        onError: (err, seq) => this.#log.warn('terminal.data send failed', { seq, error: String(err) }),
       });
+      pty.onData((data) => batchSender.push(data));
 
       // Poll for incoming terminal data and resize events from the client
       const pollForInput = async () => {
@@ -492,30 +482,14 @@ export class LauncherRuntime {
       await new Promise((r) => setTimeout(r, 2000));
       await this.#client.syncOnce();
 
-      // Forward PTY output -> DM room
-      let sendSeq = 0;
-      pty.onData(async (data) => {
-        const seq = sendSeq++;
-        let encoded, encoding;
-        if (data.length >= 32) {
-          const { deflateSync } = await import('node:zlib');
-          const compressed = deflateSync(Buffer.from(data));
-          encoded = Buffer.from(compressed).toString('base64');
-          encoding = 'zlib+base64';
-        } else {
-          encoded = Buffer.from(data).toString('base64');
-          encoding = 'base64';
-        }
-        try {
-          await this.#client.sendEvent(
-            entry.dmRoomId,
-            'org.mxdx.terminal.data',
-            JSON.stringify({ data: encoded, encoding, seq }),
-          );
-        } catch (err) {
-          this.#log.warn('terminal.data send failed', { seq, error: String(err) });
-        }
+      // Forward PTY output -> DM room as batched terminal.data events
+      const reconnectSender = new BatchedSender({
+        sendEvent: (roomId, type, content) => this.#client.sendEvent(roomId, type, content),
+        roomId: entry.dmRoomId,
+        batchMs: this.#config.batchMs || 200,
+        onError: (err, seq) => this.#log.warn('terminal.data send failed', { seq, error: String(err) }),
       });
+      pty.onData((data) => reconnectSender.push(data));
 
       // Poll for input from client
       const pollForInput = async () => {
