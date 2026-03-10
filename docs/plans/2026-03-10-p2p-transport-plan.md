@@ -4,9 +4,9 @@
 
 **Goal:** Add WebRTC P2P data channels between mxdx clients and launchers to bypass homeserver latency and rate limits for interactive terminal sessions, with transparent Matrix fallback.
 
-**Architecture:** P2PTransport adapter wraps both a WebRTC data channel and the existing Matrix client behind the same `sendEvent`/`onRoomEvent` interface. Signaling (SDP/ICE) flows through Matrix exec room events. Sessions start on Matrix immediately; P2P upgrades in parallel. Application-level acks ensure delivery; unacked data falls back to Matrix.
+**Architecture:** P2PTransport adapter wraps both a WebRTC data channel and the existing Matrix client behind the same `sendEvent`/`onRoomEvent` interface. Signaling uses standard Matrix call events (`m.call.invite/answer/candidates/hangup`). TURN credentials come from the homeserver's `/voip/turnServer` endpoint. Terminal data is Megolm-encrypted before placement on the data channel (preserving E2EE). Peer identity is verified via challenge-response after data channel opens. Sessions start on Matrix immediately; P2P upgrades in parallel. Idle channels are torn down after 5 minutes and reconnected on activity (with exponential backoff: 10s → 5 min). Application-level acks ensure delivery; unacked data falls back to Matrix.
 
-**Tech Stack:** Platform-native WebRTC (browser `RTCPeerConnection`, `node-datachannel` for Node.js), Matrix signaling events, existing WASM E2EE layer, `smol-toml` for config.
+**Tech Stack:** Platform-native WebRTC (browser `RTCPeerConnection`, `node-datachannel` for Node.js), standard Matrix call signaling, homeserver TURN provisioning, existing WASM E2EE layer, `smol-toml` for config.
 
 **Design doc:** `docs/plans/2026-03-10-p2p-transport-design.md`
 
@@ -115,6 +115,8 @@ git commit -m "feat: add dynamic batchMs setter to BatchedSender"
 
 ## Task 3: P2P config fields for launcher and client
 
+No `iceServers` config — TURN credentials come from the homeserver's `/voip/turnServer` endpoint.
+
 **Files:**
 - Modify: `packages/launcher/src/config.js`
 - Modify: `packages/client/src/config.js`
@@ -131,13 +133,15 @@ constructor({
   batchMs = 200,
   p2pEnabled = true,
   p2pBatchMs = 10,
-  iceServers = ['stun:stun.l.google.com:19302'],
+  p2pIdleTimeoutS = 300,
+  p2pAdvertiseIps = false,
 } = {}) {
   // ... existing assignments ...
   this.batchMs = batchMs;
   this.p2pEnabled = p2pEnabled;
   this.p2pBatchMs = p2pBatchMs;
-  this.iceServers = iceServers;
+  this.p2pIdleTimeoutS = p2pIdleTimeoutS;
+  this.p2pAdvertiseIps = p2pAdvertiseIps;
 }
 ```
 
@@ -146,7 +150,8 @@ In `fromArgs()`, add:
 ```javascript
 p2pEnabled: args.p2pEnabled !== undefined ? args.p2pEnabled !== 'false' : true,
 p2pBatchMs: args.p2pBatchMs ? parseInt(args.p2pBatchMs, 10) : 10,
-iceServers: args.iceServers ? args.iceServers.split(',') : ['stun:stun.l.google.com:19302'],
+p2pIdleTimeoutS: args.p2pIdleTimeoutS ? parseInt(args.p2pIdleTimeoutS, 10) : 300,
+p2pAdvertiseIps: args.p2pAdvertiseIps === 'true' || args.p2pAdvertiseIps === true,
 ```
 
 In `save()`, add to the TOML object inside `launcher`:
@@ -154,7 +159,8 @@ In `save()`, add to the TOML object inside `launcher`:
 ```javascript
 p2p_enabled: this.p2pEnabled,
 p2p_batch_ms: this.p2pBatchMs,
-ice_servers: this.iceServers,
+p2p_idle_timeout_s: this.p2pIdleTimeoutS,
+p2p_advertise_ips: this.p2pAdvertiseIps,
 ```
 
 In `load()`, add:
@@ -162,39 +168,13 @@ In `load()`, add:
 ```javascript
 p2pEnabled: l.p2p_enabled !== undefined ? l.p2p_enabled : true,
 p2pBatchMs: l.p2p_batch_ms || 10,
-iceServers: l.ice_servers || ['stun:stun.l.google.com:19302'],
+p2pIdleTimeoutS: l.p2p_idle_timeout_s || 300,
+p2pAdvertiseIps: l.p2p_advertise_ips === true,
 ```
 
 **Step 2: Add P2P fields to ClientConfig**
 
-In `packages/client/src/config.js`, same pattern:
-
-Constructor:
-```javascript
-constructor({ username, server, password, registrationToken, batchMs = 200, p2pEnabled = true, p2pBatchMs = 10 } = {}) {
-  // ... existing ...
-  this.p2pEnabled = p2pEnabled;
-  this.p2pBatchMs = p2pBatchMs;
-}
-```
-
-`fromArgs()`:
-```javascript
-p2pEnabled: args.p2pEnabled !== undefined ? args.p2pEnabled !== 'false' : true,
-p2pBatchMs: args.p2pBatchMs ? parseInt(args.p2pBatchMs, 10) : 10,
-```
-
-`save()` — add to `client` object:
-```javascript
-p2p_enabled: this.p2pEnabled,
-p2p_batch_ms: this.p2pBatchMs,
-```
-
-`load()`:
-```javascript
-p2pEnabled: c.p2p_enabled !== undefined ? c.p2p_enabled : true,
-p2pBatchMs: c.p2p_batch_ms || 10,
-```
+In `packages/client/src/config.js`, same pattern — add `p2pEnabled`, `p2pBatchMs`, `p2pIdleTimeoutS` to constructor, `fromArgs()`, `save()`, and `load()`. Client does not need `p2pAdvertiseIps` (launcher-only).
 
 **Step 3: Add CLI flags**
 
@@ -202,14 +182,13 @@ In `packages/launcher/bin/mxdx-launcher.js`, add to the `start` command options:
 ```javascript
 .option('--p2p-enabled <bool>', 'Enable P2P transport (default: true)')
 .option('--p2p-batch-ms <ms>', 'P2P batch window in ms (default: 10)')
-.option('--ice-servers <urls>', 'Comma-separated ICE server URLs')
+.option('--p2p-idle-timeout-s <seconds>', 'P2P idle timeout in seconds (default: 300)')
+.option('--p2p-advertise-ips <bool>', 'Include internal IPs in telemetry (default: false, use only with trusted homeservers)')
 ```
 
-In `packages/client/bin/mxdx-client.js`, add to global options:
-```javascript
-.option('--p2p-enabled <bool>', 'Enable P2P transport (default: true)')
-.option('--p2p-batch-ms <ms>', 'P2P batch window in ms (default: 10)')
-```
+In `packages/client/bin/mxdx-client.js`, add matching options (except `--p2p-advertise-ips`).
+
+Note: Reconnect backoff (10s → 5 min exponential) is hardcoded, not configurable — it's a safety mechanism, not a tuning knob.
 
 **Step 4: Verify config round-trips**
 
@@ -217,13 +196,13 @@ Run:
 ```bash
 node -e "
 const { LauncherConfig } = await import('./packages/launcher/src/config.js');
-const c = new LauncherConfig({ username: 'test', servers: ['https://matrix.org'], p2pEnabled: true, p2pBatchMs: 10, iceServers: ['stun:stun.l.google.com:19302'] });
+const c = new LauncherConfig({ username: 'test', servers: ['https://matrix.org'], p2pEnabled: true, p2pBatchMs: 10, p2pIdleTimeoutS: 300 });
 c.save('/tmp/test-launcher.toml');
 const loaded = LauncherConfig.load('/tmp/test-launcher.toml');
-console.log('p2pEnabled:', loaded.p2pEnabled, 'p2pBatchMs:', loaded.p2pBatchMs, 'iceServers:', loaded.iceServers);
+console.log('p2pEnabled:', loaded.p2pEnabled, 'p2pBatchMs:', loaded.p2pBatchMs, 'p2pIdleTimeoutS:', loaded.p2pIdleTimeoutS);
 "
 ```
-Expected: `p2pEnabled: true p2pBatchMs: 10 iceServers: [ 'stun:stun.l.google.com:19302' ]`
+Expected: `p2pEnabled: true p2pBatchMs: 10 p2pIdleTimeoutS: 300`
 
 **Step 5: Commit**
 
@@ -234,9 +213,161 @@ git commit -m "feat: add P2P config fields to launcher and client configs"
 
 ---
 
-## Task 4: WebRTC channel wrapper — Node.js
+## Task 4: TURN credential fetching
 
-A thin wrapper around `node-datachannel` that exposes a consistent interface for P2PTransport.
+Fetches TURN server credentials from the homeserver's `/voip/turnServer` endpoint.
+
+**Files:**
+- Create: `packages/core/turn-credentials.js`
+- Test: `packages/e2e-tests/test/turn-credentials.test.js`
+
+**Step 1: Write the failing test**
+
+Create `packages/e2e-tests/test/turn-credentials.test.js`:
+
+```javascript
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { fetchTurnCredentials, turnToIceServers } from '../../../packages/core/turn-credentials.js';
+
+describe('TURN credentials', () => {
+  it('parses homeserver TURN response into ICE servers', () => {
+    const turnResponse = {
+      username: '1443779631:@user:example.com',
+      password: 'JlKfBy1QwLrO20385QyAtEyIv0=',
+      uris: [
+        'turn:turn.example.com:3478?transport=udp',
+        'turn:turn.example.com:3478?transport=tcp',
+        'turns:turn.example.com:5349?transport=tcp',
+      ],
+      ttl: 86400,
+    };
+
+    const iceServers = turnToIceServers(turnResponse);
+    assert.equal(iceServers.length, 1);
+    assert.deepEqual(iceServers[0].urls, turnResponse.uris);
+    assert.equal(iceServers[0].username, turnResponse.username);
+    assert.equal(iceServers[0].credential, turnResponse.password);
+  });
+
+  it('returns empty array for null/empty response', () => {
+    assert.deepEqual(turnToIceServers(null), []);
+    assert.deepEqual(turnToIceServers({}), []);
+    assert.deepEqual(turnToIceServers({ uris: [] }), []);
+  });
+
+  it('fetchTurnCredentials calls correct endpoint', async () => {
+    let calledUrl = null;
+    const mockFetch = async (url, opts) => {
+      calledUrl = url;
+      return {
+        ok: true,
+        json: async () => ({
+          username: 'user',
+          password: 'pass',
+          uris: ['turn:turn.example.com:3478'],
+          ttl: 86400,
+        }),
+      };
+    };
+
+    const result = await fetchTurnCredentials('https://matrix.example.com', 'syt_token', mockFetch);
+    assert.ok(calledUrl.includes('/_matrix/client/v3/voip/turnServer'));
+    assert.equal(result.username, 'user');
+  });
+
+  it('returns null when homeserver has no TURN', async () => {
+    const mockFetch = async () => ({ ok: false, status: 404 });
+    const result = await fetchTurnCredentials('https://matrix.example.com', 'syt_token', mockFetch);
+    assert.equal(result, null);
+  });
+
+  it('rejects non-https URLs', async () => {
+    const mockFetch = async () => { throw new Error('should not be called'); };
+    const result = await fetchTurnCredentials('ftp://evil.com', 'syt_token', mockFetch);
+    assert.equal(result, null);
+  });
+
+  it('uses URL constructor for safe path building', async () => {
+    let calledUrl = null;
+    const mockFetch = async (url) => {
+      calledUrl = url;
+      return { ok: true, json: async () => ({ username: 'u', password: 'p', uris: ['turn:t:3478'], ttl: 86400 }) };
+    };
+    await fetchTurnCredentials('https://matrix.example.com/extra/path/', 'tok', mockFetch);
+    assert.equal(calledUrl, 'https://matrix.example.com/_matrix/client/v3/voip/turnServer');
+  });
+});
+```
+
+**Step 2: Run test to verify it fails**
+
+Run: `node --test packages/e2e-tests/test/turn-credentials.test.js`
+Expected: FAIL — module not found.
+
+**Step 3: Implement turn-credentials.js**
+
+Create `packages/core/turn-credentials.js`:
+
+```javascript
+/**
+ * Fetches TURN server credentials from the homeserver.
+ * Returns null if the homeserver doesn't provide TURN.
+ *
+ * Uses URL() constructor for safe path construction (no string concatenation).
+ * Validates https: scheme to prevent credential exfiltration via SSRF.
+ * Disables redirect following to prevent credential leakage to non-homeserver domains.
+ */
+export async function fetchTurnCredentials(homeserverUrl, accessToken, fetchFn = fetch) {
+  try {
+    const parsed = new URL(homeserverUrl);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return null;  // Only allow http(s) schemes
+    }
+    parsed.pathname = '/_matrix/client/v3/voip/turnServer';
+    const response = await fetchFn(parsed.href, {
+      headers: { Authorization: 'Bearer ' + accessToken },
+      redirect: 'error',  // Do not follow redirects — prevents credential exfiltration
+    });
+    if (!response.ok) return null;
+    const data = await response.json();
+    if (!data.uris || data.uris.length === 0) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Converts homeserver TURN response to RTCPeerConnection iceServers format.
+ */
+export function turnToIceServers(turnResponse) {
+  if (!turnResponse?.uris?.length) return [];
+  return [{
+    urls: turnResponse.uris,
+    username: turnResponse.username,
+    credential: turnResponse.password,
+  }];
+}
+```
+
+**Step 4: Run test to verify it passes**
+
+Run: `node --test packages/e2e-tests/test/turn-credentials.test.js`
+Expected: PASS
+
+**Step 5: Commit**
+
+```bash
+git add packages/core/turn-credentials.js packages/e2e-tests/test/turn-credentials.test.js
+git commit -m "feat: add TURN credential fetching from homeserver /voip/turnServer"
+```
+
+---
+
+## Task 5: WebRTC channel wrapper — Node.js
+
+Thin wrapper around `node-datachannel` with `onStateChange` for ICE monitoring.
 
 **Files:**
 - Create: `packages/core/webrtc-channel-node.js`
@@ -256,11 +387,9 @@ describe('NodeWebRTCChannel', () => {
     const channel = new NodeWebRTCChannel({
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
     });
-
     const offer = await channel.createOffer();
     assert.ok(offer.sdp, 'offer should have sdp');
     assert.equal(offer.type, 'offer');
-
     channel.close();
   });
 
@@ -272,30 +401,18 @@ describe('NodeWebRTCChannel', () => {
       iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
     });
 
-    // A creates offer
     const offer = await channelA.createOffer();
-
-    // B accepts offer, creates answer
     const answer = await channelB.acceptOffer(offer);
-
-    // A accepts answer
     await channelA.acceptAnswer(answer);
 
-    // Exchange ICE candidates
-    channelA.onIceCandidate((candidate) => {
-      channelB.addIceCandidate(candidate);
-    });
-    channelB.onIceCandidate((candidate) => {
-      channelA.addIceCandidate(candidate);
-    });
+    channelA.onIceCandidate((c) => channelB.addIceCandidate(c));
+    channelB.onIceCandidate((c) => channelA.addIceCandidate(c));
 
-    // Wait for connection
-    const connected = await Promise.race([
+    await Promise.race([
       Promise.all([channelA.waitForDataChannel(), channelB.waitForDataChannel()]),
       new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 10000)),
     ]);
 
-    // Send data A -> B
     const received = new Promise((resolve) => {
       channelB.onMessage((msg) => resolve(msg));
     });
@@ -310,145 +427,17 @@ describe('NodeWebRTCChannel', () => {
 });
 ```
 
-**Step 2: Run test to verify it fails**
+**Step 2: Run test, verify fails**
 
 Run: `node --test packages/e2e-tests/test/webrtc-channel-node.test.js`
-Expected: FAIL — module not found.
 
 **Step 3: Implement NodeWebRTCChannel**
 
-Create `packages/core/webrtc-channel-node.js`:
+Create `packages/core/webrtc-channel-node.js` — wrapper around node-datachannel PeerConnection exposing: `createOffer`, `acceptOffer`, `acceptAnswer`, `addIceCandidate`, `onIceCandidate`, `onMessage`, `onClose`, `onStateChange`, `send`, `waitForDataChannel`, `isOpen`, `close`. The `onStateChange` callback fires with the ICE connection state string. See design doc for full interface.
 
-```javascript
-import nodeDatachannel from 'node-datachannel';
+Note: node-datachannel does NOT expose `icecandidateerror` — TURN failures can only be detected via state becoming `'failed'`.
 
-const { PeerConnection } = nodeDatachannel;
-
-/**
- * Thin wrapper around node-datachannel for Node.js environments.
- * Exposes a consistent interface that P2PTransport consumes.
- */
-export class NodeWebRTCChannel {
-  #pc;
-  #dc = null;
-  #iceCandidateCallbacks = [];
-  #messageCallbacks = [];
-  #openResolvers = [];
-  #closeCallbacks = [];
-  #open = false;
-
-  constructor({ iceServers = [] } = {}) {
-    const config = {
-      iceServers: iceServers.map(s => typeof s === 'string' ? s : s.urls),
-    };
-    this.#pc = new PeerConnection('mxdx-p2p', config);
-
-    this.#pc.onLocalCandidate((candidate, mid) => {
-      for (const cb of this.#iceCandidateCallbacks) {
-        cb({ candidate, mid });
-      }
-    });
-  }
-
-  async createOffer() {
-    this.#dc = this.#pc.createDataChannel('mxdx-terminal');
-    this.#wireDataChannel(this.#dc);
-
-    const sdp = await new Promise((resolve) => {
-      this.#pc.onLocalDescription((sdp, type) => resolve({ sdp, type }));
-    });
-
-    return sdp;
-  }
-
-  async acceptOffer(offer) {
-    this.#pc.onDataChannel((dc) => {
-      this.#dc = dc;
-      this.#wireDataChannel(dc);
-    });
-
-    this.#pc.setRemoteDescription(offer.sdp, offer.type);
-
-    const answer = await new Promise((resolve) => {
-      this.#pc.onLocalDescription((sdp, type) => resolve({ sdp, type }));
-    });
-
-    return answer;
-  }
-
-  async acceptAnswer(answer) {
-    this.#pc.setRemoteDescription(answer.sdp, answer.type);
-  }
-
-  addIceCandidate(candidate) {
-    this.#pc.addRemoteCandidate(candidate.candidate, candidate.mid);
-  }
-
-  onIceCandidate(cb) {
-    this.#iceCandidateCallbacks.push(cb);
-  }
-
-  onMessage(cb) {
-    this.#messageCallbacks.push(cb);
-  }
-
-  onClose(cb) {
-    this.#closeCallbacks.push(cb);
-  }
-
-  send(data) {
-    if (!this.#dc || !this.#open) throw new Error('Data channel not open');
-    this.#dc.sendMessage(data);
-  }
-
-  waitForDataChannel() {
-    if (this.#open) return Promise.resolve();
-    return new Promise((resolve) => {
-      this.#openResolvers.push(resolve);
-    });
-  }
-
-  get isOpen() {
-    return this.#open;
-  }
-
-  close() {
-    if (this.#dc) {
-      try { this.#dc.close(); } catch { /* best effort */ }
-      this.#dc = null;
-    }
-    if (this.#pc) {
-      try { this.#pc.close(); } catch { /* best effort */ }
-      this.#pc = null;
-    }
-    this.#open = false;
-  }
-
-  #wireDataChannel(dc) {
-    dc.onOpen(() => {
-      this.#open = true;
-      for (const resolve of this.#openResolvers) resolve();
-      this.#openResolvers = [];
-    });
-
-    dc.onMessage((msg) => {
-      for (const cb of this.#messageCallbacks) cb(msg);
-    });
-
-    dc.onClosed(() => {
-      this.#open = false;
-      for (const cb of this.#closeCallbacks) cb();
-    });
-  }
-}
-```
-
-**Step 4: Run test to verify it passes**
-
-Run: `node --test packages/e2e-tests/test/webrtc-channel-node.test.js`
-Expected: PASS (both tests)
-
-Note: The loopback peer test may need adjustment if `node-datachannel` API differs slightly. Consult `node-datachannel` docs and adjust constructor/method calls as needed. The interface contract (`createOffer`, `acceptOffer`, `acceptAnswer`, `addIceCandidate`, `onIceCandidate`, `onMessage`, `send`, `waitForDataChannel`, `close`, `isOpen`) must be preserved.
+**Step 4: Run test, verify passes**
 
 **Step 5: Commit**
 
@@ -459,175 +448,39 @@ git commit -m "feat: add NodeWebRTCChannel wrapper around node-datachannel"
 
 ---
 
-## Task 5: WebRTC channel wrapper — Browser
+## Task 6: WebRTC channel wrapper — Browser
 
-Same interface as NodeWebRTCChannel but using native `RTCPeerConnection`.
+Same interface as NodeWebRTCChannel but using native `RTCPeerConnection`. Includes `onIceCandidateError` for TURN error detection (486/508/701).
 
 **Files:**
 - Create: `packages/web-console/src/webrtc-channel.js`
 
 **Step 1: Implement BrowserWebRTCChannel**
 
-Create `packages/web-console/src/webrtc-channel.js`:
+Create `packages/web-console/src/webrtc-channel.js` — wrapper around browser RTCPeerConnection with same interface as NodeWebRTCChannel, plus:
 
-```javascript
-/**
- * Thin wrapper around browser RTCPeerConnection.
- * Same interface as NodeWebRTCChannel.
- */
-export class BrowserWebRTCChannel {
-  #pc;
-  #dc = null;
-  #iceCandidateCallbacks = [];
-  #messageCallbacks = [];
-  #openResolvers = [];
-  #closeCallbacks = [];
-  #open = false;
+- `onIceCandidateError(cb)` — browser-only, receives `{ errorCode, errorText, url }` when TURN fails
+  - 486: Allocation Quota Reached
+  - 508: Insufficient Capacity
+  - 701: Cannot reach TURN server
+- `onStateChange(cb)` — fires with `iceConnectionState` string
 
-  constructor({ iceServers = [] } = {}) {
-    const config = {
-      iceServers: iceServers.map(s =>
-        typeof s === 'string' ? { urls: s } : s
-      ),
-    };
-    this.#pc = new RTCPeerConnection(config);
+Wires: `pc.onicecandidate`, `pc.addEventListener('icecandidateerror', ...)`, `pc.oniceconnectionstatechange`, `pc.ondatachannel`.
 
-    this.#pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        for (const cb of this.#iceCandidateCallbacks) {
-          cb({
-            candidate: event.candidate.candidate,
-            mid: event.candidate.sdpMid,
-          });
-        }
-      }
-    };
-  }
-
-  async createOffer() {
-    this.#dc = this.#pc.createDataChannel('mxdx-terminal', {
-      ordered: true,
-    });
-    this.#wireDataChannel(this.#dc);
-
-    const offer = await this.#pc.createOffer();
-    await this.#pc.setLocalDescription(offer);
-    return { sdp: offer.sdp, type: offer.type };
-  }
-
-  async acceptOffer(offer) {
-    this.#pc.ondatachannel = (event) => {
-      this.#dc = event.channel;
-      this.#wireDataChannel(this.#dc);
-    };
-
-    await this.#pc.setRemoteDescription(new RTCSessionDescription({
-      sdp: offer.sdp,
-      type: offer.type,
-    }));
-
-    const answer = await this.#pc.createAnswer();
-    await this.#pc.setLocalDescription(answer);
-    return { sdp: answer.sdp, type: answer.type };
-  }
-
-  async acceptAnswer(answer) {
-    await this.#pc.setRemoteDescription(new RTCSessionDescription({
-      sdp: answer.sdp,
-      type: answer.type,
-    }));
-  }
-
-  addIceCandidate(candidate) {
-    this.#pc.addIceCandidate(new RTCIceCandidate({
-      candidate: candidate.candidate,
-      sdpMid: candidate.mid,
-    })).catch(() => { /* best effort */ });
-  }
-
-  onIceCandidate(cb) {
-    this.#iceCandidateCallbacks.push(cb);
-  }
-
-  onMessage(cb) {
-    this.#messageCallbacks.push(cb);
-  }
-
-  onClose(cb) {
-    this.#closeCallbacks.push(cb);
-  }
-
-  send(data) {
-    if (!this.#dc || !this.#open) throw new Error('Data channel not open');
-    this.#dc.send(data);
-  }
-
-  waitForDataChannel() {
-    if (this.#open) return Promise.resolve();
-    return new Promise((resolve) => {
-      this.#openResolvers.push(resolve);
-    });
-  }
-
-  get isOpen() {
-    return this.#open;
-  }
-
-  close() {
-    if (this.#dc) {
-      try { this.#dc.close(); } catch { /* best effort */ }
-      this.#dc = null;
-    }
-    if (this.#pc) {
-      try { this.#pc.close(); } catch { /* best effort */ }
-      this.#pc = null;
-    }
-    this.#open = false;
-  }
-
-  #wireDataChannel(dc) {
-    dc.onopen = () => {
-      this.#open = true;
-      for (const resolve of this.#openResolvers) resolve();
-      this.#openResolvers = [];
-    };
-
-    dc.onmessage = (event) => {
-      for (const cb of this.#messageCallbacks) cb(event.data);
-    };
-
-    dc.onclose = () => {
-      this.#open = false;
-      for (const cb of this.#closeCallbacks) cb();
-    };
-  }
-}
-```
-
-**Step 2: Verify it loads in browser**
-
-Start vite dev server and open browser console:
-```bash
-cd packages/web-console && npx vite --port 5173
-```
-In browser console:
-```javascript
-import('/src/webrtc-channel.js').then(m => console.log('BrowserWebRTCChannel:', typeof m.BrowserWebRTCChannel))
-```
-Expected: `BrowserWebRTCChannel: function`
+**Step 2: Verify loads in browser dev console**
 
 **Step 3: Commit**
 
 ```bash
 git add packages/web-console/src/webrtc-channel.js
-git commit -m "feat: add BrowserWebRTCChannel wrapper for browser RTCPeerConnection"
+git commit -m "feat: add BrowserWebRTCChannel with TURN error detection"
 ```
 
 ---
 
-## Task 6: P2P Signaling module
+## Task 7: P2P Signaling — standard Matrix call protocol
 
-Handles SDP offer/answer exchange and ICE candidate trickle via Matrix events.
+SDP/ICE exchange via `m.call.invite/answer/candidates/hangup` with glare resolution.
 
 **Files:**
 - Create: `packages/core/p2p-signaling.js`
@@ -643,7 +496,7 @@ import assert from 'node:assert/strict';
 import { P2PSignaling } from '../../../packages/core/p2p-signaling.js';
 
 describe('P2PSignaling', () => {
-  it('sends offer via Matrix event', async () => {
+  it('sends m.call.invite with correct fields', async () => {
     const sent = [];
     const mockClient = {
       sendEvent: async (roomId, type, content) => {
@@ -652,166 +505,102 @@ describe('P2PSignaling', () => {
       onRoomEvent: async () => 'null',
     };
 
-    const signaling = new P2PSignaling(mockClient, '!exec:example.com');
-    await signaling.sendOffer('req-1', 'client', { sdp: 'v=0...', type: 'offer' });
+    const sig = new P2PSignaling(mockClient, '!dm:ex', '@me:ex');
+    await sig.sendInvite({ callId: 'c1', partyId: 'p1', sdp: 'v=0...', lifetime: 30000 });
 
-    assert.equal(sent.length, 1);
-    assert.equal(sent[0].type, 'org.mxdx.p2p.offer');
-    assert.equal(sent[0].content.role, 'client');
-    assert.equal(sent[0].content.request_id, 'req-1');
-    assert.ok(sent[0].content.sdp);
+    assert.equal(sent[0].type, 'm.call.invite');
+    assert.equal(sent[0].content.call_id, 'c1');
+    assert.equal(sent[0].content.party_id, 'p1');
+    assert.equal(sent[0].content.version, '1');
+    assert.equal(sent[0].content.lifetime, 30000);
+    assert.equal(sent[0].content.offer.type, 'offer');
+    assert.equal(sent[0].content.offer.sdp, 'v=0...');
   });
 
-  it('sends answer via Matrix event', async () => {
+  it('sends m.call.answer', async () => {
     const sent = [];
     const mockClient = {
-      sendEvent: async (roomId, type, content) => {
-        sent.push({ roomId, type, content: JSON.parse(content) });
-      },
+      sendEvent: async (r, t, c) => { sent.push({ type: t, content: JSON.parse(c) }); },
       onRoomEvent: async () => 'null',
     };
 
-    const signaling = new P2PSignaling(mockClient, '!exec:example.com');
-    await signaling.sendAnswer('req-1', 'launcher', { sdp: 'v=0...', type: 'answer' });
+    const sig = new P2PSignaling(mockClient, '!dm:ex', '@me:ex');
+    await sig.sendAnswer({ callId: 'c1', partyId: 'p2', sdp: 'v=0...' });
 
-    assert.equal(sent.length, 1);
-    assert.equal(sent[0].type, 'org.mxdx.p2p.answer');
-    assert.equal(sent[0].content.role, 'launcher');
+    assert.equal(sent[0].type, 'm.call.answer');
+    assert.equal(sent[0].content.answer.type, 'answer');
+    assert.equal(sent[0].content.version, '1');
   });
 
-  it('sends ICE candidate via Matrix event', async () => {
+  it('sends m.call.candidates batched', async () => {
     const sent = [];
     const mockClient = {
-      sendEvent: async (roomId, type, content) => {
-        sent.push({ roomId, type, content: JSON.parse(content) });
-      },
+      sendEvent: async (r, t, c) => { sent.push({ type: t, content: JSON.parse(c) }); },
       onRoomEvent: async () => 'null',
     };
 
-    const signaling = new P2PSignaling(mockClient, '!exec:example.com');
-    await signaling.sendIceCandidate('req-1', 'client', { candidate: 'a=candidate...', mid: '0' });
+    const sig = new P2PSignaling(mockClient, '!dm:ex', '@me:ex');
+    await sig.sendCandidates({
+      callId: 'c1', partyId: 'p1',
+      candidates: [{ candidate: 'c1...', sdpMid: '0' }, { candidate: 'c2...', sdpMid: '0' }],
+    });
 
-    assert.equal(sent.length, 1);
-    assert.equal(sent[0].type, 'org.mxdx.p2p.ice');
-    assert.equal(sent[0].content.candidate.candidate, 'a=candidate...');
+    assert.equal(sent[0].type, 'm.call.candidates');
+    assert.equal(sent[0].content.candidates.length, 2);
+  });
+
+  it('sends m.call.hangup with reason', async () => {
+    const sent = [];
+    const mockClient = {
+      sendEvent: async (r, t, c) => { sent.push({ type: t, content: JSON.parse(c) }); },
+      onRoomEvent: async () => 'null',
+    };
+
+    const sig = new P2PSignaling(mockClient, '!dm:ex', '@me:ex');
+    await sig.sendHangup({ callId: 'c1', partyId: 'p1', reason: 'idle_timeout' });
+
+    assert.equal(sent[0].type, 'm.call.hangup');
+    assert.equal(sent[0].content.reason, 'idle_timeout');
+  });
+
+  it('resolves glare: lower user_id wins', () => {
+    const sig = new P2PSignaling(null, '!dm:ex', '@alice:ex');
+    assert.equal(sig.resolveGlare('@bob:ex'), 'win');
+    assert.equal(sig.resolveGlare('@aaa:ex'), 'lose');
   });
 });
 ```
 
-**Step 2: Run test to verify it fails**
-
-Run: `node --test packages/e2e-tests/test/p2p-signaling.test.js`
-Expected: FAIL — module not found.
+**Step 2: Run test, verify fails**
 
 **Step 3: Implement P2PSignaling**
 
-Create `packages/core/p2p-signaling.js`:
+Create `packages/core/p2p-signaling.js` with methods:
+- `sendInvite({ callId, partyId, sdp, lifetime })` → `m.call.invite`
+- `sendAnswer({ callId, partyId, sdp })` → `m.call.answer`
+- `sendCandidates({ callId, partyId, candidates })` → `m.call.candidates`
+- `sendHangup({ callId, partyId, reason })` → `m.call.hangup`
+- `sendSelectAnswer({ callId, partyId, selectedPartyId })` → `m.call.select_answer`
+- `waitForInvite/Answer/Candidates/Hangup(timeoutSecs)` — poll via `onRoomEvent`
+- `resolveGlare(remoteUserId)` — returns `'win'` or `'lose'`
+- Static: `generateCallId()`, `generatePartyId()` — both return `crypto.randomUUID()`
 
-```javascript
-/**
- * P2PSignaling — exchanges WebRTC SDP/ICE via Matrix events.
- *
- * Uses the exec room for signaling. Both peers send offers simultaneously
- * (bidirectional handshake). First data channel to open wins.
- */
-export class P2PSignaling {
-  #client;
-  #roomId;
-  #handlers = new Map(); // type -> [callbacks]
+All events include `version: '1'` per Matrix call spec v1.
 
-  constructor(client, execRoomId) {
-    this.#client = client;
-    this.#roomId = execRoomId;
-  }
-
-  async sendOffer(requestId, role, sdpObj) {
-    await this.#client.sendEvent(
-      this.#roomId,
-      'org.mxdx.p2p.offer',
-      JSON.stringify({
-        request_id: requestId,
-        role,
-        sdp: sdpObj.sdp,
-        type: sdpObj.type,
-      }),
-    );
-  }
-
-  async sendAnswer(requestId, role, sdpObj) {
-    await this.#client.sendEvent(
-      this.#roomId,
-      'org.mxdx.p2p.answer',
-      JSON.stringify({
-        request_id: requestId,
-        role,
-        sdp: sdpObj.sdp,
-        type: sdpObj.type,
-      }),
-    );
-  }
-
-  async sendIceCandidate(requestId, role, candidate) {
-    await this.#client.sendEvent(
-      this.#roomId,
-      'org.mxdx.p2p.ice',
-      JSON.stringify({
-        request_id: requestId,
-        role,
-        candidate,
-      }),
-    );
-  }
-
-  /**
-   * Poll for a specific P2P signaling event type.
-   * Returns parsed content or null on timeout.
-   */
-  async waitForEvent(eventType, timeoutSecs = 5) {
-    try {
-      const json = await this.#client.onRoomEvent(
-        this.#roomId,
-        eventType,
-        timeoutSecs,
-      );
-      if (!json || json === 'null') return null;
-      const event = JSON.parse(json);
-      return event.content || event;
-    } catch {
-      return null;
-    }
-  }
-
-  async waitForOffer(timeoutSecs = 5) {
-    return this.waitForEvent('org.mxdx.p2p.offer', timeoutSecs);
-  }
-
-  async waitForAnswer(timeoutSecs = 5) {
-    return this.waitForEvent('org.mxdx.p2p.answer', timeoutSecs);
-  }
-
-  async waitForIceCandidate(timeoutSecs = 1) {
-    return this.waitForEvent('org.mxdx.p2p.ice', timeoutSecs);
-  }
-}
-```
-
-**Step 4: Run test to verify it passes**
-
-Run: `node --test packages/e2e-tests/test/p2p-signaling.test.js`
-Expected: PASS
+**Step 4: Run test, verify passes**
 
 **Step 5: Commit**
 
 ```bash
 git add packages/core/p2p-signaling.js packages/e2e-tests/test/p2p-signaling.test.js
-git commit -m "feat: add P2PSignaling module for SDP/ICE exchange via Matrix"
+git commit -m "feat: add P2PSignaling with standard Matrix m.call.* events"
 ```
 
 ---
 
-## Task 7: P2PTransport adapter
+## Task 8: P2PTransport adapter with E2EE, peer verification, idle timeout
 
-The core adapter that sits between TerminalSocket/BatchedSender and the WebRTC data channel, with transparent Matrix fallback.
+Core adapter between TerminalSocket/BatchedSender and WebRTC. Encrypts terminal data with Megolm before sending over data channel. Verifies peer identity after channel opens. Enforces frame size limits. Includes acks, idle timeout, and reconnect with exponential backoff.
 
 **Files:**
 - Create: `packages/core/p2p-transport.js`
@@ -826,681 +615,299 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { P2PTransport } from '../../../packages/core/p2p-transport.js';
 
+function mockClient() {
+  const sent = [];
+  return {
+    sent,
+    sendEvent: async (roomId, type, content) => { sent.push({ roomId, type, content }); },
+    onRoomEvent: async () => 'null',
+    userId: () => '@test:example.com',
+  };
+}
+
+function mockEncrypt(roomId, type, content) {
+  return JSON.stringify({ encrypted: true, original: content });
+}
+
+function mockDecrypt(ciphertext) {
+  const parsed = JSON.parse(ciphertext);
+  return parsed.original;
+}
+
+function mockSign(nonce) {
+  return 'sig_' + nonce;
+}
+
+function mockVerifySignature(nonce, signature, deviceId) {
+  return signature === 'sig_' + nonce;
+}
+
+function mockChannel() {
+  let messageCallback = null;
+  let closeCallback = null;
+  const p2pSent = [];
+  return {
+    p2pSent,
+    isOpen: true,
+    send: (data) => p2pSent.push(data),
+    onMessage: (cb) => { messageCallback = cb; },
+    onClose: (cb) => { closeCallback = cb; },
+    close: () => {},
+    simulateMessage: (msg) => messageCallback?.(msg),
+    simulateClose: () => { closeCallback?.(); },
+  };
+}
+
+function createTransport(overrides = {}) {
+  const client = mockClient();
+  const transport = P2PTransport.create({
+    matrixClient: client,
+    encryptFn: mockEncrypt,
+    decryptFn: mockDecrypt,
+    signFn: mockSign,
+    verifySignatureFn: mockVerifySignature,
+    localDeviceId: 'TESTDEVICE',
+    ...overrides,
+  });
+  return { client, transport };
+}
+
 describe('P2PTransport', () => {
   it('falls back to Matrix when no data channel exists', async () => {
-    const sent = [];
-    const mockClient = {
-      sendEvent: async (roomId, type, content) => {
-        sent.push({ roomId, type, content });
-      },
-      onRoomEvent: async (roomId, type, timeout) => {
-        return 'null';
-      },
-      userId: () => '@test:example.com',
-    };
-
-    const transport = new P2PTransport(mockClient);
+    const { client, transport } = createTransport();
     assert.equal(transport.status, 'matrix');
-
     await transport.sendEvent('!room:ex', 'org.mxdx.terminal.data', '{"data":"aGk=","encoding":"base64","seq":0}');
-    assert.equal(sent.length, 1);
-    assert.equal(sent[0].roomId, '!room:ex');
-
+    assert.equal(client.sent.length, 1);
     transport.close();
   });
 
-  it('routes through data channel when P2P is active', async () => {
-    const matrixSent = [];
-    const p2pSent = [];
-
-    const mockClient = {
-      sendEvent: async (roomId, type, content) => {
-        matrixSent.push({ roomId, type, content });
-      },
-      onRoomEvent: async () => 'null',
-      userId: () => '@test:example.com',
-    };
-
-    const transport = new P2PTransport(mockClient);
-
-    // Simulate a connected data channel
-    const mockChannel = {
-      isOpen: true,
-      send: (data) => p2pSent.push(data),
-      onMessage: () => {},
-      onClose: () => {},
-      close: () => {},
-    };
-    transport._setDataChannel(mockChannel);
-
+  it('encrypts terminal data before sending over P2P', async () => {
+    const { client, transport } = createTransport();
+    const channel = mockChannel();
+    transport.setDataChannel(channel);
+    // Simulate peer verification completing
+    transport._setPeerVerified(true);
     await transport.sendEvent('!room:ex', 'org.mxdx.terminal.data', '{"data":"aGk=","encoding":"base64","seq":0}');
-
-    assert.equal(matrixSent.length, 0, 'should not send via Matrix');
-    assert.equal(p2pSent.length, 1, 'should send via P2P');
+    assert.equal(client.sent.length, 0, 'should not send via Matrix');
+    assert.equal(channel.p2pSent.length, 1, 'should send via P2P');
+    const frame = JSON.parse(channel.p2pSent[0]);
+    assert.equal(frame.type, 'encrypted', 'frame must be encrypted');
+    assert.ok(frame.ciphertext, 'must have ciphertext');
     assert.equal(transport.status, 'p2p');
-
     transport.close();
   });
 
-  it('delivers incoming P2P messages via onRoomEvent', async () => {
-    const mockClient = {
-      sendEvent: async () => {},
-      onRoomEvent: async () => 'null',
-      userId: () => '@test:example.com',
-    };
+  it('does NOT send terminal data before peer verification', async () => {
+    const { client, transport } = createTransport();
+    const channel = mockChannel();
+    transport.setDataChannel(channel);
+    // Do NOT call _setPeerVerified — verification not complete
+    await transport.sendEvent('!room:ex', 'org.mxdx.terminal.data', '{"data":"aGk=","encoding":"base64","seq":0}');
+    assert.equal(client.sent.length, 1, 'should fall back to Matrix before verification');
+    assert.equal(channel.p2pSent.length, 0, 'should not send via P2P');
+    transport.close();
+  });
 
-    const transport = new P2PTransport(mockClient);
-
-    let messageCallback = null;
-    const mockChannel = {
-      isOpen: true,
-      send: () => {},
-      onMessage: (cb) => { messageCallback = cb; },
-      onClose: () => {},
-      close: () => {},
-    };
-    transport._setDataChannel(mockChannel);
-
-    // Simulate incoming P2P message
-    const incoming = JSON.stringify({
-      type: 'org.mxdx.terminal.data',
-      content: { data: 'aGk=', encoding: 'base64', seq: 0 },
-    });
-    messageCallback(incoming);
-
-    // onRoomEvent should return it
+  it('delivers and decrypts incoming P2P messages via onRoomEvent', async () => {
+    const { client, transport } = createTransport();
+    const channel = mockChannel();
+    transport.setDataChannel(channel);
+    transport._setPeerVerified(true);
+    const encrypted = mockEncrypt('!room:ex', 'org.mxdx.terminal.data',
+      JSON.stringify({ type: 'org.mxdx.terminal.data', content: { data: 'aGk=', encoding: 'base64', seq: 0 } }));
+    channel.simulateMessage(JSON.stringify({
+      type: 'encrypted',
+      ciphertext: encrypted,
+    }));
     const result = await transport.onRoomEvent('!room:ex', 'org.mxdx.terminal.data', 1);
-    assert.ok(result);
     const parsed = JSON.parse(result);
     assert.equal(parsed.content.seq, 0);
-
     transport.close();
   });
 
   it('requeues unacked events to Matrix on channel close', async () => {
-    const matrixSent = [];
-    const mockClient = {
-      sendEvent: async (roomId, type, content) => {
-        matrixSent.push({ roomId, type, content });
-      },
-      onRoomEvent: async () => 'null',
-      userId: () => '@test:example.com',
-    };
-
-    const transport = new P2PTransport(mockClient);
-
-    let closeCallback = null;
-    const mockChannel = {
-      isOpen: true,
-      send: () => {},
-      onMessage: () => {},
-      onClose: (cb) => { closeCallback = cb; },
-      close: () => {},
-    };
-    transport._setDataChannel(mockChannel);
-
-    // Send an event over P2P (unacked)
+    const { client, transport } = createTransport();
+    const channel = mockChannel();
+    transport.setDataChannel(channel);
+    transport._setPeerVerified(true);
     await transport.sendEvent('!room:ex', 'org.mxdx.terminal.data', '{"data":"aGk=","encoding":"base64","seq":0}');
-
-    // Simulate channel dropping
-    closeCallback();
-
-    // Give requeue time to process
+    channel.simulateClose();
     await new Promise(r => setTimeout(r, 100));
-
-    // The unacked event should have been resent via Matrix
-    assert.ok(matrixSent.length >= 1, 'unacked event should be requeued via Matrix');
+    assert.ok(client.sent.length >= 1, 'unacked event should be requeued via Matrix');
     assert.equal(transport.status, 'matrix');
+    transport.close();
+  });
 
+  it('drops oversized frames (>64KB)', async () => {
+    const { client, transport } = createTransport();
+    const channel = mockChannel();
+    transport.setDataChannel(channel);
+    transport._setPeerVerified(true);
+    const oversized = 'x'.repeat(65 * 1024);  // 65KB
+    channel.simulateMessage(oversized);
+    // Should not crash, should not deliver
+    const result = await transport.onRoomEvent('!room:ex', 'org.mxdx.terminal.data', 0.1);
+    assert.equal(result, 'null', 'oversized frame should be dropped');
+    transport.close();
+  });
+
+  it('tears down channel after idle timeout', async () => {
+    const { client, transport } = createTransport({ idleTimeoutMs: 100 });
+    const channel = mockChannel();
+    transport.setDataChannel(channel);
+    transport._setPeerVerified(true);
+    assert.equal(transport.status, 'p2p');
+    await new Promise(r => setTimeout(r, 200));
+    assert.equal(transport.status, 'matrix');
+    transport.close();
+  });
+
+  it('resets idle timer on send', async () => {
+    const { client, transport } = createTransport({ idleTimeoutMs: 150 });
+    const channel = mockChannel();
+    transport.setDataChannel(channel);
+    transport._setPeerVerified(true);
+    await new Promise(r => setTimeout(r, 100));
+    await transport.sendEvent('!room:ex', 'org.mxdx.terminal.data', '{"data":"aGk=","encoding":"base64","seq":0}');
+    await new Promise(r => setTimeout(r, 100));
+    assert.equal(transport.status, 'p2p');
+    await new Promise(r => setTimeout(r, 200));
+    assert.equal(transport.status, 'matrix');
+    transport.close();
+  });
+
+  it('enforces exponential backoff on reconnect after idle hangup', async () => {
+    let reconnectCount = 0;
+    const { client, transport } = createTransport({
+      idleTimeoutMs: 50,
+      onReconnectNeeded: () => { reconnectCount++; },
+    });
+    const channel = mockChannel();
+    transport.setDataChannel(channel);
+    transport._setPeerVerified(true);
+    await new Promise(r => setTimeout(r, 100));  // idle hangup
+    assert.equal(transport.status, 'matrix');
+    // First send triggers reconnect (backoff starts at 10s)
+    await transport.sendEvent('!room:ex', 'org.mxdx.terminal.data', '{"data":"aGk=","encoding":"base64","seq":0}');
+    assert.equal(reconnectCount, 1);
+    // Second send within backoff window should NOT trigger reconnect
+    await transport.sendEvent('!room:ex', 'org.mxdx.terminal.data', '{"data":"aGk=","encoding":"base64","seq":1}');
+    assert.equal(reconnectCount, 1, 'should respect backoff');
     transport.close();
   });
 });
 ```
 
-**Step 2: Run test to verify it fails**
-
-Run: `node --test packages/e2e-tests/test/p2p-transport.test.js`
-Expected: FAIL — module not found.
+**Step 2: Run test, verify fails**
 
 **Step 3: Implement P2PTransport**
 
-Create `packages/core/p2p-transport.js`:
+Create `packages/core/p2p-transport.js` with:
+- Static `P2PTransport.create({ matrixClient, encryptFn, decryptFn, signFn, verifySignatureFn, localDeviceId, ... })` — factory method, fully configured at construction (no `_setTransport()`)
+- `sendEvent(roomId, type, content)` — encrypts via `encryptFn` then routes via data channel, or falls back to Matrix. **NEVER sends unencrypted terminal data over the data channel.**
+- `onRoomEvent(roomId, type, timeoutSecs)` — checks P2P inbox (decrypts via `decryptFn`) then falls through to Matrix polling. P2PTransport is the sole consumer — no event consumption race.
+- `setDataChannel(channel)` — connects WebRTC channel, initiates peer verification, starts keepalive + idle timer only after verification succeeds
+- Peer verification: challenge-response with Ed25519 device key signatures. 10s timeout. Failure → close channel, fall back to Matrix.
+- `onStatusChange(cb)` — status change callback
+- `setTurnError(info)` — records TURN error info for UI
+- Maximum frame size: **64KB**. Drop and log oversized incoming frames before `JSON.parse()`.
+- Idle timer: resets on every send/receive, fires `onHangup('idle_timeout')` when expired
+- Reconnect on activity with exponential backoff: when `sendEvent` called while status is `'matrix'`, calls `onReconnectNeeded` only if the current backoff interval has elapsed since last reconnect attempt. Backoff: 10s → 20s → 40s → 80s → 160s → 300s (5 min cap). Resets to 10s after a successful P2P session. Same backoff for both idle and failure reconnects.
+- Application-level acks: tracks pending, requeues unacked via Matrix on channel close
+- Keepalive: `ping` every 15s, `pong` timeout 5s
+- In-band frame types: `encrypted` (terminal data), `ack`, `ping`, `pong`, `peer_verify`
 
-```javascript
-/**
- * P2PTransport — adapter between TerminalSocket/BatchedSender and WebRTC.
- *
- * Implements the same sendEvent/onRoomEvent interface the existing code uses.
- * Routes events over WebRTC data channel when available, falls back to Matrix.
- * Application-level acks ensure delivery; unacked data falls back to Matrix.
- */
-export class P2PTransport {
-  #matrixClient;
-  #dataChannel = null;
-  #status = 'matrix'; // 'matrix' | 'p2p'
-  #p2pInbox = new Map(); // type -> [{ resolve, timer }]
-  #p2pQueue = new Map(); // type -> [eventJson]
-  #pendingAcks = new Map(); // seq -> { roomId, type, content, timer }
-  #statusCallbacks = [];
-  #ackTimeout = 2000;
-  #pingInterval = null;
-  #pongTimer = null;
-  #closed = false;
+**Step 4: Run test, verify passes (all 7 tests)**
 
-  constructor(matrixClient) {
-    this.#matrixClient = matrixClient;
-  }
-
-  get status() {
-    return this.#status;
-  }
-
-  onStatusChange(cb) {
-    this.#statusCallbacks.push(cb);
-    return () => {
-      const idx = this.#statusCallbacks.indexOf(cb);
-      if (idx >= 0) this.#statusCallbacks.splice(idx, 1);
-    };
-  }
-
-  #setStatus(status) {
-    if (this.#status === status) return;
-    this.#status = status;
-    for (const cb of this.#statusCallbacks) cb(status);
-  }
-
-  /**
-   * Set the active WebRTC data channel. Called when P2P handshake succeeds.
-   * Also used by tests (as _setDataChannel).
-   */
-  _setDataChannel(channel) {
-    this.#dataChannel = channel;
-    this.#setStatus('p2p');
-
-    channel.onMessage((msg) => {
-      this.#handleP2PMessage(msg);
-    });
-
-    channel.onClose(() => {
-      this.#handleChannelClose();
-    });
-
-    this.#startKeepalive();
-  }
-
-  async sendEvent(roomId, type, content) {
-    if (this.#closed) return;
-
-    if (this.#dataChannel?.isOpen && this.#status === 'p2p') {
-      // Send over P2P
-      const frame = JSON.stringify({ type, content: JSON.parse(content) });
-      try {
-        this.#dataChannel.send(frame);
-      } catch {
-        // Channel broken, fall back
-        this.#handleChannelClose();
-        await this.#matrixClient.sendEvent(roomId, type, content);
-        return;
-      }
-
-      // Track for ack (only terminal data events, which have seq)
-      const parsed = JSON.parse(content);
-      if (typeof parsed.seq === 'number') {
-        const timer = setTimeout(() => {
-          this.#requeueUnacked(parsed.seq);
-        }, this.#ackTimeout);
-        this.#pendingAcks.set(parsed.seq, { roomId, type, content, timer });
-      }
-    } else {
-      // Fall back to Matrix
-      await this.#matrixClient.sendEvent(roomId, type, content);
-    }
-  }
-
-  async onRoomEvent(roomId, type, timeoutSecs) {
-    if (this.#closed) return 'null';
-
-    // Check P2P queue first
-    const queue = this.#p2pQueue.get(type);
-    if (queue && queue.length > 0) {
-      return queue.shift();
-    }
-
-    if (this.#status === 'p2p') {
-      // Wait for P2P message with timeout
-      return new Promise((resolve) => {
-        const timer = setTimeout(() => {
-          // Remove waiter and try Matrix as fallback
-          const waiters = this.#p2pInbox.get(type);
-          if (waiters) {
-            const idx = waiters.findIndex(w => w.resolve === resolve);
-            if (idx >= 0) waiters.splice(idx, 1);
-          }
-          // Try Matrix poll with short timeout
-          this.#matrixClient.onRoomEvent(roomId, type, Math.min(timeoutSecs, 1))
-            .then(resolve)
-            .catch(() => resolve('null'));
-        }, timeoutSecs * 1000);
-
-        if (!this.#p2pInbox.has(type)) this.#p2pInbox.set(type, []);
-        this.#p2pInbox.get(type).push({ resolve, timer });
-      });
-    }
-
-    // Matrix-only mode
-    return this.#matrixClient.onRoomEvent(roomId, type, timeoutSecs);
-  }
-
-  /**
-   * Proxy for any other client methods TerminalSocket might use.
-   */
-  userId() {
-    return this.#matrixClient.userId();
-  }
-
-  #handleP2PMessage(msg) {
-    let parsed;
-    try {
-      parsed = JSON.parse(msg);
-    } catch {
-      return;
-    }
-
-    // Handle acks
-    if (parsed.type === 'org.mxdx.p2p.ack') {
-      this.#handleAck(parsed.seq);
-      return;
-    }
-
-    // Handle keepalive
-    if (parsed.type === 'org.mxdx.p2p.ping') {
-      try { this.#dataChannel.send(JSON.stringify({ type: 'org.mxdx.p2p.pong' })); } catch { /* */ }
-      return;
-    }
-    if (parsed.type === 'org.mxdx.p2p.pong') {
-      if (this.#pongTimer) { clearTimeout(this.#pongTimer); this.#pongTimer = null; }
-      return;
-    }
-
-    // Send ack for terminal data events
-    if (parsed.type === 'org.mxdx.terminal.data' && typeof parsed.content?.seq === 'number') {
-      try {
-        this.#dataChannel.send(JSON.stringify({ type: 'org.mxdx.p2p.ack', seq: parsed.content.seq }));
-      } catch { /* best effort */ }
-    }
-
-    // Wrap as event JSON (matching what onRoomEvent returns from Matrix)
-    const eventJson = JSON.stringify({ content: parsed.content });
-
-    // Resolve any waiting onRoomEvent call
-    const type = parsed.type;
-    const waiters = this.#p2pInbox.get(type);
-    if (waiters && waiters.length > 0) {
-      const waiter = waiters.shift();
-      clearTimeout(waiter.timer);
-      waiter.resolve(eventJson);
-      return;
-    }
-
-    // Queue for next onRoomEvent call
-    if (!this.#p2pQueue.has(type)) this.#p2pQueue.set(type, []);
-    this.#p2pQueue.get(type).push(eventJson);
-  }
-
-  #handleAck(seq) {
-    // Ack is cumulative — clear this seq and all earlier
-    for (const [pendingSeq, entry] of this.#pendingAcks) {
-      if (pendingSeq <= seq) {
-        clearTimeout(entry.timer);
-        this.#pendingAcks.delete(pendingSeq);
-      }
-    }
-  }
-
-  #requeueUnacked(seq) {
-    const entry = this.#pendingAcks.get(seq);
-    if (!entry) return;
-
-    clearTimeout(entry.timer);
-    this.#pendingAcks.delete(seq);
-
-    // Requeue via Matrix
-    this.#matrixClient.sendEvent(entry.roomId, entry.type, entry.content).catch(() => {});
-  }
-
-  #handleChannelClose() {
-    this.#dataChannel = null;
-    this.#setStatus('matrix');
-    this.#stopKeepalive();
-
-    // Requeue all unacked events via Matrix
-    for (const [seq, entry] of this.#pendingAcks) {
-      clearTimeout(entry.timer);
-      this.#matrixClient.sendEvent(entry.roomId, entry.type, entry.content).catch(() => {});
-    }
-    this.#pendingAcks.clear();
-
-    // Resolve any waiting P2P inbox promises with null so they fall back to Matrix
-    for (const [type, waiters] of this.#p2pInbox) {
-      for (const waiter of waiters) {
-        clearTimeout(waiter.timer);
-        waiter.resolve('null');
-      }
-    }
-    this.#p2pInbox.clear();
-  }
-
-  #startKeepalive() {
-    this.#pingInterval = setInterval(() => {
-      if (!this.#dataChannel?.isOpen) return;
-      try {
-        this.#dataChannel.send(JSON.stringify({ type: 'org.mxdx.p2p.ping' }));
-      } catch {
-        this.#handleChannelClose();
-        return;
-      }
-      this.#pongTimer = setTimeout(() => {
-        this.#handleChannelClose();
-      }, 5000);
-    }, 15000);
-  }
-
-  #stopKeepalive() {
-    if (this.#pingInterval) { clearInterval(this.#pingInterval); this.#pingInterval = null; }
-    if (this.#pongTimer) { clearTimeout(this.#pongTimer); this.#pongTimer = null; }
-  }
-
-  close() {
-    this.#closed = true;
-    this.#stopKeepalive();
-    if (this.#dataChannel) {
-      try { this.#dataChannel.close(); } catch { /* */ }
-      this.#dataChannel = null;
-    }
-    // Clear pending ack timers
-    for (const [, entry] of this.#pendingAcks) clearTimeout(entry.timer);
-    this.#pendingAcks.clear();
-    // Clear inbox timers
-    for (const [, waiters] of this.#p2pInbox) {
-      for (const w of waiters) clearTimeout(w.timer);
-    }
-    this.#p2pInbox.clear();
-  }
-}
-```
-
-**Step 4: Run test to verify it passes**
-
-Run: `node --test packages/e2e-tests/test/p2p-transport.test.js`
-Expected: PASS (all 4 tests)
-
-**Step 5: Export from core**
-
-In `packages/core/index.js`, add:
-
-```javascript
-export { P2PTransport } from './p2p-transport.js';
-export { P2PSignaling } from './p2p-signaling.js';
-```
-
-**Step 6: Commit**
+**Step 5: Commit**
 
 ```bash
-git add packages/core/p2p-transport.js packages/core/p2p-signaling.js packages/core/index.js packages/e2e-tests/test/p2p-transport.test.js
-git commit -m "feat: add P2PTransport adapter with ack-based delivery and Matrix fallback"
+git add packages/core/p2p-transport.js packages/e2e-tests/test/p2p-transport.test.js
+git commit -m "feat: add P2PTransport adapter with acks, idle timeout, and reconnect"
 ```
 
 ---
 
-## Task 8: Extend launcher telemetry with P2P discovery
+## Task 9: Extend launcher telemetry with P2P discovery
 
 **Files:**
-- Modify: `packages/launcher/src/runtime.js` (the `#postTelemetry` method, ~line 718)
+- Modify: `packages/launcher/src/runtime.js`
 
-**Step 1: Add P2P block to telemetry**
+**Step 1: Add P2P field to telemetry**
 
-In `#postTelemetry()`, after the `session_persistence` line and before the `sendStateEvent` call, add:
+Find where `org.mxdx.host_telemetry` state event is posted. Add `p2p` field:
 
 ```javascript
-    // P2P discovery info
-    if (this.#config.p2pEnabled) {
-      const nets = os.networkInterfaces();
-      const internalIps = [];
-      for (const ifaces of Object.values(nets)) {
-        for (const iface of ifaces) {
-          if (!iface.internal && iface.family === 'IPv4') {
-            internalIps.push(iface.address);
-          }
-        }
-      }
-      telemetry.p2p = {
-        enabled: true,
-        ice_servers: (this.#config.iceServers || []).map(s => ({ urls: s })),
-        internal_ips: internalIps,
-        external_ip: null,
-      };
-    } else {
-      telemetry.p2p = { enabled: false };
+p2p: {
+  enabled: this.#config.p2pEnabled,
+  // Internal IPs only when explicitly enabled — state events persist indefinitely
+  ...(this.#config.p2pAdvertiseIps ? { internal_ips: this.#getInternalIps() } : {}),
+},
+```
+
+Add helper (only called when `p2pAdvertiseIps` is true):
+```javascript
+#getInternalIps() {
+  const nets = os.networkInterfaces();
+  const ips = [];
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name]) {
+      if (net.family === 'IPv4' && !net.internal) ips.push(net.address);
     }
+  }
+  return ips;
+}
 ```
 
-Note: `os` is already imported at the top of `#postTelemetry()` via `const os = await import('node:os')`.
+**Important:** Internal IPs are NOT included by default. The `p2p_advertise_ips` config option (default `false`) must be explicitly set to `true`. This should only be done with trusted, non-public homeservers. State events persist indefinitely and are visible to all room members, including future joins.
 
-**Step 2: Verify telemetry includes P2P block**
+**Step 2: Verify**
 
-Start launcher, then check the exec room state event. Alternatively, add a temporary log:
-
-```bash
-node -e "
-import('./packages/launcher/src/config.js').then(({ LauncherConfig }) => {
-  const c = new LauncherConfig({ username: 'test', servers: ['https://matrix.org'], p2pEnabled: true, iceServers: ['stun:stun.l.google.com:19302'] });
-  console.log('p2pEnabled:', c.p2pEnabled);
-});
-"
-```
+Run launcher with default config — telemetry should contain `p2p.enabled` but NOT `p2p.internal_ips`.
+Run launcher with `--p2p-advertise-ips true` — telemetry should contain `p2p.internal_ips`.
 
 **Step 3: Commit**
 
 ```bash
 git add packages/launcher/src/runtime.js
-git commit -m "feat: add P2P discovery block to launcher telemetry"
+git commit -m "feat: extend launcher telemetry with P2P discovery (IPs opt-in only)"
 ```
 
 ---
 
-## Task 9: Wire P2P into launcher session handling
-
-Add P2P signaling to `#handleInteractiveSession` and `#handleReconnect`. The launcher participates in bidirectional WebRTC handshake after starting the session.
+## Task 10: Wire P2P into launcher session handling
 
 **Files:**
 - Modify: `packages/launcher/src/runtime.js`
 
-**Step 1: Import P2P modules at top of runtime.js**
+**No changes to `terminal-socket.js`** — TerminalSocket already accepts a client at construction. P2PTransport implements the same interface (`sendEvent`/`onRoomEvent`), so it's passed to TerminalSocket's constructor directly. No `_setTransport()` or `_sender` getter needed.
 
-Add to existing imports:
+**Step 1: Add P2P setup to launcher runtime**
 
-```javascript
-import { P2PTransport, P2PSignaling } from '@mxdx/core';
-import { NodeWebRTCChannel } from '@mxdx/core/webrtc-channel-node.js';
-```
+Import P2P modules and add `#setupP2P` method that:
+1. Fetches TURN credentials via `fetchTurnCredentials` (validates URL with `new URL()`)
+2. Creates `P2PSignaling` with `m.call.*` events
+3. Creates `NodeWebRTCChannel` with TURN ICE servers
+4. Creates `P2PTransport` via `P2PTransport.create()` factory with:
+   - `encryptFn`/`decryptFn` wired to WASM Megolm encrypt/decrypt
+   - `signFn`/`verifySignatureFn` wired to WASM Ed25519 device key operations
+   - `localDeviceId` from WASM client
+   - `idleTimeoutMs` from config
+   - hangup callback, reconnect callback (with exponential backoff 10s→5min), status change callback
+5. Passes P2PTransport (instead of raw Matrix client) to TerminalSocket constructor
+6. Sends `m.call.invite` with SDP offer in background
+7. Waits for `m.call.answer`
+8. Exchanges ICE candidates via `m.call.candidates`
+9. On data channel open: `transport.setDataChannel(channel)` — triggers peer verification, then switches batch window on verification success
+10. On failure: log warning, terminal continues on Matrix (P2PTransport's fallback)
 
-**Step 2: Add P2P handshake helper method**
+When `config.p2pEnabled` is false, TerminalSocket is constructed with the raw Matrix client as before (no P2PTransport wrapper).
 
-Add a new private method to LauncherRuntime class (after `#postTelemetry`):
+**Step 2: Verify launcher starts with P2P options**
 
-```javascript
-  /**
-   * Attempt P2P handshake for an interactive session.
-   * Runs in background — returns the P2PTransport immediately.
-   * The transport starts in 'matrix' mode and upgrades to 'p2p' if handshake succeeds.
-   */
-  #attemptP2PHandshake(transport, signaling, requestId, iceServers) {
-    const attempt = async () => {
-      try {
-        const channel = new NodeWebRTCChannel({ iceServers });
+Run `node packages/launcher/bin/mxdx-launcher.js start --help` — should show P2P flags.
 
-        // Create our offer (launcher role)
-        const offer = await channel.createOffer();
-        await signaling.sendOffer(requestId, 'launcher', offer);
-
-        // Collect ICE candidates and send them
-        channel.onIceCandidate((candidate) => {
-          signaling.sendIceCandidate(requestId, 'launcher', candidate).catch(() => {});
-        });
-
-        // Wait for client's offer (bidirectional)
-        const clientOffer = await signaling.waitForOffer(5);
-        if (clientOffer && clientOffer.role === 'client') {
-          // We also need to create a second channel to answer the client's offer
-          const channel2 = new NodeWebRTCChannel({ iceServers });
-          const answer = await channel2.acceptOffer(clientOffer);
-          await signaling.sendAnswer(requestId, 'launcher', answer);
-
-          channel2.onIceCandidate((candidate) => {
-            signaling.sendIceCandidate(requestId, 'launcher', candidate).catch(() => {});
-          });
-
-          // Trickle ICE from client
-          const iceLoop2 = async () => {
-            for (let i = 0; i < 20; i++) {
-              const ice = await signaling.waitForIceCandidate(1);
-              if (ice && ice.role === 'client') channel2.addIceCandidate(ice.candidate);
-            }
-          };
-          iceLoop2().catch(() => {});
-
-          // Wait for either channel to open
-          const winner = await Promise.race([
-            channel.waitForDataChannel().then(() => ({ ch: channel, loser: channel2 })),
-            channel2.waitForDataChannel().then(() => ({ ch: channel2, loser: channel })),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('P2P timeout')), 5000)),
-          ]);
-
-          winner.loser.close();
-          transport._setDataChannel(winner.ch);
-          this.#log.info('P2P data channel established', { request_id: requestId });
-          return;
-        }
-
-        // No client offer — wait for client's answer to our offer
-        const clientAnswer = await signaling.waitForAnswer(5);
-        if (clientAnswer && clientAnswer.role === 'client') {
-          await channel.acceptAnswer(clientAnswer);
-
-          // Trickle ICE
-          const iceLoop = async () => {
-            for (let i = 0; i < 20; i++) {
-              const ice = await signaling.waitForIceCandidate(1);
-              if (ice && ice.role === 'client') channel.addIceCandidate(ice.candidate);
-            }
-          };
-          iceLoop().catch(() => {});
-
-          await Promise.race([
-            channel.waitForDataChannel(),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('P2P timeout')), 5000)),
-          ]);
-
-          transport._setDataChannel(channel);
-          this.#log.info('P2P data channel established', { request_id: requestId });
-          return;
-        }
-
-        channel.close();
-        this.#log.info('P2P handshake: no client response', { request_id: requestId });
-      } catch (err) {
-        this.#log.info('P2P handshake failed, staying on Matrix', { request_id: requestId, error: err.message });
-      }
-    };
-
-    // Run in background — don't block session startup
-    attempt().catch(() => {});
-  }
-```
-
-**Step 3: Modify handleInteractiveSession to use P2PTransport**
-
-In `#handleInteractiveSession`, after the DM room is created and before the `await this.#sendSessionResponse(...)` call, add the P2P transport setup. The key changes:
-
-1. After `const dmRoomId = await this.#client.createDmRoom(sender);`, add:
-
-```javascript
-    // Set up P2P transport (wraps Matrix client with optional WebRTC upgrade)
-    const transport = new P2PTransport(this.#client);
-    const p2pEnabled = this.#config.p2pEnabled !== false;
-
-    if (p2pEnabled) {
-      const signaling = new P2PSignaling(this.#client, this.#topology.exec_room_id);
-      const iceServers = (this.#config.iceServers || ['stun:stun.l.google.com:19302']).map(s => ({ urls: s }));
-      this.#attemptP2PHandshake(transport, signaling, requestId, iceServers);
-    }
-```
-
-2. In the session response, add `p2p: p2pEnabled`:
-
-```javascript
-    await this.#sendSessionResponse(requestId, 'started', dmRoomId, {
-      session_id: sessionId,
-      persistent: pty.persistent,
-      batch_ms: negotiatedBatchMs,
-      p2p_batch_ms: this.#config.p2pBatchMs || 10,
-      p2p: p2pEnabled,
-    });
-```
-
-3. Change the BatchedSender to use `transport` instead of direct `this.#client`:
-
-```javascript
-    const batchSender = new BatchedSender({
-      sendEvent: (roomId, type, content) => transport.sendEvent(roomId, type, content),
-      roomId: dmRoomId,
-      batchMs: negotiatedBatchMs,
-      onError: (err, seq) => this.#log.warn('terminal.data send failed', { seq, error: String(err) }),
-    });
-```
-
-4. Add status change listener to switch batch window:
-
-```javascript
-    transport.onStatusChange((status) => {
-      if (status === 'p2p') {
-        batchSender.batchMs = this.#config.p2pBatchMs || 10;
-        this.#log.info('Switched to P2P transport', { session_id: sessionId });
-      } else {
-        batchSender.batchMs = negotiatedBatchMs;
-        this.#log.info('Fell back to Matrix transport', { session_id: sessionId });
-      }
-    });
-```
-
-5. Change the input polling to use `transport` instead of `this.#client`:
-
-Replace `this.#client.onRoomEvent(dmRoomId, ...)` in the `pollForInput` loop with `transport.onRoomEvent(dmRoomId, ...)`.
-
-6. In the `finally` block, add `transport.close()`:
-
-```javascript
-    pollForInput().finally(() => {
-      transport.close();
-      // ... existing cleanup ...
-    });
-```
-
-**Step 4: Apply same pattern to handleReconnect**
-
-Same changes as above but in `#handleReconnect`. The reconnect response should also include `p2p: p2pEnabled` and `p2p_batch_ms`.
-
-**Step 5: Verify launcher starts without errors**
-
-Run:
-```bash
-node packages/launcher/bin/mxdx-launcher.js &
-sleep 10
-kill %1
-```
-Expected: No crash, launcher starts and shuts down normally. P2P handshake will fail (no client) but should log gracefully.
-
-**Step 6: Commit**
+**Step 3: Commit**
 
 ```bash
 git add packages/launcher/src/runtime.js
@@ -1509,418 +916,163 @@ git commit -m "feat: wire P2P transport into launcher session handling"
 
 ---
 
-## Task 10: Wire P2P into browser terminal-view
+## Task 11: Wire P2P into browser terminal-view
 
 **Files:**
 - Modify: `packages/web-console/src/terminal-view.js`
-- Modify: `packages/web-console/src/terminal-socket.js`
 
-**Step 1: Add P2P handshake to setupTerminalView**
+**No changes to browser `terminal-socket.js`** — same constructor injection pattern as launcher.
 
-In `packages/web-console/src/terminal-view.js`, add import at top:
+**Step 1: Import P2P modules and add `setupBrowserP2P`**
 
-```javascript
-import { P2PTransport, P2PSignaling } from '../../core/p2p-transport.js';
-import { BrowserWebRTCChannel } from './webrtc-channel.js';
-```
+Same pattern as launcher but using `BrowserWebRTCChannel`:
+1. Fetch TURN credentials (validates URL with `new URL()`)
+2. Create `P2PTransport` via factory with:
+   - `encryptFn`/`decryptFn` wired to WASM Megolm encrypt/decrypt
+   - `signFn`/`verifySignatureFn` wired to WASM Ed25519 device key operations
+   - `localDeviceId` from WASM client
+3. Pass P2PTransport to TerminalSocket constructor (instead of raw client)
+4. Create signaling + BrowserWebRTCChannel
+5. Wire `onIceCandidateError` for TURN-specific errors (486/508/701)
+6. Send invite, wait for answer, exchange candidates
+7. On data channel open: `transport.setDataChannel(channel)` — triggers peer verification
+8. On verification success: switch batch window, update UI to `P2P`
+9. On status change: update UI indicator
+10. On idle hangup: show `Matrix` status, reconnect on next activity (with exponential backoff)
 
-Note: Fix import paths if needed — the web-console imports core modules via relative paths (e.g., `../../core/batched-sender.js`). Check existing imports in the file for the pattern.
+Read P2P settings from localStorage. Clamp values to sane ranges: `batchMs` 1-1000, `idleTimeout` 30-3600.
 
-After the session response is received and `dmRoomId` is set (around line 134), add:
+**Step 2: Add `updateStatus` function**
 
-```javascript
-    // Set up P2P transport
-    const p2pEnabled = sessionContent.p2p && (localStorage.getItem('mxdx-p2p-enabled') !== 'false');
-    const transport = new P2PTransport(client);
+Maps transport status to UI text and CSS class. See design doc UI indicators table.
 
-    if (p2pEnabled) {
-      const signaling = new P2PSignaling(client, launcher.exec_room_id);
-      const iceServers = sessionContent.ice_servers || [{ urls: 'stun:stun.l.google.com:19302' }];
-
-      // Bidirectional P2P handshake (client role)
-      (async () => {
-        try {
-          const channel = new BrowserWebRTCChannel({ iceServers });
-          const offer = await channel.createOffer();
-          await signaling.sendOffer(requestId, 'client', offer);
-
-          channel.onIceCandidate((candidate) => {
-            signaling.sendIceCandidate(requestId, 'client', candidate).catch(() => {});
-          });
-
-          // Wait for launcher's offer
-          const launcherOffer = await signaling.waitForOffer(5);
-          if (launcherOffer && launcherOffer.role === 'launcher') {
-            const channel2 = new BrowserWebRTCChannel({ iceServers });
-            const answer = await channel2.acceptOffer(launcherOffer);
-            await signaling.sendAnswer(requestId, 'client', answer);
-
-            channel2.onIceCandidate((candidate) => {
-              signaling.sendIceCandidate(requestId, 'client', candidate).catch(() => {});
-            });
-
-            const iceLoop2 = async () => {
-              for (let i = 0; i < 20; i++) {
-                const ice = await signaling.waitForIceCandidate(1);
-                if (ice && ice.role === 'launcher') channel2.addIceCandidate(ice.candidate);
-              }
-            };
-            iceLoop2().catch(() => {});
-
-            // First channel to open wins; client-initiated wins ties
-            const winner = await Promise.race([
-              channel.waitForDataChannel().then(() => ({ ch: channel, loser: channel2 })),
-              channel2.waitForDataChannel().then(() => ({ ch: channel2, loser: channel })),
-              new Promise((_, reject) => setTimeout(() => reject(new Error('P2P timeout')), 5000)),
-            ]);
-
-            winner.loser.close();
-            transport._setDataChannel(winner.ch);
-            return;
-          }
-
-          // No launcher offer — wait for answer to our offer
-          const launcherAnswer = await signaling.waitForAnswer(5);
-          if (launcherAnswer && launcherAnswer.role === 'launcher') {
-            await channel.acceptAnswer(launcherAnswer);
-            const iceLoop = async () => {
-              for (let i = 0; i < 20; i++) {
-                const ice = await signaling.waitForIceCandidate(1);
-                if (ice && ice.role === 'launcher') channel.addIceCandidate(ice.candidate);
-              }
-            };
-            iceLoop().catch(() => {});
-
-            await Promise.race([
-              channel.waitForDataChannel(),
-              new Promise((_, reject) => setTimeout(() => reject(new Error('P2P timeout')), 5000)),
-            ]);
-            transport._setDataChannel(channel);
-            return;
-          }
-
-          channel.close();
-        } catch {
-          // P2P failed, stay on Matrix — no user-visible error
-        }
-      })();
-    }
-```
-
-Then change the TerminalSocket creation to use `transport` instead of `client`:
-
-```javascript
-    const socket = new TerminalSocket(transport, dmRoomId, { pollIntervalMs: 100, batchMs: negotiatedBatchMs });
-```
-
-Add batch window switching on P2P status change:
-
-```javascript
-    const p2pBatchMs = sessionContent.p2p_batch_ms || 10;
-    transport.onStatusChange((status) => {
-      if (socket._sender) {
-        socket._sender.batchMs = status === 'p2p' ? p2pBatchMs : negotiatedBatchMs;
-      }
-    });
-```
-
-**Step 2: Update TerminalSocket to expose sender for batch window control**
-
-In `packages/web-console/src/terminal-socket.js`, add a getter:
-
-```javascript
-  get _sender() { return this.#sender; }
-```
-
-Do the same in `packages/core/terminal-socket.js`.
-
-**Step 3: Update status indicator**
-
-Modify the `onbuffering` wiring to also show P2P status. After the socket creation:
-
-```javascript
-    // Wire: P2P status indicator
-    transport.onStatusChange((status) => {
-      if (statusEl) {
-        if (status === 'p2p') {
-          statusEl.textContent = 'P2P';
-          statusEl.className = 'status-p2p';
-          statusEl.hidden = false;
-          // Hide after 3 seconds
-          setTimeout(() => { if (transport.status === 'p2p') statusEl.hidden = true; }, 3000);
-        } else {
-          statusEl.textContent = 'Matrix (P2P lost)';
-          statusEl.className = 'status-p2p-lost';
-          statusEl.hidden = false;
-          setTimeout(() => {
-            if (transport.status === 'matrix') {
-              statusEl.hidden = true;
-              statusEl.className = '';
-            }
-          }, 5000);
-        }
-      }
-    });
-```
-
-Update the existing `onbuffering` handler to show homeserver name:
-
-```javascript
-    socket.onbuffering = (buffering) => {
-      if (statusEl) {
-        if (buffering) {
-          const homeserver = launcher.exec_room_id.split(':').pop();
-          statusEl.textContent = `Rate-limited by ${homeserver}`;
-          statusEl.className = 'status-rate-limited';
-          statusEl.hidden = false;
-        } else if (transport.status !== 'p2p') {
-          statusEl.hidden = true;
-          statusEl.className = '';
-        }
-      }
-    };
-```
-
-**Step 4: Apply same P2P wiring to reconnectTerminalView**
-
-Same pattern as setupTerminalView — set up P2PTransport, attempt handshake, use transport for TerminalSocket.
-
-**Step 5: Add transport.close() to socket onclose handlers**
-
-In both `setupTerminalView` and `reconnectTerminalView`, in the `socket.onclose` handler:
-
-```javascript
-    socket.onclose = () => {
-      transport.close();
-      // ... existing cleanup ...
-    };
-```
-
-**Step 6: Commit**
+**Step 3: Commit**
 
 ```bash
-git add packages/web-console/src/terminal-view.js packages/web-console/src/terminal-socket.js packages/core/terminal-socket.js
-git commit -m "feat: wire P2P transport into browser terminal sessions"
+git add packages/web-console/src/terminal-view.js
+git commit -m "feat: wire P2P transport into browser terminal view with E2EE and TURN error handling"
 ```
 
 ---
 
-## Task 11: UI indicator styles
+## Task 12: UI indicator styles
 
 **Files:**
 - Modify: `packages/web-console/src/style.css`
 
-**Step 1: Add P2P status indicator styles**
-
-Find the existing `#terminal-status` styles and add after them:
+**Step 1: Add CSS classes**
 
 ```css
-#terminal-status.status-p2p {
-  color: #3fb950;
-  background: rgba(63, 185, 80, 0.1);
-}
-
-#terminal-status.status-p2p-lost {
-  color: #d29922;
-  background: rgba(210, 153, 34, 0.1);
-}
-
-#terminal-status.status-rate-limited {
-  color: #f85149;
-  background: rgba(248, 81, 73, 0.1);
-}
-
-#terminal-status.status-connecting {
-  color: #d29922;
-  background: rgba(210, 153, 34, 0.1);
-}
+#terminal-status { font-size: 0.75rem; padding: 2px 8px; border-radius: 3px; font-family: monospace; }
+#terminal-status.status-matrix { color: #888; }
+#terminal-status.status-connecting { color: #d4a017; }
+#terminal-status.status-p2p { color: #22c55e; }
+#terminal-status.status-matrix-lost { color: #d4a017; }
+#terminal-status.status-turn-limit { color: #d4a017; }
+#terminal-status.status-turn-unreachable { color: #d4a017; }
+#terminal-status.status-direct-only { color: #888; }
+#terminal-status.status-rate-limited { color: #ef4444; }
 ```
 
-**Step 2: Verify styles render**
-
-Start vite dev server, open terminal session, inspect `#terminal-status` element. It should show the appropriate color based on transport status.
+**Step 2: Verify renders in browser**
 
 **Step 3: Commit**
 
 ```bash
 git add packages/web-console/src/style.css
-git commit -m "feat: add P2P status indicator styles (green/amber/red)"
+git commit -m "feat: add P2P status indicator CSS"
 ```
 
 ---
 
-## Task 12: P2P Settings in web console
+## Task 13: P2P Settings in web console
 
 **Files:**
-- Modify: `packages/web-console/src/settings.js` (if it exists — add P2P toggle)
+- Modify: `packages/web-console/src/settings.js` (or settings view)
 
-**Step 1: Add P2P settings to the Settings page**
+**Step 1: Add P2P settings controls**
 
-Add a "P2P Transport" section with:
-- Enable/disable toggle (reads/writes `localStorage mxdx-p2p-enabled`)
-- Batch window input (reads/writes `localStorage mxdx-p2p-batch-ms`, default 10)
+Using safe DOM methods (createElement, textContent, appendChild):
+- Checkbox for `mxdx-p2p-enabled` (default: true)
+- Number input for `mxdx-p2p-batch-ms` (default: 10, clamped to 1-1000)
+- Number input for `mxdx-p2p-idle-timeout-s` (default: 300, clamped to 30-3600)
 
-This follows the same pattern as the existing batch-ms setting that reads from `localStorage.getItem('mxdx-batch-ms')`.
+Wire change handlers to persist to localStorage. All numeric values are validated and clamped to their sane ranges on read AND on save — prevents malicious localStorage manipulation from causing excessive sends or signaling churn.
 
-**Step 2: Commit**
+**Step 2: Verify settings persist across reload**
+
+**Step 3: Commit**
 
 ```bash
 git add packages/web-console/src/settings.js
-git commit -m "feat: add P2P settings to web console settings page"
+git commit -m "feat: add P2P transport settings to web console"
 ```
 
 ---
 
-## Task 13: End-to-end P2P test
+## Task 14: P2P E2E test with loopback WebRTC
 
 **Files:**
 - Create: `packages/e2e-tests/test/p2p-e2e.test.js`
 
 **Step 1: Write E2E test**
 
-This test verifies the full P2P flow using two local Matrix clients (via Tuwunel) and loopback WebRTC:
+Test uses a `createMockPair()` helper that creates two mock Matrix clients relaying events to each other via in-memory queues. Then:
 
-```javascript
-import { describe, it, before, after } from 'node:test';
-import assert from 'node:assert/strict';
-import { P2PTransport } from '../../../packages/core/p2p-transport.js';
-import { NodeWebRTCChannel } from '../../../packages/core/webrtc-channel-node.js';
-
-describe('P2P E2E', () => {
-  it('two P2PTransports exchange data over WebRTC', async () => {
-    const clientSent = [];
-    const launcherSent = [];
-
-    const mockClientMatrix = {
-      sendEvent: async (r, t, c) => clientSent.push({ r, t, c }),
-      onRoomEvent: async () => 'null',
-      userId: () => '@client:test',
-    };
-    const mockLauncherMatrix = {
-      sendEvent: async (r, t, c) => launcherSent.push({ r, t, c }),
-      onRoomEvent: async () => 'null',
-      userId: () => '@launcher:test',
-    };
-
-    const clientTransport = new P2PTransport(mockClientMatrix);
-    const launcherTransport = new P2PTransport(mockLauncherMatrix);
-
-    // Create WebRTC peers
-    const clientCh = new NodeWebRTCChannel({ iceServers: [] });
-    const launcherCh = new NodeWebRTCChannel({ iceServers: [] });
-
-    const offer = await clientCh.createOffer();
-    const answer = await launcherCh.acceptOffer(offer);
-    await clientCh.acceptAnswer(answer);
-
-    // Exchange ICE
-    clientCh.onIceCandidate((c) => launcherCh.addIceCandidate(c));
-    launcherCh.onIceCandidate((c) => clientCh.addIceCandidate(c));
-
-    // Wait for connection
-    await Promise.race([
-      Promise.all([clientCh.waitForDataChannel(), launcherCh.waitForDataChannel()]),
-      new Promise((_, r) => setTimeout(() => r(new Error('timeout')), 10000)),
-    ]);
-
-    // Wire channels into transports
-    clientTransport._setDataChannel(clientCh);
-    launcherTransport._setDataChannel(launcherCh);
-
-    assert.equal(clientTransport.status, 'p2p');
-    assert.equal(launcherTransport.status, 'p2p');
-
-    // Send data client -> launcher over P2P
-    const received = new Promise((resolve) => {
-      // Launcher polls for data
-      launcherTransport.onRoomEvent('!room:test', 'org.mxdx.terminal.data', 5).then(resolve);
-    });
-
-    await clientTransport.sendEvent(
-      '!room:test',
-      'org.mxdx.terminal.data',
-      JSON.stringify({ data: 'aGVsbG8=', encoding: 'base64', seq: 0 }),
-    );
-
-    const result = await received;
-    assert.ok(result && result !== 'null', 'should receive data via P2P');
-    const parsed = JSON.parse(result);
-    assert.equal(parsed.content.seq, 0);
-
-    // Verify nothing went through Matrix
-    const matrixTerminalEvents = clientSent.filter(s => s.t === 'org.mxdx.terminal.data');
-    assert.equal(matrixTerminalEvents.length, 0, 'no terminal data should go through Matrix when P2P is active');
-
-    clientTransport.close();
-    launcherTransport.close();
-    clientCh.close();
-    launcherCh.close();
-  });
-});
-```
+1. Both sides create `P2PSignaling` and `NodeWebRTCChannel`
+2. Side A sends `m.call.invite`, Side B receives and sends `m.call.answer`
+3. ICE candidates exchanged via `m.call.candidates`
+4. Data channel opens, both sides create `P2PTransport` via factory with mock encrypt/decrypt/sign/verify
+5. Peer verification completes (challenge-response over data channel)
+6. Terminal data sent A→B via P2P — **verify data is encrypted on the wire** (inspect raw data channel messages)
+7. Verify received data is correctly decrypted on the other side
+8. Separate test: verify idle timeout causes fallback to matrix
+9. Separate test: verify exponential backoff is respected after idle hangup
+10. Separate test: verify oversized frames (>64KB) are dropped
 
 **Step 2: Run test**
 
 Run: `node --test packages/e2e-tests/test/p2p-e2e.test.js`
 Expected: PASS
 
+Note: Requires `stun:stun.l.google.com:19302` reachable. May need to skip in CI.
+
 **Step 3: Commit**
 
 ```bash
 git add packages/e2e-tests/test/p2p-e2e.test.js
-git commit -m "test: add P2P end-to-end test with WebRTC loopback"
+git commit -m "test: add P2P E2E test with loopback WebRTC and idle timeout"
 ```
 
 ---
 
-## Task 14: Full system E2E test with Tuwunel
+## Task 15: Full system E2E test with Tuwunel
 
 **Files:**
-- Modify: `packages/e2e-tests/test/terminal-e2e.test.js` (add P2P variant)
+- Modify: `packages/e2e-tests/test/terminal-e2e.test.js`
 
-**Step 1: Add P2P terminal test**
+**Step 1: Add P2P test case**
 
-Add a new test case to the existing terminal E2E test file that:
+Add test to existing terminal E2E suite that verifies:
+1. Terminal session starts on Matrix (immediate)
+2. `m.call.invite` event appears in room
+3. `m.call.answer` event appears
+4. `peer_verify` frames are exchanged (challenge-response)
+5. Data channel opens and peer verification completes (status → `'p2p'`)
+6. Terminal data flows over P2P — **verify it is Megolm-encrypted on the data channel**
+7. After idle timeout, `m.call.hangup` appears with `reason: 'idle_timeout'`
+8. Terminal continues on Matrix
+9. New data triggers fresh `m.call.invite` (respecting exponential backoff)
+10. Telemetry state event contains `p2p.enabled` but NOT `p2p.internal_ips` (default config)
 
-1. Starts two Tuwunel instances (existing helper)
-2. Registers launcher and client accounts
-3. Launcher starts with `p2pEnabled: true`
-4. Client requests interactive session with `p2p: true`
-5. Verify P2P handshake succeeds (both sides log "P2P data channel established")
-6. Send test input, verify output arrives
-7. Verify `transport.status === 'p2p'`
+**Step 2: Run full E2E suite**
 
-This test depends on `node-datachannel` being able to establish loopback WebRTC connections (which it can — no STUN needed for localhost).
-
-**Step 2: Run the full test suite**
-
-Run: `node --test packages/e2e-tests/test/`
-Expected: All existing tests PASS, new P2P test PASS.
+Run: `node --test packages/e2e-tests/test/terminal-e2e.test.js`
+Expected: All tests pass
 
 **Step 3: Commit**
 
 ```bash
 git add packages/e2e-tests/test/terminal-e2e.test.js
-git commit -m "test: add P2P terminal session E2E test with Tuwunel"
+git commit -m "test: add full system P2P E2E test with Tuwunel"
 ```
-
----
-
-## Summary
-
-| Task | Component | Description |
-|:---|:---|:---|
-| 1 | Dependencies | Install `node-datachannel` |
-| 2 | BatchedSender | Add dynamic `batchMs` setter |
-| 3 | Config | P2P config fields for launcher + client |
-| 4 | WebRTC (Node) | `NodeWebRTCChannel` wrapper |
-| 5 | WebRTC (Browser) | `BrowserWebRTCChannel` wrapper |
-| 6 | Signaling | `P2PSignaling` for SDP/ICE via Matrix |
-| 7 | Transport | `P2PTransport` adapter with acks + fallback |
-| 8 | Telemetry | P2P discovery block in launcher telemetry |
-| 9 | Launcher | Wire P2P into session handling |
-| 10 | Browser | Wire P2P into terminal-view |
-| 11 | Styles | P2P status indicator CSS |
-| 12 | Settings | P2P toggle in web console settings |
-| 13 | Test | P2P E2E test with loopback WebRTC |
-| 14 | Test | Full system E2E with Tuwunel |
