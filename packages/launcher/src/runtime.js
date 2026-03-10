@@ -155,6 +155,7 @@ export class LauncherRuntime {
   #userDmRooms = new Map(); // userId -> dmRoomId
   #roomMuxes = new Map(); // dmRoomId -> SessionMux
   #p2pCooldowns = new Map(); // dmRoomId -> true (rate-limits P2P attempts to 1 per 60s per room)
+  #telemetryTimer = null;
 
   constructor(config) {
     this.#config = config;
@@ -333,8 +334,12 @@ export class LauncherRuntime {
       log(`Recovered ${recovered} tmux session(s) from previous instance`);
     }
 
-    // Post initial telemetry
+    // Post initial telemetry and start periodic posting
     await this.#postTelemetry();
+    this.#telemetryTimer = setInterval(
+      () => this.#postTelemetry().catch(err => this.#log.warn('telemetry post failed', { error: err.message })),
+      this.#config.telemetryIntervalS * 1000,
+    );
 
     log('Online. Listening for commands...');
     this.#running = true;
@@ -343,6 +348,12 @@ export class LauncherRuntime {
 
   async stop() {
     this.#running = false;
+
+    // Stop periodic telemetry
+    if (this.#telemetryTimer) {
+      clearInterval(this.#telemetryTimer);
+      this.#telemetryTimer = null;
+    }
 
     // Detach persistent sessions so tmux sessions survive launcher restart
     for (const [id, entry] of this.#sessionRegistry) {
@@ -799,6 +810,8 @@ export class LauncherRuntime {
     const level = this.#config.telemetry || 'full';
 
     const telemetry = {
+      timestamp: new Date().toISOString(),
+      heartbeat_interval_ms: this.#config.telemetryIntervalS * 1000,
       hostname: os.hostname(),
       platform: os.platform(),
       arch: os.arch(),
