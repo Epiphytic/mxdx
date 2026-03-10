@@ -376,10 +376,11 @@ export async function setupTerminalView(client, launcher, { onClose, onSessionSt
 
     // Create TerminalSocket on DM room (use negotiated batch window)
     const negotiatedBatchMs = sessionContent.batch_ms || 200;
+    const sessionId = sessionContent.session_id;
 
     // Set up P2P transport (or Matrix-only wrapper) — non-blocking
     const p2pTransport = await setupBrowserP2P(client, dmRoomId, null);
-    const socket = new TerminalSocket(p2pTransport, dmRoomId, { pollIntervalMs: 100, batchMs: negotiatedBatchMs });
+    const socket = new TerminalSocket(p2pTransport, dmRoomId, { pollIntervalMs: 100, batchMs: negotiatedBatchMs, sessionId });
     activeSocket = socket;
 
     // Wire: buffering status indicator
@@ -525,7 +526,7 @@ export async function reconnectTerminalView(client, launcher, session, { onClose
 
     // Set up P2P transport (or Matrix-only wrapper) — non-blocking
     const p2pTransport = await setupBrowserP2P(client, dmRoomId, null);
-    const socket = new TerminalSocket(p2pTransport, dmRoomId, { pollIntervalMs: 100, batchMs: negotiatedBatchMs });
+    const socket = new TerminalSocket(p2pTransport, dmRoomId, { pollIntervalMs: 100, batchMs: negotiatedBatchMs, sessionId: session.session_id });
     activeSocket = socket;
 
     // Wire: buffering status indicator

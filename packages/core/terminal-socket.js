@@ -38,6 +38,7 @@ export class TerminalSocket {
 
   #client;
   #roomId;
+  #sessionId;
   #expectedSeq = 0;
   #buffer = [];
   #closed = false;
@@ -53,17 +54,20 @@ export class TerminalSocket {
    * @param {object} [options]
    * @param {number} [options.pollIntervalMs=200] - Poll interval for incoming events
    * @param {number} [options.batchMs=200] - Send batch window in ms
+   * @param {string} [options.sessionId] - Session ID for multiplexing (filter incoming, tag outgoing)
    * @param {function} [options.onBuffering] - Called with true/false when rate-limit buffering starts/stops
    */
-  constructor(client, roomId, { pollIntervalMs = 200, batchMs = 200, onBuffering = null } = {}) {
+  constructor(client, roomId, { pollIntervalMs = 200, batchMs = 200, sessionId = null, onBuffering = null } = {}) {
     this.#client = client;
     this.#roomId = roomId;
+    this.#sessionId = sessionId;
     this.#pollInterval = pollIntervalMs;
 
     this.#sender = new BatchedSender({
       sendEvent: (rid, type, content) => client.sendEvent(rid, type, content),
       roomId,
       batchMs,
+      sessionId,
       onError: (err) => {
         if (this.onerror) this.onerror(err);
       },
@@ -99,6 +103,9 @@ export class TerminalSocket {
   #handleIncomingData(content) {
     const parsed = TerminalDataEvent.safeParse(content);
     if (!parsed.success) return;
+
+    // Filter by session_id when multiplexing
+    if (this.#sessionId && parsed.data.session_id && parsed.data.session_id !== this.#sessionId) return;
 
     const { data, encoding, seq } = parsed.data;
     this.#decodeAndEmit(data, encoding, seq);
@@ -199,10 +206,12 @@ export class TerminalSocket {
   async resize(cols, rows) {
     if (this.#closed) throw new Error('TerminalSocket is closed');
 
+    const payload = { cols, rows };
+    if (this.#sessionId) payload.session_id = this.#sessionId;
     await this.#client.sendEvent(
       this.#roomId,
       'org.mxdx.terminal.resize',
-      JSON.stringify({ cols, rows }),
+      JSON.stringify(payload),
     );
   }
 

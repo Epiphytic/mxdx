@@ -9,6 +9,7 @@ import { inflateSync } from 'node:zlib';
 
 const DEFAULT_SESSION_DIR = path.join(os.homedir(), '.mxdx');
 const SESSIONS_FILE = 'sessions.json';
+const DM_ROOMS_FILE = 'dm-rooms.json';
 
 const MAX_DECOMPRESSED_SIZE = 1024 * 1024; // 1MB zlib bomb protection
 
@@ -43,6 +44,100 @@ class Logger {
 }
 
 /**
+ * Multiplexes terminal I/O across sessions sharing a single DM room.
+ * One poll loop per room routes events to sessions by session_id.
+ */
+class SessionMux {
+  #transport;
+  #roomId;
+  #launcherUserId;
+  #sessions = new Map(); // sessionId -> { pty }
+  #running = false;
+  #log;
+
+  constructor(transport, roomId, launcherUserId, log) {
+    this.#transport = transport;
+    this.#roomId = roomId;
+    this.#launcherUserId = launcherUserId;
+    this.#log = log;
+  }
+
+  addSession(sessionId, pty) {
+    this.#sessions.set(sessionId, { pty });
+    if (!this.#running) this.#start();
+  }
+
+  removeSession(sessionId) {
+    this.#sessions.delete(sessionId);
+    if (this.#sessions.size === 0) this.#running = false;
+  }
+
+  get sessionCount() { return this.#sessions.size; }
+
+  #start() {
+    this.#running = true;
+    this.#poll().catch((err) => {
+      this.#log.warn('SessionMux poll error', { room_id: this.#roomId, error: err.message });
+    });
+  }
+
+  async #poll() {
+    while (this.#running && this.#sessions.size > 0) {
+      try {
+        const dataJson = await this.#transport.onRoomEvent(
+          this.#roomId, 'org.mxdx.terminal.data', 1,
+        );
+        if (dataJson && dataJson !== 'null') {
+          const event = JSON.parse(dataJson);
+          const content = event.content || event;
+          const sender = event.sender;
+          const sessionId = content.session_id;
+
+          if (sender && sender !== this.#launcherUserId && sessionId) {
+            const session = this.#sessions.get(sessionId);
+            if (session) {
+              this.#processInput(content, session.pty);
+            }
+          }
+        }
+
+        const resizeJson = await this.#transport.onRoomEvent(
+          this.#roomId, 'org.mxdx.terminal.resize', 1,
+        );
+        if (resizeJson && resizeJson !== 'null') {
+          const event = JSON.parse(resizeJson);
+          const content = event.content || event;
+          const sessionId = content.session_id;
+          if (sessionId) {
+            const session = this.#sessions.get(sessionId);
+            if (session && content.cols && content.rows) {
+              session.pty.resize(content.cols, content.rows);
+            }
+          }
+        }
+      } catch {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+  }
+
+  #processInput(content, pty) {
+    const parsed = TerminalDataEvent.safeParse(content);
+    if (!parsed.success) return;
+    const { data, encoding } = parsed.data;
+    const raw = Buffer.from(data, 'base64');
+    if (encoding === 'zlib+base64') {
+      try {
+        const decompressed = inflateSync(raw, { maxOutputLength: MAX_DECOMPRESSED_SIZE });
+        pty.write(new Uint8Array(decompressed));
+      } catch { /* zlib bomb protection */ }
+    } else {
+      pty.write(new Uint8Array(raw));
+    }
+  }
+}
+
+/**
  * The launcher runtime: connects to Matrix, creates rooms, listens for commands.
  */
 export class LauncherRuntime {
@@ -57,6 +152,8 @@ export class LauncherRuntime {
   #lastStoreSave = 0;
   #log;
   #sessionRegistry = new Map(); // sessionId -> { tmuxName, dmRoomId, sender, persistent, pty, createdAt }
+  #userDmRooms = new Map(); // userId -> dmRoomId
+  #roomMuxes = new Map(); // dmRoomId -> SessionMux
 
   constructor(config) {
     this.#config = config;
@@ -106,7 +203,33 @@ export class LauncherRuntime {
     }
   }
 
+  get #dmRoomsFilePath() {
+    return path.join(this.#sessionDir, DM_ROOMS_FILE);
+  }
+
+  #saveDmRooms() {
+    try {
+      const data = Object.fromEntries(this.#userDmRooms);
+      fs.mkdirSync(this.#sessionDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(this.#dmRoomsFilePath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    } catch (err) {
+      this.#log.warn('Failed to save DM rooms file', { error: err.message });
+    }
+  }
+
+  #loadDmRooms() {
+    try {
+      if (!fs.existsSync(this.#dmRoomsFilePath)) return;
+      const data = JSON.parse(fs.readFileSync(this.#dmRoomsFilePath, 'utf8'));
+      for (const [userId, roomId] of Object.entries(data)) {
+        this.#userDmRooms.set(userId, roomId);
+      }
+    } catch { /* ignore */ }
+  }
+
   #recoverSessions() {
+    this.#loadDmRooms();
+
     const saved = this.#loadSessionsFile();
     const liveTmux = PtyBridge.list(this.#socketDir);
     let recovered = 0;
@@ -121,6 +244,10 @@ export class LauncherRuntime {
           pty: null, // no attached PtyBridge yet — will attach on reconnect
           createdAt: entry.createdAt,
         });
+        // Rebuild user DM room cache from recovered sessions
+        if (entry.sender && entry.dmRoomId) {
+          this.#userDmRooms.set(entry.sender, entry.dmRoomId);
+        }
         recovered++;
         this.#log.info('Recovered tmux session', { session_id: sessionId, tmux: entry.tmuxName });
       } else {
@@ -134,6 +261,17 @@ export class LauncherRuntime {
     }
 
     return recovered;
+  }
+
+  /** Get or create a DM room for a user. Cached per user. */
+  async #getDmRoom(userId) {
+    const existing = this.#userDmRooms.get(userId);
+    if (existing) return existing;
+
+    const dmRoomId = await this.#client.createDmRoom(userId);
+    this.#userDmRooms.set(userId, dmRoomId);
+    this.#saveDmRooms();
+    return dmRoomId;
   }
 
   async start() {
@@ -411,25 +549,8 @@ export class LauncherRuntime {
     this.#activeSessions++;
 
     try {
-      // Reuse existing DM room for same sender if available, else create new
-      let dmRoomId;
-      const existingSession = [...this.#sessionRegistry.values()]
-        .find(s => s.sender === sender && s.dmRoomId);
-      if (existingSession) {
-        dmRoomId = existingSession.dmRoomId;
-        this.#log.info('Reusing existing DM room for interactive session', {
-          request_id: requestId,
-          room_id: dmRoomId,
-          sender,
-        });
-      } else {
-        dmRoomId = await this.#client.createDmRoom(sender);
-        this.#log.info('Created new DM room for interactive session', {
-          request_id: requestId,
-          room_id: dmRoomId,
-          sender,
-        });
-      }
+      const dmRoomId = await this.#getDmRoom(sender);
+      this.#log.info('DM room for session', { request_id: requestId, room_id: dmRoomId, sender });
 
       // Spawn PTY bridge with tmux support
       const sessionId = crypto.randomUUID().slice(0, 8);
@@ -466,65 +587,41 @@ export class LauncherRuntime {
       // Set up transport — P2PTransport if enabled, raw Matrix client otherwise
       const transport = await this.#setupSessionTransport(dmRoomId, sender, negotiatedBatchMs);
 
-      // Forward PTY output -> DM room as batched terminal.data events
+      // Forward PTY output -> DM room as batched terminal.data events (tagged with session_id)
       const batchSender = new BatchedSender({
         sendEvent: (roomId, type, content) => transport.sendEvent(roomId, type, content),
         roomId: dmRoomId,
         batchMs: negotiatedBatchMs,
+        sessionId,
         onError: (err, seq) => this.#log.warn('terminal.data send failed', { seq, error: String(err) }),
       });
       pty.onData((data) => batchSender.push(data));
 
-      // Poll for incoming terminal data and resize events from the client
-      const pollForInput = async () => {
+      // Register with room multiplexer for incoming events
+      if (!this.#roomMuxes.has(dmRoomId)) {
+        this.#roomMuxes.set(dmRoomId, new SessionMux(
+          transport, dmRoomId, this.#client.userId(), this.#log,
+        ));
+      }
+      const mux = this.#roomMuxes.get(dmRoomId);
+      mux.addSession(sessionId, pty);
+
+      // Monitor PTY lifecycle
+      const watchPty = async () => {
         while (pty.alive) {
-          try {
-            // Check for terminal data
-            const dataEventJson = await transport.onRoomEvent(
-              dmRoomId,
-              'org.mxdx.terminal.data',
-              1,
-            );
-            if (dataEventJson && dataEventJson !== 'null') {
-              const dataEvent = JSON.parse(dataEventJson);
-              const eventContent = dataEvent.content || dataEvent;
-              const eventSender = dataEvent.sender;
-
-              // Only process events from the client (not our own output)
-              if (eventSender && eventSender !== this.#client.userId()) {
-                this.#processTerminalInput(eventContent, pty);
-              }
-            }
-
-            // Check for resize events
-            const resizeJson = await transport.onRoomEvent(
-              dmRoomId,
-              'org.mxdx.terminal.resize',
-              1,
-            );
-            if (resizeJson && resizeJson !== 'null') {
-              const resizeEvent = JSON.parse(resizeJson);
-              const resizeContent = resizeEvent.content || resizeEvent;
-              const resizeCols = resizeContent.cols;
-              const resizeRows = resizeContent.rows;
-              if (resizeCols && resizeRows) {
-                pty.resize(resizeCols, resizeRows);
-              }
-            }
-          } catch {
-            // Sync error, retry
-            await new Promise((r) => setTimeout(r, 1000));
-          }
+          await new Promise((r) => setTimeout(r, 1000));
         }
       };
 
-      // Run input polling (don't await — let it run in background)
-      pollForInput().finally(() => {
+      watchPty().finally(() => {
+        mux.removeSession(sessionId);
+        batchSender.destroy();
+        if (mux.sessionCount === 0) this.#roomMuxes.delete(dmRoomId);
+
         if (pty.persistent) {
           pty.detach();
           this.#log.info('Interactive session bridge detached (tmux alive)', {
-            request_id: requestId,
-            session_id: sessionId,
+            request_id: requestId, session_id: sessionId,
           });
         } else {
           this.#sessionRegistry.delete(sessionId);
@@ -535,7 +632,6 @@ export class LauncherRuntime {
         this.#activeSessions--;
       });
 
-      // Don't decrement activeSessions here — the finally block above handles it
       return;
     } catch (err) {
       this.#log.error('Interactive session failed', { request_id: requestId, error: err.message || String(err), stack: err.stack });
@@ -600,50 +696,38 @@ export class LauncherRuntime {
       await new Promise((r) => setTimeout(r, 2000));
       await this.#client.syncOnce();
 
-      // Set up transport — P2PTransport if enabled, raw Matrix client otherwise
-      const reconnectTransport = await this.#setupSessionTransport(entry.dmRoomId, sender, this.#config.batchMs || 200);
+      const batchMs = this.#config.batchMs || 200;
+      const transport = await this.#setupSessionTransport(entry.dmRoomId, sender, batchMs);
 
-      // Forward PTY output -> DM room as batched terminal.data events
-      const reconnectSender = new BatchedSender({
-        sendEvent: (roomId, type, content) => reconnectTransport.sendEvent(roomId, type, content),
+      const batchSender = new BatchedSender({
+        sendEvent: (roomId, type, content) => transport.sendEvent(roomId, type, content),
         roomId: entry.dmRoomId,
-        batchMs: this.#config.batchMs || 200,
+        batchMs,
+        sessionId,
         onError: (err, seq) => this.#log.warn('terminal.data send failed', { seq, error: String(err) }),
       });
-      pty.onData((data) => reconnectSender.push(data));
+      pty.onData((data) => batchSender.push(data));
 
-      // Poll for input from client
-      const pollForInput = async () => {
+      // Register with room multiplexer
+      if (!this.#roomMuxes.has(entry.dmRoomId)) {
+        this.#roomMuxes.set(entry.dmRoomId, new SessionMux(
+          transport, entry.dmRoomId, this.#client.userId(), this.#log,
+        ));
+      }
+      const mux = this.#roomMuxes.get(entry.dmRoomId);
+      mux.addSession(sessionId, pty);
+
+      const watchPty = async () => {
         while (pty.alive) {
-          try {
-            const dataEventJson = await reconnectTransport.onRoomEvent(
-              entry.dmRoomId, 'org.mxdx.terminal.data', 1,
-            );
-            if (dataEventJson && dataEventJson !== 'null') {
-              const dataEvent = JSON.parse(dataEventJson);
-              const eventContent = dataEvent.content || dataEvent;
-              const eventSender = dataEvent.sender;
-              if (eventSender && eventSender !== this.#client.userId()) {
-                this.#processTerminalInput(eventContent, pty);
-              }
-            }
-            const resizeJson = await reconnectTransport.onRoomEvent(
-              entry.dmRoomId, 'org.mxdx.terminal.resize', 1,
-            );
-            if (resizeJson && resizeJson !== 'null') {
-              const resizeEvent = JSON.parse(resizeJson);
-              const resizeContent = resizeEvent.content || resizeEvent;
-              if (resizeContent.cols && resizeContent.rows) {
-                pty.resize(resizeContent.cols, resizeContent.rows);
-              }
-            }
-          } catch {
-            await new Promise((r) => setTimeout(r, 1000));
-          }
+          await new Promise((r) => setTimeout(r, 1000));
         }
       };
 
-      pollForInput().finally(() => {
+      watchPty().finally(() => {
+        mux.removeSession(sessionId);
+        batchSender.destroy();
+        if (mux.sessionCount === 0) this.#roomMuxes.delete(entry.dmRoomId);
+
         if (pty.persistent) {
           pty.detach();
           this.#log.info('Reconnected session bridge detached', { session_id: sessionId });
@@ -657,25 +741,6 @@ export class LauncherRuntime {
     } catch (err) {
       this.#log.error('Reconnect failed', { session_id: sessionId, error: err.message });
       await this.#sendSessionResponse(requestId, 'expired', null);
-    }
-  }
-
-  #processTerminalInput(content, pty) {
-    const parsed = TerminalDataEvent.safeParse(content);
-    if (!parsed.success) return;
-
-    const { data, encoding } = parsed.data;
-    const raw = Buffer.from(data, 'base64');
-
-    if (encoding === 'zlib+base64') {
-      try {
-        const decompressed = inflateSync(raw, { maxOutputLength: MAX_DECOMPRESSED_SIZE });
-        pty.write(new Uint8Array(decompressed));
-      } catch {
-        // Decompression failed or exceeded size limit (zlib bomb protection)
-      }
-    } else {
-      pty.write(new Uint8Array(raw));
     }
   }
 

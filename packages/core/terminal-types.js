@@ -4,11 +4,13 @@ export const TerminalDataEvent = z.object({
   data: z.string(),
   encoding: z.string(),
   seq: z.number().int().nonnegative(),
+  session_id: z.string().optional(),
 });
 
 export const TerminalResizeEvent = z.object({
   cols: z.number().int().nonnegative(),
   rows: z.number().int().nonnegative(),
+  session_id: z.string().optional(),
 });
 
 export const TerminalSessionRequestEvent = z.object({
