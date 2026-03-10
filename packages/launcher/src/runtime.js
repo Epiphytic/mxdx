@@ -526,7 +526,7 @@ export class LauncherRuntime {
       // Don't decrement activeSessions here — the finally block above handles it
       return;
     } catch (err) {
-      this.#log.error('Interactive session failed', { request_id: requestId, error: err.message });
+      this.#log.error('Interactive session failed', { request_id: requestId, error: err.message || String(err), stack: err.stack });
       await this.#sendSessionResponse(requestId, 'error', null);
       this.#activeSessions--;
     }
@@ -825,8 +825,9 @@ export class LauncherRuntime {
    */
   async #attemptP2PConnection(transport, dmRoomId, remotePeer) {
     // Fetch TURN credentials from homeserver
-    const server = this.#config.servers[0];
-    const accessToken = this.#client.accessToken();
+    const session = JSON.parse(this.#client.exportSession());
+    const server = session.homeserver_url;
+    const accessToken = session.access_token;
     let iceServers = [];
 
     const turnCreds = await fetchTurnCredentials(server, accessToken);

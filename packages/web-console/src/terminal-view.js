@@ -173,8 +173,9 @@ async function setupBrowserP2P(client, dmRoomId, batchSender) {
  * Attempt to establish browser P2P WebRTC connection.
  */
 async function attemptBrowserP2P(client, transport, dmRoomId, sessionKey) {
-  const homeserverUrl = client.homeserverUrl();
-  const accessToken = client.accessToken();
+  const session = JSON.parse(client.exportSession());
+  const homeserverUrl = session.homeserver_url;
+  const accessToken = session.access_token;
   let iceServers = [];
 
   const turnCreds = await fetchTurnCredentials(homeserverUrl, accessToken);
