@@ -22,16 +22,43 @@ export function setupSettings(client) {
   // Tab bar
   const tabBar = document.createElement('div');
   tabBar.className = 'settings-tabs';
-  const tab = document.createElement('button');
-  tab.className = 'settings-tab active';
-  tab.textContent = 'Server Cleanup';
-  tabBar.appendChild(tab);
+  const cleanupTab = document.createElement('button');
+  cleanupTab.className = 'settings-tab active';
+  cleanupTab.textContent = 'Server Cleanup';
+  tabBar.appendChild(cleanupTab);
+  const p2pTab = document.createElement('button');
+  p2pTab.className = 'settings-tab';
+  p2pTab.textContent = 'P2P Transport';
+  tabBar.appendChild(p2pTab);
   wrapper.appendChild(tabBar);
 
   // Cleanup panel
   const panel = document.createElement('div');
   panel.className = 'cleanup-panel';
   wrapper.appendChild(panel);
+
+  // P2P settings panel
+  const p2pPanel = document.createElement('div');
+  p2pPanel.className = 'cleanup-panel';
+  p2pPanel.hidden = true;
+  wrapper.appendChild(p2pPanel);
+
+  // Tab switching
+  cleanupTab.addEventListener('click', () => {
+    cleanupTab.classList.add('active');
+    p2pTab.classList.remove('active');
+    panel.hidden = false;
+    p2pPanel.hidden = true;
+  });
+  p2pTab.addEventListener('click', () => {
+    p2pTab.classList.add('active');
+    cleanupTab.classList.remove('active');
+    p2pPanel.hidden = false;
+    panel.hidden = true;
+  });
+
+  // --- P2P Settings ---
+  buildP2PSettings(p2pPanel);
 
   // Checkboxes
   const targets = ['devices', 'events', 'rooms'];
@@ -212,6 +239,80 @@ export function setupSettings(client) {
     appendOutput('\nCleanup complete.');
     previewResults = null;
     previewBtn.disabled = false;
+  }
+
+  function buildP2PSettings(container) {
+    // Description
+    const desc = document.createElement('p');
+    desc.style.cssText = 'color: var(--text-muted); font-size: 0.8125rem; margin-bottom: 1rem;';
+    desc.textContent = 'WebRTC P2P data channels bypass homeserver latency for interactive terminal sessions. Terminal data is always Megolm-encrypted on the P2P path.';
+    container.appendChild(desc);
+
+    // P2P Enabled checkbox
+    const enabledLabel = document.createElement('label');
+    enabledLabel.className = 'cleanup-option';
+    const enabledCb = document.createElement('input');
+    enabledCb.type = 'checkbox';
+    enabledCb.checked = localStorage.getItem('mxdx-p2p-enabled') !== 'false';
+    enabledLabel.appendChild(enabledCb);
+    const enabledSpan = document.createElement('span');
+    enabledSpan.textContent = ' Enable P2P transport';
+    enabledLabel.appendChild(enabledSpan);
+    container.appendChild(enabledLabel);
+
+    enabledCb.addEventListener('change', () => {
+      localStorage.setItem('mxdx-p2p-enabled', enabledCb.checked ? 'true' : 'false');
+    });
+
+    // Batch Ms input
+    const batchLabel = document.createElement('label');
+    batchLabel.className = 'cleanup-pw-label';
+    batchLabel.textContent = 'P2P batch interval (ms) — lower = more responsive, higher = fewer messages';
+    container.appendChild(batchLabel);
+    const batchInput = document.createElement('input');
+    batchInput.type = 'number';
+    batchInput.className = 'cleanup-input';
+    batchInput.min = '1';
+    batchInput.max = '1000';
+    batchInput.value = clampP2PValue(localStorage.getItem('mxdx-p2p-batch-ms'), 10, 1, 1000);
+    container.appendChild(batchInput);
+
+    batchInput.addEventListener('change', () => {
+      const val = clampP2PValue(batchInput.value, 10, 1, 1000);
+      batchInput.value = val;
+      localStorage.setItem('mxdx-p2p-batch-ms', String(val));
+    });
+
+    // Idle timeout input
+    const idleLabel = document.createElement('label');
+    idleLabel.className = 'cleanup-pw-label';
+    idleLabel.textContent = 'P2P idle timeout (seconds) — P2P channel torn down after this much inactivity';
+    container.appendChild(idleLabel);
+    const idleInput = document.createElement('input');
+    idleInput.type = 'number';
+    idleInput.className = 'cleanup-input';
+    idleInput.min = '30';
+    idleInput.max = '3600';
+    idleInput.value = clampP2PValue(localStorage.getItem('mxdx-p2p-idle-timeout-s'), 300, 30, 3600);
+    container.appendChild(idleInput);
+
+    idleInput.addEventListener('change', () => {
+      const val = clampP2PValue(idleInput.value, 300, 30, 3600);
+      idleInput.value = val;
+      localStorage.setItem('mxdx-p2p-idle-timeout-s', String(val));
+    });
+
+    // Status line
+    const statusLine = document.createElement('p');
+    statusLine.style.cssText = 'color: var(--text-muted); font-size: 0.75rem; margin-top: 1rem;';
+    statusLine.textContent = 'Changes take effect on the next terminal session.';
+    container.appendChild(statusLine);
+  }
+
+  function clampP2PValue(raw, defaultVal, min, max) {
+    const n = parseInt(raw, 10);
+    if (isNaN(n)) return defaultVal;
+    return Math.max(min, Math.min(max, n));
   }
 
   function showConfirmModal(onConfirm) {
