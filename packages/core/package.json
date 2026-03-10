@@ -13,7 +13,8 @@
     "terminal-types.js",
     "cleanup.js",
     "batched-sender.js",
-    "turn-credentials.js"
+    "turn-credentials.js",
+    "webrtc-channel-node.js"
   ],
   "dependencies": {
     "fake-indexeddb": "^6.2.5",

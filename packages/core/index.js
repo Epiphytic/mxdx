@@ -10,3 +10,4 @@ export { BatchedSender } from './batched-sender.js';
 export * from './terminal-types.js';
 export { parseOlderThan, cleanupDevices, cleanupRooms, cleanupEvents, logoutAll } from './cleanup.js';
 export { fetchTurnCredentials, turnToIceServers } from './turn-credentials.js';
+export { NodeWebRTCChannel } from './webrtc-channel-node.js';
