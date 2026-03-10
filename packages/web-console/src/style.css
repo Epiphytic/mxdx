@@ -171,6 +171,19 @@ body {
   color: var(--accent);
 }
 
+.launcher-status {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  margin-left: 8px;
+}
+.launcher-status--available { background: #22c55e22; color: #22c55e; }
+.launcher-status--slow { background: #eab30822; color: #eab308; }
+.launcher-status--not-responding { background: #ef444422; color: #ef4444; }
+.launcher-status--unavailable { background: #6b728022; color: #6b7280; }
+
 .launcher-card .telemetry {
   font-size: 0.8125rem;
   color: var(--text-muted);
