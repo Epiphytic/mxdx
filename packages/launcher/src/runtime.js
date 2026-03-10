@@ -411,13 +411,25 @@ export class LauncherRuntime {
     this.#activeSessions++;
 
     try {
-      // Create E2EE DM room with history_visibility: joined
-      const dmRoomId = await this.#client.createDmRoom(sender);
-      this.#log.info('Created DM room for interactive session', {
-        request_id: requestId,
-        room_id: dmRoomId,
-        sender,
-      });
+      // Reuse existing DM room for same sender if available, else create new
+      let dmRoomId;
+      const existingSession = [...this.#sessionRegistry.values()]
+        .find(s => s.sender === sender && s.dmRoomId);
+      if (existingSession) {
+        dmRoomId = existingSession.dmRoomId;
+        this.#log.info('Reusing existing DM room for interactive session', {
+          request_id: requestId,
+          room_id: dmRoomId,
+          sender,
+        });
+      } else {
+        dmRoomId = await this.#client.createDmRoom(sender);
+        this.#log.info('Created new DM room for interactive session', {
+          request_id: requestId,
+          room_id: dmRoomId,
+          sender,
+        });
+      }
 
       // Spawn PTY bridge with tmux support
       const sessionId = crypto.randomUUID().slice(0, 8);
