@@ -237,5 +237,6 @@ export class BatchedSender {
   }
 
   get batchMs() { return this.#batchMs; }
+  set batchMs(ms) { this.#batchMs = ms; }
   get queueLength() { return this.#queue.length; }
 }
