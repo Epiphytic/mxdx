@@ -148,6 +148,9 @@ describe('WASM: Extended Command Tests', { timeout: 120000 }, () => {
     const launcherId = `cmd-list-${Date.now()}`;
     await client.getOrCreateLauncherSpace(launcherId);
 
+    // Sync to pick up newly created space
+    await client.syncOnce();
+
     // List all spaces
     const launchersJson = await client.listLauncherSpaces();
     const launchers = JSON.parse(launchersJson);
