@@ -51,6 +51,9 @@ describe('Multi-launcher per account', { timeout: 120000 }, () => {
     console.log(`[multi-launcher] host-alpha: space=${topologyA.space_id}, exec=${topologyA.exec_room_id}`);
     console.log(`[multi-launcher] host-beta: space=${topologyB.space_id}, exec=${topologyB.exec_room_id}`);
 
+    // Sync to pick up both spaces before listing
+    await sharedClient.syncOnce();
+
     // Verify listLauncherSpaces returns both
     const launchersJson = await sharedClient.listLauncherSpaces();
     const launchers = JSON.parse(launchersJson);
