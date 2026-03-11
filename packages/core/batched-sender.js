@@ -84,6 +84,7 @@ async function defaultCompress(data) {
  * @param {number} [options.batchMs=200] - Batch window in milliseconds
  * @param {function} [options.compress] - async (Uint8Array) => { encoded, encoding }
  * @param {function} [options.onError] - Called on non-retryable send errors
+ * @param {string} [options.sessionId] - Session ID to include in events (for room multiplexing)
  * @param {function} [options.onBuffering] - Called with (true) when rate-limited, (false) when cleared
  */
 export class BatchedSender {
@@ -91,6 +92,7 @@ export class BatchedSender {
   #compress;
   #roomId;
   #eventType;
+  #sessionId;
   #seq = 0;
   #buffer = [];
   #flushTimer = null;
@@ -107,6 +109,7 @@ export class BatchedSender {
     roomId,
     eventType = 'org.mxdx.terminal.data',
     batchMs = 200,
+    sessionId = null,
     compress = defaultCompress,
     onError = null,
     onBuffering = null,
@@ -114,6 +117,7 @@ export class BatchedSender {
     this.#sendEvent = sendEvent;
     this.#roomId = roomId;
     this.#eventType = eventType;
+    this.#sessionId = sessionId;
     this.#batchMs = batchMs;
     this.#compress = compress;
     this.#onError = onError;
@@ -161,10 +165,12 @@ export class BatchedSender {
       const { encoded, encoding } = await this.#compress(data);
 
       try {
+        const payload = { data: encoded, encoding, seq };
+        if (this.#sessionId) payload.session_id = this.#sessionId;
         await this.#sendEvent(
           this.#roomId,
           this.#eventType,
-          JSON.stringify({ data: encoded, encoding, seq }),
+          JSON.stringify(payload),
         );
         this.#queue.shift();
         // Clear buffering state after successful send
@@ -237,5 +243,6 @@ export class BatchedSender {
   }
 
   get batchMs() { return this.#batchMs; }
+  set batchMs(ms) { this.#batchMs = ms; }
   get queueLength() { return this.#queue.length; }
 }

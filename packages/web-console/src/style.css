@@ -171,6 +171,19 @@ body {
   color: var(--accent);
 }
 
+.launcher-status {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  margin-left: 8px;
+}
+.launcher-status--available { background: #22c55e22; color: #22c55e; }
+.launcher-status--slow { background: #eab30822; color: #eab308; }
+.launcher-status--not-responding { background: #ef444422; color: #ef4444; }
+.launcher-status--unavailable { background: #6b728022; color: #6b7280; }
+
 .launcher-card .telemetry {
   font-size: 0.8125rem;
   color: var(--text-muted);
@@ -274,13 +287,21 @@ body {
 }
 
 #terminal-status {
-  color: #f0ad4e;
   font-size: 0.75rem;
   margin-left: auto;
-  padding: 0.125rem 0.5rem;
+  padding: 2px 8px;
   border-radius: 3px;
-  background: rgba(240, 173, 78, 0.15);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
 }
+
+#terminal-status.status-matrix { color: #888; background: rgba(136, 136, 136, 0.1); }
+#terminal-status.status-connecting { color: #d4a017; background: rgba(212, 160, 23, 0.15); }
+#terminal-status.status-p2p { color: #22c55e; background: rgba(34, 197, 94, 0.15); }
+#terminal-status.status-matrix-lost { color: #d4a017; background: rgba(212, 160, 23, 0.15); }
+#terminal-status.status-turn-limit { color: #d4a017; background: rgba(212, 160, 23, 0.15); }
+#terminal-status.status-turn-unreachable { color: #d4a017; background: rgba(212, 160, 23, 0.15); }
+#terminal-status.status-direct-only { color: #888; background: rgba(136, 136, 136, 0.1); }
+#terminal-status.status-rate-limited { color: #ef4444; background: rgba(239, 68, 68, 0.15); }
 
 #terminal-container {
   flex: 1;

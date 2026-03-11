@@ -9,3 +9,8 @@ export { TerminalSocket } from './terminal-socket.js';
 export { BatchedSender } from './batched-sender.js';
 export * from './terminal-types.js';
 export { parseOlderThan, cleanupDevices, cleanupRooms, cleanupEvents, logoutAll } from './cleanup.js';
+export { fetchTurnCredentials, turnToIceServers } from './turn-credentials.js';
+export { NodeWebRTCChannel } from './webrtc-channel-node.js';
+export { P2PSignaling } from './p2p-signaling.js';
+export { P2PTransport } from './p2p-transport.js';
+export { P2PCrypto, generateSessionKey, createP2PCrypto } from './p2p-crypto.js';

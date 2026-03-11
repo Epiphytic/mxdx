@@ -3,6 +3,19 @@ import { runExecCommand } from './exec-view.js';
 let refreshTimer = null;
 const cachedSessions = {}; // { exec_room_id: [session, ...] }
 
+function computeAvailability(telemetry) {
+  if (!telemetry || !telemetry.timestamp || !telemetry.heartbeat_interval_ms) {
+    return { status: 'unavailable', label: 'Unavailable' };
+  }
+  const age = Math.max(0, Date.now() - new Date(telemetry.timestamp).getTime());
+  const interval = telemetry.heartbeat_interval_ms;
+  const ratio = age / interval;
+
+  if (ratio <= 1.1) return { status: 'available', label: 'Available' };
+  if (ratio <= 2.0) return { status: 'slow', label: 'Slow to respond' };
+  return { status: 'not-responding', label: 'Not responding' };
+}
+
 export function stopDashboardRefresh() {
   if (refreshTimer) {
     clearInterval(refreshTimer);
@@ -80,6 +93,7 @@ async function render(client, onOpenTerminal, onReconnect) {
     const launcherData = launchers.map((launcher, i) => ({
       ...launcher,
       telemetry: telemetryResults[i],
+      availability: computeAvailability(telemetryResults[i]),
       sessions: cachedSessions[launcher.exec_room_id] || [],
     }));
 
@@ -129,6 +143,12 @@ function renderCard(launcher, client, onOpenTerminal, onReconnect) {
 
   const title = document.createElement('h3');
   title.textContent = launcher.launcher_id;
+
+  const badge = document.createElement('span');
+  badge.className = `launcher-status launcher-status--${launcher.availability.status}`;
+  badge.textContent = launcher.availability.label;
+  title.appendChild(badge);
+
   card.appendChild(title);
 
   // Telemetry
@@ -156,6 +176,11 @@ function renderCard(launcher, client, onOpenTerminal, onReconnect) {
   const termBtn = document.createElement('button');
   termBtn.className = 'btn btn-primary';
   termBtn.textContent = 'Open Terminal';
+  if (launcher.availability.status === 'unavailable' || launcher.availability.status === 'not-responding') {
+    termBtn.disabled = true;
+    termBtn.title = launcher.availability.label;
+  }
+
   termBtn.addEventListener('click', () => {
     if (refreshTimer) {
       clearInterval(refreshTimer);

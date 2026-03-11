@@ -15,7 +15,10 @@ program
   .option('--registration-token <tok>', 'Registration token')
   .option('--format <text|json>', 'Output format', 'text')
   .option('--config <path>', 'Config file path')
-  .option('--batch-ms <ms>', 'Terminal output batch window in ms', '200');
+  .option('--batch-ms <ms>', 'Terminal output batch window in ms', '200')
+  .option('--p2p-enabled <bool>', 'Enable P2P transport (default: true)')
+  .option('--p2p-batch-ms <ms>', 'P2P batch window in ms (default: 10)')
+  .option('--p2p-idle-timeout-s <seconds>', 'P2P idle timeout in seconds (default: 300)');
 
 program
   .command('exec <launcher> [cmd...]')

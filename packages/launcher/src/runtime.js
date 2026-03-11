@@ -2,13 +2,14 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { connectWithSession, TerminalDataEvent, saveIndexedDB, BatchedSender } from '@mxdx/core';
+import { connectWithSession, TerminalDataEvent, saveIndexedDB, BatchedSender, fetchTurnCredentials, turnToIceServers, NodeWebRTCChannel, P2PSignaling, P2PTransport, generateSessionKey, createP2PCrypto } from '@mxdx/core';
 import { executeCommand } from './process-bridge.js';
 import { PtyBridge } from './pty-bridge.js';
 import { inflateSync } from 'node:zlib';
 
 const DEFAULT_SESSION_DIR = path.join(os.homedir(), '.mxdx');
 const SESSIONS_FILE = 'sessions.json';
+const SESSION_ROOMS_FILE = 'session-rooms.json';
 
 const MAX_DECOMPRESSED_SIZE = 1024 * 1024; // 1MB zlib bomb protection
 
@@ -43,6 +44,100 @@ class Logger {
 }
 
 /**
+ * Multiplexes terminal I/O across sessions sharing a single DM room.
+ * One poll loop per room routes events to sessions by session_id.
+ */
+class SessionMux {
+  #transport;
+  #roomId;
+  #launcherUserId;
+  #sessions = new Map(); // sessionId -> { pty }
+  #running = false;
+  #log;
+
+  constructor(transport, roomId, launcherUserId, log) {
+    this.#transport = transport;
+    this.#roomId = roomId;
+    this.#launcherUserId = launcherUserId;
+    this.#log = log;
+  }
+
+  addSession(sessionId, pty) {
+    this.#sessions.set(sessionId, { pty });
+    if (!this.#running) this.#start();
+  }
+
+  removeSession(sessionId) {
+    this.#sessions.delete(sessionId);
+    if (this.#sessions.size === 0) this.#running = false;
+  }
+
+  get sessionCount() { return this.#sessions.size; }
+
+  #start() {
+    this.#running = true;
+    this.#poll().catch((err) => {
+      this.#log.warn('SessionMux poll error', { room_id: this.#roomId, error: err.message });
+    });
+  }
+
+  async #poll() {
+    while (this.#running && this.#sessions.size > 0) {
+      try {
+        const dataJson = await this.#transport.onRoomEvent(
+          this.#roomId, 'org.mxdx.terminal.data', 1,
+        );
+        if (dataJson && dataJson !== 'null') {
+          const event = JSON.parse(dataJson);
+          const content = event.content || event;
+          const sender = event.sender;
+          const sessionId = content.session_id;
+
+          if (sender && sender !== this.#launcherUserId && sessionId) {
+            const session = this.#sessions.get(sessionId);
+            if (session) {
+              this.#processInput(content, session.pty);
+            }
+          }
+        }
+
+        const resizeJson = await this.#transport.onRoomEvent(
+          this.#roomId, 'org.mxdx.terminal.resize', 1,
+        );
+        if (resizeJson && resizeJson !== 'null') {
+          const event = JSON.parse(resizeJson);
+          const content = event.content || event;
+          const sessionId = content.session_id;
+          if (sessionId) {
+            const session = this.#sessions.get(sessionId);
+            if (session && content.cols && content.rows) {
+              session.pty.resize(content.cols, content.rows);
+            }
+          }
+        }
+      } catch {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+  }
+
+  #processInput(content, pty) {
+    const parsed = TerminalDataEvent.safeParse(content);
+    if (!parsed.success) return;
+    const { data, encoding } = parsed.data;
+    const raw = Buffer.from(data, 'base64');
+    if (encoding === 'zlib+base64') {
+      try {
+        const decompressed = inflateSync(raw, { maxOutputLength: MAX_DECOMPRESSED_SIZE });
+        pty.write(new Uint8Array(decompressed));
+      } catch { /* zlib bomb protection */ }
+    } else {
+      pty.write(new Uint8Array(raw));
+    }
+  }
+}
+
+/**
  * The launcher runtime: connects to Matrix, creates rooms, listens for commands.
  */
 export class LauncherRuntime {
@@ -57,6 +152,10 @@ export class LauncherRuntime {
   #lastStoreSave = 0;
   #log;
   #sessionRegistry = new Map(); // sessionId -> { tmuxName, dmRoomId, sender, persistent, pty, createdAt }
+  #sessionRooms = new Map(); // "hostname:clientUserId" -> roomId
+  #roomMuxes = new Map(); // dmRoomId -> SessionMux
+  #roomTransports = new Map(); // roomId -> { transport, p2pCrypto, refCount, lastP2PAttempt }
+  #telemetryTimer = null;
 
   constructor(config) {
     this.#config = config;
@@ -106,7 +205,37 @@ export class LauncherRuntime {
     }
   }
 
+  get #sessionRoomsFilePath() {
+    return path.join(this.#sessionDir, SESSION_ROOMS_FILE);
+  }
+
+  #sessionRoomKey(clientUserId) {
+    return `${this.#config.username}:${clientUserId}`;
+  }
+
+  #saveSessionRooms() {
+    try {
+      const data = Object.fromEntries(this.#sessionRooms);
+      fs.mkdirSync(this.#sessionDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(this.#sessionRoomsFilePath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    } catch (err) {
+      this.#log.warn('Failed to save session rooms file', { error: err.message });
+    }
+  }
+
+  #loadSessionRooms() {
+    try {
+      if (!fs.existsSync(this.#sessionRoomsFilePath)) return;
+      const data = JSON.parse(fs.readFileSync(this.#sessionRoomsFilePath, 'utf8'));
+      for (const [key, roomId] of Object.entries(data)) {
+        this.#sessionRooms.set(key, roomId);
+      }
+    } catch { /* ignore */ }
+  }
+
   #recoverSessions() {
+    this.#loadSessionRooms();
+
     const saved = this.#loadSessionsFile();
     const liveTmux = PtyBridge.list(this.#socketDir);
     let recovered = 0;
@@ -128,12 +257,40 @@ export class LauncherRuntime {
       }
     }
 
+    // Rebuild session rooms cache from recovered sessions
+    for (const [, session] of this.#sessionRegistry) {
+      if (session.dmRoomId && session.sender) {
+        const key = this.#sessionRoomKey(session.sender);
+        if (!this.#sessionRooms.has(key)) {
+          this.#sessionRooms.set(key, session.dmRoomId);
+        }
+      }
+    }
+
     // Clean up sessions file to remove stale entries
     if (recovered > 0 || Object.keys(saved).length > 0) {
       this.#saveSessionsFile();
     }
 
     return recovered;
+  }
+
+  /** Get or create a session room for a client user. Keyed by hostname:clientUserId. */
+  async #getSessionRoom(clientUserId) {
+    const key = this.#sessionRoomKey(clientUserId);
+    const existing = this.#sessionRooms.get(key);
+    if (existing) return existing;
+
+    const topic = `org.mxdx.launcher.sessions:${this.#config.username}:${clientUserId}`;
+    const roomId = await this.#client.createRoom(JSON.stringify({
+      invite: [clientUserId],
+      topic,
+      preset: 'trusted_private_chat',
+    }));
+
+    this.#sessionRooms.set(key, roomId);
+    this.#saveSessionRooms();
+    return roomId;
   }
 
   async start() {
@@ -194,8 +351,12 @@ export class LauncherRuntime {
       log(`Recovered ${recovered} tmux session(s) from previous instance`);
     }
 
-    // Post initial telemetry
+    // Post initial telemetry and start periodic posting
     await this.#postTelemetry();
+    this.#telemetryTimer = setInterval(
+      () => this.#postTelemetry().catch(err => this.#log.warn('telemetry post failed', { error: err.message })),
+      this.#config.telemetryIntervalS * 1000,
+    );
 
     log('Online. Listening for commands...');
     this.#running = true;
@@ -205,6 +366,12 @@ export class LauncherRuntime {
   async stop() {
     this.#running = false;
 
+    // Stop periodic telemetry
+    if (this.#telemetryTimer) {
+      clearInterval(this.#telemetryTimer);
+      this.#telemetryTimer = null;
+    }
+
     // Detach persistent sessions so tmux sessions survive launcher restart
     for (const [id, entry] of this.#sessionRegistry) {
       if (entry.persistent && entry.pty) {
@@ -212,6 +379,12 @@ export class LauncherRuntime {
         entry.pty.detach();
       }
     }
+
+    // Close all room transports
+    for (const [, entry] of this.#roomTransports) {
+      entry.transport.close();
+    }
+    this.#roomTransports.clear();
 
     // Save session metadata for recovery on next start
     this.#saveSessionsFile();
@@ -411,13 +584,8 @@ export class LauncherRuntime {
     this.#activeSessions++;
 
     try {
-      // Create E2EE DM room with history_visibility: joined
-      const dmRoomId = await this.#client.createDmRoom(sender);
-      this.#log.info('Created DM room for interactive session', {
-        request_id: requestId,
-        room_id: dmRoomId,
-        sender,
-      });
+      const dmRoomId = await this.#getSessionRoom(sender);
+      this.#log.info('DM room for session', { request_id: requestId, room_id: dmRoomId, sender });
 
       // Spawn PTY bridge with tmux support
       const sessionId = crypto.randomUUID().slice(0, 8);
@@ -444,72 +612,48 @@ export class LauncherRuntime {
         batch_ms: negotiatedBatchMs,
       });
 
-      // Wait for the client to join the DM
-      await new Promise((r) => setTimeout(r, 2000));
+      // Sync to pick up any join events (client may already be in room)
       await this.#client.syncOnce();
 
-      // Wait for PTY to initialize
-      await new Promise((r) => setTimeout(r, 500));
+      // Set up transport — P2PTransport if enabled, raw Matrix client otherwise
+      const transport = await this.#setupSessionTransport(dmRoomId, sender, negotiatedBatchMs);
 
-      // Forward PTY output -> DM room as batched terminal.data events
+      // Forward PTY output -> DM room as batched terminal.data events (tagged with session_id)
       const batchSender = new BatchedSender({
-        sendEvent: (roomId, type, content) => this.#client.sendEvent(roomId, type, content),
+        sendEvent: (roomId, type, content) => transport.sendEvent(roomId, type, content),
         roomId: dmRoomId,
         batchMs: negotiatedBatchMs,
+        sessionId,
         onError: (err, seq) => this.#log.warn('terminal.data send failed', { seq, error: String(err) }),
       });
       pty.onData((data) => batchSender.push(data));
 
-      // Poll for incoming terminal data and resize events from the client
-      const pollForInput = async () => {
+      // Register with room multiplexer for incoming events
+      if (!this.#roomMuxes.has(dmRoomId)) {
+        this.#roomMuxes.set(dmRoomId, new SessionMux(
+          transport, dmRoomId, this.#client.userId(), this.#log,
+        ));
+      }
+      const mux = this.#roomMuxes.get(dmRoomId);
+      mux.addSession(sessionId, pty);
+
+      // Monitor PTY lifecycle
+      const watchPty = async () => {
         while (pty.alive) {
-          try {
-            // Check for terminal data
-            const dataEventJson = await this.#client.onRoomEvent(
-              dmRoomId,
-              'org.mxdx.terminal.data',
-              1,
-            );
-            if (dataEventJson && dataEventJson !== 'null') {
-              const dataEvent = JSON.parse(dataEventJson);
-              const eventContent = dataEvent.content || dataEvent;
-              const eventSender = dataEvent.sender;
-
-              // Only process events from the client (not our own output)
-              if (eventSender && eventSender !== this.#client.userId()) {
-                this.#processTerminalInput(eventContent, pty);
-              }
-            }
-
-            // Check for resize events
-            const resizeJson = await this.#client.onRoomEvent(
-              dmRoomId,
-              'org.mxdx.terminal.resize',
-              1,
-            );
-            if (resizeJson && resizeJson !== 'null') {
-              const resizeEvent = JSON.parse(resizeJson);
-              const resizeContent = resizeEvent.content || resizeEvent;
-              const resizeCols = resizeContent.cols;
-              const resizeRows = resizeContent.rows;
-              if (resizeCols && resizeRows) {
-                pty.resize(resizeCols, resizeRows);
-              }
-            }
-          } catch {
-            // Sync error, retry
-            await new Promise((r) => setTimeout(r, 1000));
-          }
+          await new Promise((r) => setTimeout(r, 1000));
         }
       };
 
-      // Run input polling (don't await — let it run in background)
-      pollForInput().finally(() => {
+      watchPty().finally(() => {
+        mux.removeSession(sessionId);
+        batchSender.destroy();
+        this.#releaseRoomTransport(dmRoomId);
+        if (mux.sessionCount === 0) this.#roomMuxes.delete(dmRoomId);
+
         if (pty.persistent) {
           pty.detach();
           this.#log.info('Interactive session bridge detached (tmux alive)', {
-            request_id: requestId,
-            session_id: sessionId,
+            request_id: requestId, session_id: sessionId,
           });
         } else {
           this.#sessionRegistry.delete(sessionId);
@@ -520,10 +664,10 @@ export class LauncherRuntime {
         this.#activeSessions--;
       });
 
-      // Don't decrement activeSessions here — the finally block above handles it
       return;
     } catch (err) {
-      this.#log.error('Interactive session failed', { request_id: requestId, error: err.message });
+      this.#releaseRoomTransport(dmRoomId);
+      this.#log.error('Interactive session failed', { request_id: requestId, error: err.message || String(err), stack: err.stack });
       await this.#sendSessionResponse(requestId, 'error', null);
       this.#activeSessions--;
     }
@@ -582,50 +726,41 @@ export class LauncherRuntime {
         persistent: true,
       });
 
-      await new Promise((r) => setTimeout(r, 2000));
       await this.#client.syncOnce();
 
-      // Forward PTY output -> DM room as batched terminal.data events
-      const reconnectSender = new BatchedSender({
-        sendEvent: (roomId, type, content) => this.#client.sendEvent(roomId, type, content),
+      const batchMs = this.#config.batchMs || 200;
+      const transport = await this.#setupSessionTransport(entry.dmRoomId, sender, batchMs);
+
+      const batchSender = new BatchedSender({
+        sendEvent: (roomId, type, content) => transport.sendEvent(roomId, type, content),
         roomId: entry.dmRoomId,
-        batchMs: this.#config.batchMs || 200,
+        batchMs,
+        sessionId,
         onError: (err, seq) => this.#log.warn('terminal.data send failed', { seq, error: String(err) }),
       });
-      pty.onData((data) => reconnectSender.push(data));
+      pty.onData((data) => batchSender.push(data));
 
-      // Poll for input from client
-      const pollForInput = async () => {
+      // Register with room multiplexer
+      if (!this.#roomMuxes.has(entry.dmRoomId)) {
+        this.#roomMuxes.set(entry.dmRoomId, new SessionMux(
+          transport, entry.dmRoomId, this.#client.userId(), this.#log,
+        ));
+      }
+      const mux = this.#roomMuxes.get(entry.dmRoomId);
+      mux.addSession(sessionId, pty);
+
+      const watchPty = async () => {
         while (pty.alive) {
-          try {
-            const dataEventJson = await this.#client.onRoomEvent(
-              entry.dmRoomId, 'org.mxdx.terminal.data', 1,
-            );
-            if (dataEventJson && dataEventJson !== 'null') {
-              const dataEvent = JSON.parse(dataEventJson);
-              const eventContent = dataEvent.content || dataEvent;
-              const eventSender = dataEvent.sender;
-              if (eventSender && eventSender !== this.#client.userId()) {
-                this.#processTerminalInput(eventContent, pty);
-              }
-            }
-            const resizeJson = await this.#client.onRoomEvent(
-              entry.dmRoomId, 'org.mxdx.terminal.resize', 1,
-            );
-            if (resizeJson && resizeJson !== 'null') {
-              const resizeEvent = JSON.parse(resizeJson);
-              const resizeContent = resizeEvent.content || resizeEvent;
-              if (resizeContent.cols && resizeContent.rows) {
-                pty.resize(resizeContent.cols, resizeContent.rows);
-              }
-            }
-          } catch {
-            await new Promise((r) => setTimeout(r, 1000));
-          }
+          await new Promise((r) => setTimeout(r, 1000));
         }
       };
 
-      pollForInput().finally(() => {
+      watchPty().finally(() => {
+        mux.removeSession(sessionId);
+        batchSender.destroy();
+        this.#releaseRoomTransport(entry.dmRoomId);
+        if (mux.sessionCount === 0) this.#roomMuxes.delete(entry.dmRoomId);
+
         if (pty.persistent) {
           pty.detach();
           this.#log.info('Reconnected session bridge detached', { session_id: sessionId });
@@ -639,25 +774,6 @@ export class LauncherRuntime {
     } catch (err) {
       this.#log.error('Reconnect failed', { session_id: sessionId, error: err.message });
       await this.#sendSessionResponse(requestId, 'expired', null);
-    }
-  }
-
-  #processTerminalInput(content, pty) {
-    const parsed = TerminalDataEvent.safeParse(content);
-    if (!parsed.success) return;
-
-    const { data, encoding } = parsed.data;
-    const raw = Buffer.from(data, 'base64');
-
-    if (encoding === 'zlib+base64') {
-      try {
-        const decompressed = inflateSync(raw, { maxOutputLength: MAX_DECOMPRESSED_SIZE });
-        pty.write(new Uint8Array(decompressed));
-      } catch {
-        // Decompression failed or exceeded size limit (zlib bomb protection)
-      }
-    } else {
-      pty.write(new Uint8Array(raw));
     }
   }
 
@@ -720,6 +836,8 @@ export class LauncherRuntime {
     const level = this.#config.telemetry || 'full';
 
     const telemetry = {
+      timestamp: new Date().toISOString(),
+      heartbeat_interval_ms: this.#config.telemetryIntervalS * 1000,
       hostname: os.hostname(),
       platform: os.platform(),
       arch: os.arch(),
@@ -740,11 +858,203 @@ export class LauncherRuntime {
       (this.#config.useTmux === 'always') ? true :
       tmuxInfo.available;
 
+    // P2P capability advertisement
+    telemetry.p2p = {
+      enabled: this.#config.p2pEnabled !== false,
+    };
+    // Internal IPs only when explicitly enabled — state events persist indefinitely
+    if (this.#config.p2pAdvertiseIps) {
+      telemetry.p2p.internal_ips = this.#getInternalIps();
+    }
+
     await this.#client.sendStateEvent(
       this.#topology.exec_room_id,
       'org.mxdx.host_telemetry',
       '',
       JSON.stringify(telemetry),
     );
+  }
+
+  /**
+   * Set up transport for a terminal session.
+   * Returns P2PTransport (with Matrix fallback) when P2P is enabled,
+   * or a thin Matrix client wrapper when P2P is disabled.
+   * One P2PTransport is shared across all sessions in a room.
+   */
+  async #setupSessionTransport(dmRoomId, remotePeer, batchMs) {
+    // When P2P is disabled, return raw Matrix client interface
+    if (this.#config.p2pEnabled === false) {
+      return {
+        sendEvent: (roomId, type, content) => this.#client.sendEvent(roomId, type, content),
+        onRoomEvent: (roomId, type, timeout) => this.#client.onRoomEvent(roomId, type, timeout),
+        close: () => {},
+      };
+    }
+
+    // Check for existing room transport
+    const existing = this.#roomTransports.get(dmRoomId);
+    if (existing) {
+      existing.refCount++;
+      return existing.transport;
+    }
+
+    // Create new room-scoped transport
+    const idleTimeoutMs = (this.#config.p2pIdleTimeoutS || 300) * 1000;
+    const sessionKey = await generateSessionKey();
+    const p2pCrypto = await createP2PCrypto(sessionKey);
+
+    const transport = P2PTransport.create({
+      matrixClient: {
+        sendEvent: (roomId, type, content) => this.#client.sendEvent(roomId, type, content),
+        onRoomEvent: (roomId, type, timeout) => this.#client.onRoomEvent(roomId, type, timeout),
+        userId: () => this.#client.userId(),
+      },
+      p2pCrypto,
+      localDeviceId: this.#client.deviceId(),
+      idleTimeoutMs,
+      onStatusChange: (status) => {
+        this.#log.info('P2P transport status changed', { status, room_id: dmRoomId });
+      },
+      onReconnectNeeded: () => {
+        this.#attemptP2PConnection(dmRoomId).catch((err) => {
+          this.#log.warn('P2P reconnect failed', { error: err.message, room_id: dmRoomId });
+        });
+      },
+      onHangup: (reason) => {
+        this.#log.info('P2P hangup', { reason, room_id: dmRoomId });
+      },
+    });
+
+    this.#roomTransports.set(dmRoomId, { transport, p2pCrypto, refCount: 1, lastP2PAttempt: 0 });
+
+    // Attempt P2P (non-blocking, rate-limited)
+    this.#attemptP2PConnection(dmRoomId).catch((err) => {
+      this.#log.warn('Initial P2P connection failed, continuing on Matrix', {
+        error: err.message, room_id: dmRoomId,
+      });
+    });
+
+    return transport;
+  }
+
+  #releaseRoomTransport(roomId) {
+    const entry = this.#roomTransports.get(roomId);
+    if (!entry) return;
+    entry.refCount--;
+    if (entry.refCount <= 0) {
+      entry.transport.close();
+      this.#roomTransports.delete(roomId);
+    }
+  }
+
+  /**
+   * Attempt to establish a P2P WebRTC connection for a room.
+   * Non-blocking — the terminal session works on Matrix while this runs.
+   * Rate-limited to one attempt per 60 seconds per room.
+   */
+  async #attemptP2PConnection(dmRoomId) {
+    const entry = this.#roomTransports.get(dmRoomId);
+    if (!entry) return;
+
+    // Rate limit: 60s cooldown per room
+    const now = Date.now();
+    if (now - entry.lastP2PAttempt < 60_000) return;
+    entry.lastP2PAttempt = now;
+
+    const { transport } = entry;
+
+    // Fetch TURN credentials from homeserver
+    const session = JSON.parse(this.#client.exportSession());
+    const server = session.homeserver_url;
+    const accessToken = session.access_token;
+    let iceServers = [];
+
+    const turnCreds = await fetchTurnCredentials(server, accessToken);
+    if (turnCreds) {
+      iceServers = turnToIceServers(turnCreds);
+    }
+
+    // Create WebRTC channel and signaling
+    const channel = new NodeWebRTCChannel({ iceServers });
+    const signaling = new P2PSignaling(
+      {
+        sendEvent: (roomId, type, content) => this.#client.sendEvent(roomId, type, content),
+        onRoomEvent: (roomId, cb) => this.#client.onRoomEvent(roomId, cb),
+      },
+      dmRoomId,
+      this.#client.userId(),
+    );
+
+    const callId = P2PSignaling.generateCallId();
+    const partyId = P2PSignaling.generatePartyId();
+
+    // Collect ICE candidates for batched sending
+    const candidates = [];
+    let candidateTimer = null;
+    channel.onIceCandidate((candidate) => {
+      candidates.push(candidate);
+      if (candidateTimer) clearTimeout(candidateTimer);
+      candidateTimer = setTimeout(async () => {
+        const batch = candidates.splice(0);
+        if (batch.length > 0) {
+          await signaling.sendCandidates({ callId, partyId, candidates: batch }).catch(() => {});
+        }
+      }, 100);
+    });
+
+    // Create offer and send invite
+    const offer = await channel.createOffer();
+    await signaling.sendInvite({ callId, partyId, sdp: offer.sdp, lifetime: 30000 });
+
+    // Listen for answer (poll with timeout)
+    const answerJson = await this.#client.onRoomEvent(dmRoomId, 'm.call.answer', 30);
+    if (!answerJson || answerJson === 'null') {
+      channel.close();
+      throw new Error('No P2P answer received within timeout');
+    }
+
+    const answerEvent = JSON.parse(answerJson);
+    const answerContent = answerEvent.content || answerEvent;
+    if (answerContent.call_id !== callId) {
+      channel.close();
+      throw new Error('Answer call_id mismatch');
+    }
+
+    await channel.acceptAnswer({ sdp: answerContent.answer.sdp, type: answerContent.answer.type });
+
+    // Poll for remote ICE candidates in background
+    const pollCandidates = async () => {
+      for (let i = 0; i < 30; i++) { // Poll for up to 30 seconds
+        const candJson = await this.#client.onRoomEvent(dmRoomId, 'm.call.candidates', 1);
+        if (!candJson || candJson === 'null') continue;
+        try {
+          const candEvent = JSON.parse(candJson);
+          const candContent = candEvent.content || candEvent;
+          if (candContent.call_id !== callId) continue;
+          for (const c of (candContent.candidates || [])) {
+            channel.addIceCandidate(c);
+          }
+        } catch { /* malformed candidate event */ }
+      }
+    };
+    pollCandidates().catch(() => {});
+
+    // Wait for data channel to open
+    await channel.waitForDataChannel();
+
+    // Attach channel to transport — triggers peer verification flow
+    transport.setDataChannel(channel);
+    this.#log.info('P2P data channel established', { room_id: dmRoomId, call_id: callId });
+  }
+
+  #getInternalIps() {
+    const nets = os.networkInterfaces();
+    const ips = [];
+    for (const name of Object.keys(nets)) {
+      for (const net of nets[name]) {
+        if (net.family === 'IPv4' && !net.internal) ips.push(net.address);
+      }
+    }
+    return ips;
   }
 }

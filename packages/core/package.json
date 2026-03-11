@@ -11,10 +11,16 @@
     "session.js",
     "terminal-socket.js",
     "terminal-types.js",
-    "cleanup.js"
+    "cleanup.js",
+    "batched-sender.js",
+    "turn-credentials.js",
+    "webrtc-channel-node.js",
+    "p2p-signaling.js",
+    "p2p-transport.js"
   ],
   "dependencies": {
     "fake-indexeddb": "^6.2.5",
+    "node-datachannel": "^0.32.1",
     "zod": "^3.23.0"
   }
 }
