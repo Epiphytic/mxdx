@@ -183,6 +183,23 @@ body {
 .launcher-status--slow { background: #eab30822; color: #eab308; }
 .launcher-status--not-responding { background: #ef444422; color: #ef4444; }
 .launcher-status--unavailable { background: #6b728022; color: #6b7280; }
+.launcher-status--offline { background: #64748b22; color: #64748b; }
+
+.dashboard-header {
+  display: flex;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+.dashboard-header label {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+.dashboard-header label:hover { color: var(--text); }
+.dashboard-header input[type="checkbox"] { cursor: pointer; }
 
 .launcher-card .telemetry {
   font-size: 0.8125rem;

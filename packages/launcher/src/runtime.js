@@ -376,6 +376,16 @@ export class LauncherRuntime {
   async stop() {
     this.#running = false;
 
+    // Post offline status (best-effort, 1s timeout)
+    try {
+      await Promise.race([
+        this.#postOfflineStatus(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('offline status timeout')), 1000)),
+      ]);
+    } catch {
+      // Don't block shutdown
+    }
+
     // Stop periodic telemetry
     if (this.#telemetryTimer) {
       clearInterval(this.#telemetryTimer);
@@ -883,6 +893,19 @@ export class LauncherRuntime {
       'org.mxdx.host_telemetry',
       '',
       JSON.stringify(telemetry),
+    );
+  }
+
+  async #postOfflineStatus() {
+    await this.#client.sendStateEvent(
+      this.#topology.exec_room_id,
+      'org.mxdx.host_telemetry',
+      '',
+      JSON.stringify({
+        timestamp: new Date().toISOString(),
+        heartbeat_interval_ms: this.#config.telemetryIntervalS * 1000,
+        status: 'offline',
+      }),
     );
   }
 

@@ -7,10 +7,21 @@ function computeAvailability(telemetry) {
   if (!telemetry || !telemetry.timestamp || !telemetry.heartbeat_interval_ms) {
     return { status: 'unavailable', label: 'Unavailable' };
   }
+
+  // Explicit offline status from graceful shutdown
+  if (telemetry.status === 'offline') {
+    return { status: 'offline', label: 'Offline' };
+  }
+
   const age = Math.max(0, Date.now() - new Date(telemetry.timestamp).getTime());
   const interval = telemetry.heartbeat_interval_ms;
-  const ratio = age / interval;
 
+  // Hard cutoff: 10 minutes without telemetry = offline
+  if (age > 10 * 60 * 1000) {
+    return { status: 'offline', label: 'Offline' };
+  }
+
+  const ratio = age / interval;
   if (ratio <= 1.1) return { status: 'available', label: 'Available' };
   if (ratio <= 2.0) return { status: 'slow', label: 'Slow to respond' };
   return { status: 'not-responding', label: 'Not responding' };
@@ -29,6 +40,8 @@ export function stopDashboardRefresh() {
  * @param {object} callbacks
  * @param {function} callbacks.onOpenTerminal - Called with launcher info
  */
+let showOffline = sessionStorage.getItem('mxdx-show-offline') === 'true';
+
 export function setupDashboard(client, { onOpenTerminal, onReconnect }) {
   stopDashboardRefresh();
 
@@ -97,14 +110,35 @@ async function render(client, onOpenTerminal, onReconnect) {
       sessions: cachedSessions[launcher.exec_room_id] || [],
     }));
 
+    const offlineCount = launcherData.filter(l => l.availability.status === 'offline').length;
+    const visibleLaunchers = showOffline ? launcherData : launcherData.filter(l => l.availability.status !== 'offline');
+
+    // Dashboard header with toggle
+    const header = document.createElement('div');
+    header.className = 'dashboard-header';
+
+    if (offlineCount > 0) {
+      const toggleLabel = document.createElement('label');
+      const toggleInput = document.createElement('input');
+      toggleInput.type = 'checkbox';
+      toggleInput.checked = showOffline;
+      toggleInput.addEventListener('change', () => {
+        showOffline = toggleInput.checked;
+        sessionStorage.setItem('mxdx-show-offline', String(showOffline));
+        render(client, onOpenTerminal, onReconnect);
+      });
+      toggleLabel.append(toggleInput, ` Show offline launchers (${offlineCount})`);
+      header.appendChild(toggleLabel);
+    }
+
     const grid = document.createElement('div');
     grid.className = 'launcher-grid';
 
-    for (const launcher of launcherData) {
+    for (const launcher of visibleLaunchers) {
       grid.appendChild(renderCard(launcher, client, onOpenTerminal, onReconnect));
     }
 
-    dashboard.replaceChildren(grid);
+    dashboard.replaceChildren(header, grid);
   } catch (err) {
     const errDiv = document.createElement('div');
     errDiv.className = 'no-launchers';
@@ -176,7 +210,7 @@ function renderCard(launcher, client, onOpenTerminal, onReconnect) {
   const termBtn = document.createElement('button');
   termBtn.className = 'btn btn-primary';
   termBtn.textContent = 'Open Terminal';
-  if (launcher.availability.status === 'unavailable' || launcher.availability.status === 'not-responding') {
+  if (['unavailable', 'not-responding', 'offline'].includes(launcher.availability.status)) {
     termBtn.disabled = true;
     termBtn.title = launcher.availability.label;
   }

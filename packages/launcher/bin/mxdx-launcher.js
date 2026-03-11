@@ -95,6 +95,26 @@ program
     await runtime.start();
   });
 
+// Reload command — re-exec with fresh process to pick up new WASM/libraries
+program
+  .command('reload')
+  .description('Restart the launcher with fresh modules (picks up new WASM/libraries)')
+  .action(async () => {
+    const launcherBin = new URL(import.meta.url).pathname;
+    const passthrough = process.argv.slice(2).filter(a => a !== 'reload');
+
+    console.log('[launcher] Reloading — spawning fresh process...');
+
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, [launcherBin, 'start', ...passthrough], {
+      stdio: 'inherit',
+    });
+
+    process.on('SIGINT', () => child.kill('SIGINT'));
+    process.on('SIGTERM', () => child.kill('SIGTERM'));
+    child.on('exit', (code) => process.exit(code ?? 0));
+  });
+
 // Cleanup command
 program
   .command('cleanup <targets>')
