@@ -279,7 +279,17 @@ export class LauncherRuntime {
   async #getSessionRoom(clientUserId) {
     const key = this.#sessionRoomKey(clientUserId);
     const existing = this.#sessionRooms.get(key);
-    if (existing) return existing;
+
+    if (existing) {
+      // Verify the room is still joined — it may be stale (Left/Kicked)
+      try {
+        await this.#client.joinRoom(existing);
+        return existing;
+      } catch {
+        this.#log.warn('Stale session room, creating new one', { room_id: existing, client: clientUserId });
+        this.#sessionRooms.delete(key);
+      }
+    }
 
     const topic = `org.mxdx.launcher.sessions:${this.#config.username}:${clientUserId}`;
     const roomId = await this.#client.createRoom(JSON.stringify({
@@ -582,9 +592,10 @@ export class LauncherRuntime {
     }
 
     this.#activeSessions++;
+    let dmRoomId;
 
     try {
-      const dmRoomId = await this.#getSessionRoom(sender);
+      dmRoomId = await this.#getSessionRoom(sender);
       this.#log.info('DM room for session', { request_id: requestId, room_id: dmRoomId, sender });
 
       // Spawn PTY bridge with tmux support
@@ -666,7 +677,7 @@ export class LauncherRuntime {
 
       return;
     } catch (err) {
-      this.#releaseRoomTransport(dmRoomId);
+      if (dmRoomId) this.#releaseRoomTransport(dmRoomId);
       this.#log.error('Interactive session failed', { request_id: requestId, error: err.message || String(err), stack: err.stack });
       await this.#sendSessionResponse(requestId, 'error', null);
       this.#activeSessions--;
