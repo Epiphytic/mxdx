@@ -1,13 +1,31 @@
 {
   "name": "@mxdx/launcher",
   "version": "0.1.0",
-  "private": true,
+  "description": "Matrix-native fleet management launcher agent",
   "type": "module",
   "bin": {
     "mxdx-launcher": "bin/mxdx-launcher.js"
   },
+  "files": [
+    "bin/",
+    "src/"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Epiphytic/mxdx.git",
+    "directory": "packages/launcher"
+  },
+  "homepage": "https://github.com/Epiphytic/mxdx",
+  "license": "MIT",
+  "keywords": ["matrix", "fleet-management", "launcher", "e2ee", "terminal"],
   "dependencies": {
-    "@mxdx/core": "*",
+    "@mxdx/core": "0.1.0",
     "commander": "^12.0.0",
     "inquirer": "^12.0.0",
     "smol-toml": "^1.0.0"

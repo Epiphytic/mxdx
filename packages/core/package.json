@@ -1,9 +1,9 @@
 {
   "name": "@mxdx/core",
   "version": "0.1.0",
-  "private": true,
-  "main": "index.js",
+  "description": "WASM bindings and shared modules for mxdx fleet management",
   "type": "module",
+  "main": "index.js",
   "files": [
     "wasm/",
     "index.js",
@@ -16,8 +16,24 @@
     "turn-credentials.js",
     "webrtc-channel-node.js",
     "p2p-signaling.js",
-    "p2p-transport.js"
+    "p2p-transport.js",
+    "p2p-crypto.js",
+    "persistent-indexeddb.js"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Epiphytic/mxdx.git",
+    "directory": "packages/core"
+  },
+  "homepage": "https://github.com/Epiphytic/mxdx",
+  "license": "MIT",
+  "keywords": ["matrix", "e2ee", "wasm", "fleet-management", "webrtc"],
   "dependencies": {
     "fake-indexeddb": "^6.2.5",
     "node-datachannel": "^0.32.1",
