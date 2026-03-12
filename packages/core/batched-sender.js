@@ -127,6 +127,7 @@ export class BatchedSender {
   /**
    * Push data to be sent. Accepts string, Buffer, or Uint8Array.
    * Data is buffered and sent after the batch window expires.
+   * Small payloads (single keystrokes) are flushed immediately when batchMs <= 10.
    */
   push(data) {
     if (this.#destroyed) return;
@@ -134,6 +135,17 @@ export class BatchedSender {
       ? textEncoder.encode(data)
       : new Uint8Array(data);
     this.#buffer.push(bytes);
+
+    // Immediate flush for interactive input when batch window is minimal
+    if (this.#batchMs <= 10) {
+      if (this.#flushTimer) {
+        clearTimeout(this.#flushTimer);
+        this.#flushTimer = null;
+      }
+      this.#flush();
+      return;
+    }
+
     if (!this.#flushTimer) {
       this.#flushTimer = setTimeout(() => this.#flush(), this.#batchMs);
     }

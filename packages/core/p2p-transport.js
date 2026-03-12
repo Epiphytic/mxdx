@@ -140,8 +140,10 @@ export class P2PTransport {
   }
 
   #log(...args) {
-    // Log to console (works in both browser and Node.js)
-    if (typeof console !== 'undefined') {
+    // Only log when P2P debug is enabled (reduces noise in production)
+    if (typeof localStorage !== 'undefined' && localStorage.getItem('mxdx-p2p-debug') === 'true') {
+      console.log(...args);
+    } else if (typeof process !== 'undefined' && process.env?.MXDX_P2P_DEBUG === 'true') {
       console.log(...args);
     }
   }
@@ -201,24 +203,23 @@ export class P2PTransport {
 
   /**
    * Poll for incoming events — checks P2P inbox first, then Matrix.
-   * Implements the same interface as the Matrix client's onRoomEvent.
+   * When P2P is active, terminal events stay on P2P (no Matrix fallthrough).
    */
   async onRoomEvent(roomId, type, timeoutSecs) {
-    // Check P2P inbox first
+    // Check P2P inbox first (immediate return)
     const inbox = this.#p2pInbox.get(type);
     if (inbox && inbox.length > 0) {
       return inbox.shift();
     }
 
-    // Wait for either P2P inbox push or timeout
+    // When P2P is active, only wait on P2P inbox — no Matrix fallthrough.
+    // Terminal data arrives via data channel; falling through to Matrix
+    // doubles wait times for no benefit (Matrix events aren't coming).
     if (this.#status === 'p2p' && timeoutSecs > 0) {
-      const result = await this.#waitForInbox(type, timeoutSecs);
-      if (result !== null) {
-        return result;
-      }
+      return this.#waitForInbox(type, timeoutSecs);
     }
 
-    // Fall through to Matrix polling
+    // Matrix-only path (P2P not active)
     return this.#matrixClient.onRoomEvent(roomId, type, timeoutSecs);
   }
 

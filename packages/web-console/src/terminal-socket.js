@@ -92,6 +92,7 @@ export class TerminalSocket {
   #startPolling() {
     const poll = async () => {
       if (this.#closed) return;
+      let gotData = false;
       try {
         const eventJson = await this.#client.onRoomEvent(
           this.#roomId,
@@ -99,6 +100,7 @@ export class TerminalSocket {
           1,
         );
         if (eventJson && eventJson !== 'null') {
+          gotData = true;
           const event = JSON.parse(eventJson);
           const content = event.content || event;
           this.#handleIncomingData(content);
@@ -107,7 +109,9 @@ export class TerminalSocket {
         // Sync error, retry
       }
       if (!this.#closed) {
-        this.#pollTimer = setTimeout(poll, this.#pollInterval);
+        // Re-poll immediately when data was received (burst mode);
+        // use pollInterval only when idle to avoid busy-spinning.
+        this.#pollTimer = setTimeout(poll, gotData ? 0 : this.#pollInterval);
       }
     };
     this.#pollTimer = setTimeout(poll, 0);
@@ -207,6 +211,10 @@ export class TerminalSocket {
     this.#clearGapTimers();
     if (this.onclose) this.onclose({ code: 1000, reason: 'Normal closure' });
   }
+
+  /** Adjust send batching (lower = faster for P2P, higher = rate-limit friendly for Matrix). */
+  set batchMs(ms) { if (this.#sender) this.#sender.batchMs = ms; }
+  get batchMs() { return this.#sender ? this.#sender.batchMs : 0; }
 
   get connected() { return !this.#closed; }
   get closed() { return this.#closed; }

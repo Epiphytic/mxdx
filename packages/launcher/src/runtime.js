@@ -52,6 +52,7 @@ class SessionMux {
   #roomId;
   #launcherUserId;
   #sessions = new Map(); // sessionId -> { pty }
+  #senders = new Map(); // sessionId -> BatchedSender
   #running = false;
   #log;
 
@@ -67,9 +68,22 @@ class SessionMux {
     if (!this.#running) this.#start();
   }
 
+  /** Register a BatchedSender so its batchMs can be adjusted on P2P status changes. */
+  registerSender(sessionId, sender) {
+    this.#senders.set(sessionId, sender);
+  }
+
   removeSession(sessionId) {
     this.#sessions.delete(sessionId);
+    this.#senders.delete(sessionId);
     if (this.#sessions.size === 0) this.#running = false;
+  }
+
+  /** Adjust batch window for all senders in this room (called on P2P status change). */
+  setBatchMs(ms) {
+    for (const sender of this.#senders.values()) {
+      sender.batchMs = ms;
+    }
   }
 
   get sessionCount() { return this.#sessions.size; }
@@ -82,6 +96,9 @@ class SessionMux {
   }
 
   async #poll() {
+    // Start a separate resize poll loop (non-blocking to data path)
+    this.#pollResize();
+
     while (this.#running && this.#sessions.size > 0) {
       try {
         const dataJson = await this.#transport.onRoomEvent(
@@ -102,9 +119,18 @@ class SessionMux {
             }
           }
         }
+      } catch {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
+  }
 
+  /** Separate resize poll loop — runs independently so it never blocks data. */
+  async #pollResize() {
+    while (this.#running && this.#sessions.size > 0) {
+      try {
         const resizeJson = await this.#transport.onRoomEvent(
-          this.#roomId, 'org.mxdx.terminal.resize', 1,
+          this.#roomId, 'org.mxdx.terminal.resize', 2,
         );
         if (resizeJson && resizeJson !== 'null') {
           const event = JSON.parse(resizeJson);
@@ -659,6 +685,10 @@ export class LauncherRuntime {
       }
       const mux = this.#roomMuxes.get(dmRoomId);
       mux.addSession(sessionId, pty);
+      mux.registerSender(sessionId, batchSender);
+
+      // If P2P is already active, use low-latency batching immediately
+      if (transport.status === 'p2p') batchSender.batchMs = 5;
 
       // Monitor PTY lifecycle
       const watchPty = async () => {
@@ -771,6 +801,10 @@ export class LauncherRuntime {
       }
       const mux = this.#roomMuxes.get(entry.dmRoomId);
       mux.addSession(sessionId, pty);
+      mux.registerSender(sessionId, batchSender);
+
+      // If P2P is already active, use low-latency batching immediately
+      if (transport.status === 'p2p') batchSender.batchMs = 5;
 
       const watchPty = async () => {
         while (pty.alive) {
@@ -959,6 +993,9 @@ export class LauncherRuntime {
       idleTimeoutMs,
       onStatusChange: (status) => {
         this.#log.info('P2P transport status changed', { status, room_id: dmRoomId });
+        // Adjust all BatchedSenders for sessions in this room
+        const mux = this.#roomMuxes.get(dmRoomId);
+        if (mux) mux.setBatchMs(status === 'p2p' ? 5 : 200);
       },
       onReconnectNeeded: () => {
         this.#attemptP2PConnection(dmRoomId).catch((err) => {

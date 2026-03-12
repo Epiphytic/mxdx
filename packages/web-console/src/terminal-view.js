@@ -166,8 +166,12 @@ async function getOrCreateRoomTransport(client, roomId, execRoomId) {
     onStatusChange: (status) => {
       if (status === 'p2p') {
         updateP2PStatus('p2p');
+        // Switch to low-latency batching for P2P
+        if (activeSocket) activeSocket.batchMs = 5;
       } else {
         updateP2PStatus('matrix-lost');
+        // Revert to rate-limit-safe batching for Matrix
+        if (activeSocket) activeSocket.batchMs = 200;
       }
     },
     onReconnectNeeded: () => {
@@ -609,7 +613,9 @@ export async function setupTerminalView(client, launcher, { onClose, onSessionSt
 
     // Set up P2P transport (or Matrix-only wrapper) — non-blocking
     const p2pTransport = await getOrCreateRoomTransport(client, dmRoomId, launcher.exec_room_id);
-    const socket = new TerminalSocket(p2pTransport, dmRoomId, { pollIntervalMs: 100, batchMs: negotiatedBatchMs, sessionId });
+    // Start with P2P-optimized batching (5ms) — falls back gracefully if on Matrix
+    const effectiveBatchMs = (p2pTransport.status === 'p2p') ? 5 : negotiatedBatchMs;
+    const socket = new TerminalSocket(p2pTransport, dmRoomId, { pollIntervalMs: 100, batchMs: effectiveBatchMs, sessionId });
     activeSocket = socket;
 
     // Wire: buffering status indicator
