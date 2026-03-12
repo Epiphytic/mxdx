@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>mxdx Terminal Performance Report</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 1000px; margin: 2rem auto; padding: 0 1rem; background: #0d1117; color: #c9d1d9; }
+    h1 { color: #58a6ff; border-bottom: 1px solid #30363d; padding-bottom: 0.5rem; }
+    h2 { color: #8b949e; }
+    table { width: 100%; border-collapse: collapse; margin: 1rem 0; }
+    th, td { padding: 0.5rem 0.75rem; text-align: left; border: 1px solid #30363d; }
+    th { background: #161b22; color: #58a6ff; }
+    tr:nth-child(even) { background: #161b22; }
+    .timestamp { color: #8b949e; font-size: 0.85rem; }
+    .summary { background: #161b22; border: 1px solid #30363d; border-radius: 6px; padding: 1rem; margin: 1rem 0; }
+    .good { color: #3fb950; }
+    .warn { color: #d29922; }
+    .bad { color: #f85149; }
+    code { background: #161b22; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>mxdx Terminal Performance Report</h1>
+  <p class="timestamp">Generated: 2026-03-12T06:49:08.736Z</p>
+
+  <div class="summary">
+    <h2>Summary</h2>
+    <p>Performance benchmarks for terminal data delivery over P2P (WebRTC + AES-256-GCM) vs Matrix (E2EE via Megolm).</p>
+    <ul>
+      <li><strong>P2P path</strong>: WebRTC data channel with AES-256-GCM encryption, loopback (localhost-to-localhost)</li>
+      <li><strong>Matrix path (Tuwunel)</strong>: Local Tuwunel homeserver, E2EE via Megolm</li>
+      <li><strong>Matrix path (Public)</strong>: matrix.org homeserver, E2EE via Megolm (subject to rate limits)</li>
+    </ul>
+  </div>
+
+  <h2>Results</h2>
+  <table>
+    <thead>
+      <tr><th>Benchmark</th><th>Value</th><th>Detail</th><th>Notes</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>P2P Single Char RTT</td>
+        <td>avg: 0.16ms</td>
+        <td>p95: 0.44ms</td>
+        <td>min: 0.07ms / max: 2.06ms (100 samples)</td>
+      </tr>
+<tr>
+        <td>P2P Burst RTT</td>
+        <td>avg: 3.34ms</td>
+        <td>p95: 3.85ms</td>
+        <td>min: 2.86ms / max: 4.10ms (50 samples)</td>
+      </tr>
+<tr>
+        <td>P2P 1KB Throughput</td>
+        <td>8704.9 KB/s</td>
+        <td>50 x 1KB payloads</td>
+        <td>Total: 6ms</td>
+      </tr>
+<tr>
+        <td>Matrix Single Event RTT (Tuwunel)</td>
+        <td>avg: 25.48ms</td>
+        <td>p95: 35.42ms</td>
+        <td>min: 18.32ms / max: 92.64ms (20 samples)</td>
+      </tr>
+<tr>
+        <td>BatchedSender (5ms) Flush Latency</td>
+        <td>avg: 0.05ms</td>
+        <td>30 flushes</td>
+        <td>min: 0.01ms / max: 0.34ms</td>
+      </tr>
+<tr>
+        <td>BatchedSender (200ms) Batching</td>
+        <td>16.7:1 compression</td>
+        <td>3 sends from 50 pushes</td>
+        <td>-</td>
+      </tr>
+<tr>
+        <td>AES-256-GCM Encrypt+Decrypt</td>
+        <td>avg: 0.04ms</td>
+        <td>p95: 0.09ms</td>
+        <td>min: 0.03ms / max: 0.44ms (200 samples)</td>
+      </tr>
+<tr>
+        <td>P2P vs Matrix Comparison</td>
+        <td>P2P: 0.21ms / Matrix: 21.36ms</td>
+        <td>103.6x faster</td>
+        <td>P2P p95: 0.32ms / Matrix p95: 24.45ms</td>
+      </tr>
+<tr>
+        <td>Public Matrix (matrix.org) Single Event RTT</td>
+        <td>avg: 1886.24ms</td>
+        <td>p95: 6031.50ms</td>
+        <td>min: 749.90ms / max: 6031.50ms (10 samples)</td>
+      </tr>
+<tr>
+        <td>Public Matrix Sustained Throughput</td>
+        <td>0.56 events/sec</td>
+        <td>8/10 successful</td>
+        <td>Total: 14.3s</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="summary">
+    <h2>Interpretation</h2>
+    <ul>
+      <li>P2P provides <strong>near-instantaneous</strong> terminal I/O suitable for interactive shell sessions</li>
+      <li>Matrix (Tuwunel) adds E2EE + sync overhead but remains usable for command execution</li>
+      <li>Matrix (public, matrix.org) is rate-limited to ~1 event/sec, making it unsuitable for interactive terminals without P2P</li>
+      <li>The <code>BatchedSender</code> adapts: 5ms batching for P2P (keystroke-level), 200ms for Matrix (rate-limit safe)</li>
+      <li>AES-256-GCM encryption overhead is negligible (&lt;1ms per encrypt+decrypt)</li>
+    </ul>
+  </div>
+
+  <div class="summary">
+    <h2>Environment</h2>
+    <ul>
+      <li>Node.js: v22.22.0</li>
+      <li>Platform: linux x64</li>
+      <li>Test runner: <code>node --test</code></li>
+    </ul>
+  </div>
+</body>
+</html>
