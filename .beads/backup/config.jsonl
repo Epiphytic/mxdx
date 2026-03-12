@@ -8,4 +8,5 @@
 {"key":"compact_tier2_dep_levels","value":"5"}
 {"key":"compaction_enabled","value":"false"}
 {"key":"issue_prefix","value":"mxdx"}
+{"key":"kv.memory.phase-0-3-complete-and-signed-off-phase","value":"Phase 0-3 complete and signed off. Phase 4 (Matrix Client Facade) in progress - coder-rust building MatrixClient wrapping matrix-sdk 0.16 with E2EE. Team: lead (active), coder-rust (active on Phase 4), coder-npm (shut down, respawn for Phase 7). Key insight: FederatedPair uses .localhost TLD + openssl self-signed certs, no mkcert needed."}
 {"key":"schema_version","value":"6"}
