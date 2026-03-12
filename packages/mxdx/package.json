@@ -1,0 +1,29 @@
+{
+  "name": "mxdx",
+  "version": "0.1.0",
+  "description": "Matrix-native fleet management with E2EE terminals and P2P transport",
+  "type": "module",
+  "bin": {
+    "mxdx": "bin/mxdx.js",
+    "mx": "bin/mxdx.js"
+  },
+  "files": [
+    "bin/"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Epiphytic/mxdx.git",
+    "directory": "packages/mxdx"
+  },
+  "homepage": "https://github.com/Epiphytic/mxdx",
+  "license": "MIT",
+  "keywords": ["matrix", "fleet-management", "e2ee", "terminal", "webrtc", "p2p"],
+  "dependencies": {
+    "@mxdx/launcher": "0.1.0",
+    "@mxdx/client": "0.1.0",
+    "@mxdx/web-console": "0.1.0"
+  }
+}

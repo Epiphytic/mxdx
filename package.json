@@ -5,6 +5,7 @@
     "packages/launcher",
     "packages/client",
     "packages/web-console",
+    "packages/mxdx",
     "packages/e2e-tests"
   ],
   "devDependencies": {
