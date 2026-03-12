@@ -14,5 +14,8 @@ test-credentials.toml
 packages/core/wasm/
 packages/web-console/wasm/
 
+# Web console build output
+packages/web-console/dist/
+
 # Git worktrees
 .worktrees/
