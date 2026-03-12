@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>mxdx Console</title>
-  <script type="module" crossorigin src="/assets/index-8yb4eXgf.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-B0kuIeSS.css">
+  <script type="module" crossorigin src="/assets/index-Chsrz6sy.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-CwBLIJy9.css">
 </head>
 <body>
   <div id="app">
@@ -13,20 +13,21 @@
       <h1>mxdx</h1>
       <nav>
         <button id="nav-dashboard" class="nav-btn active">Dashboard</button>
+        <button id="nav-settings" class="nav-btn">Settings</button>
         <button id="nav-logout" class="nav-btn">Logout</button>
       </nav>
     </header>
 
-    <div id="login" class="screen">
+    <div id="login" class="screen" hidden>
       <div class="login-box">
         <h2>mxdx Console</h2>
-        <form id="login-form">
+        <form id="login-form" autocomplete="on">
           <label for="server">Homeserver</label>
-          <input type="text" id="server" placeholder="https://matrix.example.com" required>
+          <input type="text" id="server" name="server" value="matrix.org" autocomplete="url" required>
           <label for="username">Username</label>
-          <input type="text" id="username" placeholder="admin" required>
+          <input type="text" id="username" name="username" autocomplete="username" required>
           <label for="password">Password</label>
-          <input type="password" id="password" required>
+          <input type="password" id="password" name="password" autocomplete="current-password" required>
           <button type="submit" id="login-btn">Login</button>
           <p id="login-error" class="error" hidden></p>
           <p id="login-status" class="status" hidden></p>
@@ -40,9 +41,12 @@
       <div id="terminal-toolbar">
         <button id="terminal-back">Back to Dashboard</button>
         <span id="terminal-title"></span>
+        <span id="terminal-status" hidden></span>
       </div>
       <div id="terminal-container"></div>
     </div>
+
+    <div id="settings" class="screen" hidden></div>
   </div>
 </body>
 </html>
