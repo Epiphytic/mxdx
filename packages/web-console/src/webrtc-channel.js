@@ -13,13 +13,16 @@ export class BrowserWebRTCChannel {
   #iceCandidateCallbacks = [];
   #iceCandidateErrorCallbacks = [];
   #messageCallbacks = [];
+  #messageBuffer = []; // Buffer messages before any handler is registered
   #closeCallbacks = [];
   #stateChangeCallbacks = [];
   #dcOpenResolvers = [];
   #closed = false;
 
-  constructor({ iceServers = [] } = {}) {
-    this.#pc = new RTCPeerConnection({ iceServers });
+  constructor({ iceServers = [], turnOnly = false } = {}) {
+    const config = { iceServers };
+    if (turnOnly) config.iceTransportPolicy = 'relay';
+    this.#pc = new RTCPeerConnection(config);
 
     this.#pc.onicecandidate = (event) => {
       if (event.candidate) {
@@ -67,8 +70,13 @@ export class BrowserWebRTCChannel {
 
     dc.onmessage = (event) => {
       const data = typeof event.data === 'string' ? event.data : new TextDecoder().decode(event.data);
-      for (const cb of this.#messageCallbacks) {
-        cb(data);
+      if (this.#messageCallbacks.length === 0) {
+        // Buffer messages until a handler is registered
+        this.#messageBuffer.push(data);
+      } else {
+        for (const cb of this.#messageCallbacks) {
+          cb(data);
+        }
       }
     };
 
@@ -134,6 +142,13 @@ export class BrowserWebRTCChannel {
 
   onMessage(cb) {
     this.#messageCallbacks.push(cb);
+    // Flush any messages that arrived before handler was registered
+    if (this.#messageBuffer.length > 0) {
+      const buffered = this.#messageBuffer.splice(0);
+      for (const msg of buffered) {
+        cb(msg);
+      }
+    }
   }
 
   onClose(cb) {

@@ -763,6 +763,39 @@ impl WasmMatrixClient {
         Ok(response.room_id().to_string())
     }
 
+    /// Search existing room history for events of a given type.
+    /// Returns a JSON array of matching events (newest first), without affecting seen-event tracking.
+    /// Use this for one-time lookups (e.g., finding ICE candidates that arrived before polling started).
+    #[wasm_bindgen(js_name = "findRoomEvents")]
+    pub async fn find_room_events(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        limit: u32,
+    ) -> Result<String, JsValue> {
+        // Sync first to ensure we have the latest events
+        self.sync_once().await?;
+
+        let rid = <&matrix_sdk::ruma::RoomId>::try_from(room_id).map_err(to_js_err)?;
+        if let Some(room) = self.client.get_room(rid) {
+            let messages = room.messages(MessagesOptions::backward()).await.map_err(to_js_err)?;
+            let mut results = Vec::new();
+            for event in &messages.chunk {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(event.raw().json().get()) {
+                    let etype = json.get("type").and_then(|t| t.as_str());
+                    if etype == Some(event_type) {
+                        results.push(json);
+                        if results.len() >= limit as usize {
+                            break;
+                        }
+                    }
+                }
+            }
+            return serde_json::to_string(&results).map_err(to_js_err);
+        }
+        Ok("[]".to_string())
+    }
+
     /// Sync and wait for a specific event type in a room.
     /// Returns event content as JSON string, or "null" if timeout.
     #[wasm_bindgen(js_name = "onRoomEvent")]

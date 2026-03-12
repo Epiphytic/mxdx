@@ -65,16 +65,19 @@ export class TerminalSocket {
   #gapTimer = null;
   #retransmitTimer = null;
   #sender = null;
+  #sessionId = null;
 
-  constructor(client, roomId, { pollIntervalMs = 200, batchMs = 200 } = {}) {
+  constructor(client, roomId, { pollIntervalMs = 200, batchMs = 200, sessionId = null } = {}) {
     this.#client = client;
     this.#roomId = roomId;
+    this.#sessionId = sessionId;
     this.#pollInterval = pollIntervalMs;
 
     this.#sender = new BatchedSender({
       sendEvent: (rid, type, content) => client.sendEvent(rid, type, content),
       roomId,
       batchMs,
+      sessionId,
       onError: (err) => {
         if (this.onerror) this.onerror(err);
       },
@@ -188,9 +191,11 @@ export class TerminalSocket {
 
   async resize(cols, rows) {
     if (this.#closed) throw new Error('TerminalSocket is closed');
+    const payload = { cols, rows };
+    if (this.#sessionId) payload.session_id = this.#sessionId;
     await this.#client.sendEvent(
       this.#roomId, 'org.mxdx.terminal.resize',
-      JSON.stringify({ cols, rows }),
+      JSON.stringify(payload),
     );
   }
 

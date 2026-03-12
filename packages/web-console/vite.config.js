@@ -14,5 +14,6 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    hmr: false, // Disable HMR — it kills active P2P/WebRTC sessions
   },
 });

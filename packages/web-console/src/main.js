@@ -156,6 +156,10 @@ function showReconnect(launcher, session) {
       clearTerminalSession();
       showDashboard();
     },
+    onReconnectFailed: () => {
+      clearTerminalSession();
+      setTimeout(() => showDashboard(), 2000);
+    },
   });
 }
 

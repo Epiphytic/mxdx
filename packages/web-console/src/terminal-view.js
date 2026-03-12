@@ -9,7 +9,7 @@ import { fetchTurnCredentials, turnToIceServers } from '../../core/turn-credenti
 
 let activeSocket = null;
 let activeTerminal = null;
-const roomTransports = new Map(); // roomId -> { transport, p2pCrypto, refCount, lastP2PAttempt }
+const roomTransports = new Map(); // roomId -> { transport, p2pCrypto, refCount, lastP2PAttempt, attemptInFlight }
 
 function base64Decode(str) {
   const binary = atob(str);
@@ -49,10 +49,12 @@ function getP2PSettings() {
   const enabled = localStorage.getItem('mxdx-p2p-enabled');
   const batchMs = parseInt(localStorage.getItem('mxdx-p2p-batch-ms') || '10', 10);
   const idleTimeoutS = parseInt(localStorage.getItem('mxdx-p2p-idle-timeout-s') || '300', 10);
+  const turnOnly = localStorage.getItem('mxdx-p2p-turn-only') === 'true';
   return {
     enabled: enabled !== 'false',
     batchMs: Math.max(1, Math.min(1000, isNaN(batchMs) ? 10 : batchMs)),
     idleTimeoutS: Math.max(30, Math.min(3600, isNaN(idleTimeoutS) ? 300 : idleTimeoutS)),
+    turnOnly,
   };
 }
 
@@ -116,11 +118,23 @@ function updateP2PStatus(status, detail) {
  * Get or create a shared P2P transport for a room.
  * Returns a P2PTransport (with Matrix fallback) or a thin Matrix wrapper.
  * Multiple sessions in the same room share one transport via refcounting.
+ * @param {string} execRoomId - Exec room for P2P signaling (has established E2EE)
  */
-async function getOrCreateRoomTransport(client, roomId) {
+async function getOrCreateRoomTransport(client, roomId, execRoomId) {
   const existing = roomTransports.get(roomId);
   if (existing) {
     existing.refCount++;
+    // Re-attempt P2P if not currently active AND no attempt already in flight
+    if (existing.transport.status !== 'p2p' && !existing.attemptInFlight) {
+      const now = Date.now();
+      if (now - existing.lastP2PAttempt >= 60000) {
+        existing.lastP2PAttempt = now;
+        existing.attemptInFlight = true;
+        attemptBrowserP2P(client, existing.transport, roomId, null, execRoomId)
+          .catch(() => { updateP2PStatus('matrix'); })
+          .finally(() => { existing.attemptInFlight = false; });
+      }
+    }
     return existing.transport;
   }
 
@@ -158,13 +172,14 @@ async function getOrCreateRoomTransport(client, roomId) {
     },
     onReconnectNeeded: () => {
       const entry = roomTransports.get(roomId);
-      if (!entry) return;
+      if (!entry || entry.attemptInFlight) return;
       const now = Date.now();
       if (now - entry.lastP2PAttempt < 60000) return;
       entry.lastP2PAttempt = now;
-      attemptBrowserP2P(client, transport, roomId, sessionKey).catch(() => {
-        updateP2PStatus('matrix');
-      });
+      entry.attemptInFlight = true;
+      attemptBrowserP2P(client, transport, roomId, sessionKey, execRoomId)
+        .catch(() => { updateP2PStatus('matrix'); })
+        .finally(() => { entry.attemptInFlight = false; });
     },
     onHangup: (reason) => {
       if (reason === 'idle_timeout') {
@@ -173,13 +188,13 @@ async function getOrCreateRoomTransport(client, roomId) {
     },
   });
 
-  const entry = { transport, p2pCrypto, refCount: 1, lastP2PAttempt: Date.now() };
+  const entry = { transport, p2pCrypto, refCount: 1, lastP2PAttempt: Date.now(), attemptInFlight: true };
   roomTransports.set(roomId, entry);
 
   // Attempt P2P (non-blocking)
-  attemptBrowserP2P(client, transport, roomId, sessionKey).catch(() => {
-    updateP2PStatus('matrix');
-  });
+  attemptBrowserP2P(client, transport, roomId, sessionKey, execRoomId)
+    .catch(() => { updateP2PStatus('matrix'); })
+    .finally(() => { entry.attemptInFlight = false; });
 
   return transport;
 }
@@ -200,103 +215,279 @@ function releaseRoomTransport(roomId) {
 
 /**
  * Attempt to establish browser P2P WebRTC connection.
+ * Strategy: wait 5s for incoming launcher offer first (launcher offers immediately).
+ * If no offer received in 5s, client offers as fallback.
+ * First verified channel wins.
  */
-async function attemptBrowserP2P(client, transport, dmRoomId, sessionKey) {
+async function attemptBrowserP2P(client, transport, dmRoomId, sessionKey, execRoomId) {
+  // Skip if P2P is already active
+  if (transport.status === 'p2p') {
+    console.log('[p2p] Already connected, skipping attempt');
+    return;
+  }
+
   const session = JSON.parse(client.exportSession());
   const homeserverUrl = session.homeserver_url;
   const accessToken = session.access_token;
   let iceServers = [];
 
   const turnCreds = await fetchTurnCredentials(homeserverUrl, accessToken);
+  console.log('[p2p] TURN credentials:', turnCreds ? `${turnCreds.uris?.length} URIs` : 'none');
   if (turnCreds) {
     iceServers = turnToIceServers(turnCreds);
   }
+  console.log('[p2p] ICE servers:', JSON.stringify(iceServers.map(s => s.urls)));
 
-  const channel = new BrowserWebRTCChannel({ iceServers });
+  const turnOnly = localStorage.getItem('mxdx-p2p-turn-only') === 'true';
+  // P2P signaling goes through exec room (established E2EE) not DM room
+  // (newly-created DM rooms have unreliable Megolm key exchange).
+  const signalingRoomId = execRoomId || dmRoomId;
+  console.log('[p2p] turnOnly:', turnOnly, 'dmRoom:', dmRoomId, 'signalingRoom:', signalingRoomId);
 
-  // Detect TURN-specific errors (browser only)
-  channel.onIceCandidateError((err) => {
-    if (err.errorCode === 486 || err.errorCode === 508) {
-      updateP2PStatus('turn-limit');
-    } else if (err.errorCode === 701) {
-      updateP2PStatus('turn-unreachable');
+  let settled = false;
+  const settle = (channel, callId, role, p2pCrypto) => {
+    if (settled) {
+      channel.close();
+      return false;
     }
-  });
+    settled = true;
+    if (p2pCrypto) transport.setP2PCrypto(p2pCrypto);
+    transport.setDataChannel(channel);
+    console.log(`[p2p] Data channel established (${role}, call=${callId})`);
+    return true;
+  };
 
-  const signaling = new P2PSignaling(
-    {
-      sendEvent: (roomId, type, content) => client.sendEvent(roomId, type, content),
-      onRoomEvent: (roomId, cb) => client.onRoomEvent(roomId, cb),
-    },
-    dmRoomId,
-    client.userId(),
-  );
+  // Helper: wire ICE candidate batching
+  const wireIceBatching = (channel, callId, partyId) => {
+    const candidates = [];
+    let candidateTimer = null;
+    channel.onIceCandidate((candidate) => {
+      candidates.push(candidate);
+      if (candidateTimer) clearTimeout(candidateTimer);
+      candidateTimer = setTimeout(async () => {
+        const batch = candidates.splice(0);
+        if (batch.length > 0) {
+          const signaling = new P2PSignaling(
+            {
+              sendEvent: (roomId, type, content) => client.sendEvent(roomId, type, content),
+              onRoomEvent: (roomId, cb) => client.onRoomEvent(roomId, cb),
+            },
+            signalingRoomId,
+            client.userId(),
+          );
+          await signaling.sendCandidates({ callId, partyId, candidates: batch }).catch(() => {});
+        }
+      }, 100);
+    });
 
-  const callId = P2PSignaling.generateCallId();
-  const partyId = P2PSignaling.generatePartyId();
-
-  // Batch ICE candidates
-  const candidates = [];
-  let candidateTimer = null;
-  channel.onIceCandidate((candidate) => {
-    candidates.push(candidate);
-    if (candidateTimer) clearTimeout(candidateTimer);
-    candidateTimer = setTimeout(async () => {
-      const batch = candidates.splice(0);
-      if (batch.length > 0) {
-        await signaling.sendCandidates({ callId, partyId, candidates: batch }).catch(() => {});
+    // Detect TURN-specific errors (browser only)
+    // Only update status if P2P hasn't already connected (late errors are noise)
+    channel.onIceCandidateError((err) => {
+      if (settled || transport.status === 'p2p') return;
+      if (err.errorCode === 486 || err.errorCode === 508) {
+        updateP2PStatus('turn-limit');
+      } else if (err.errorCode === 701) {
+        updateP2PStatus('turn-unreachable');
       }
-    }, 100);
-  });
+    });
+  };
 
-  const offer = await channel.createOffer();
-  try {
-    await signaling.sendInvite({ callId, partyId, sdp: offer.sdp, lifetime: 30000 });
-  } catch (err) {
-    channel.close();
-    if (String(err).includes('429') || String(err).includes('M_LIMIT_EXCEEDED')) {
-      updateP2PStatus('rate-limited', 'Matrix (rate-limited)');
-      throw new Error('P2P signaling rate-limited');
+  // Helper: poll for ICE candidates (skip own by party_id, add to channel as they arrive)
+  // Note: uses call_id + party_id to filter, NOT sender — browser and launcher may
+  // share the same Matrix user ID (same-user, different device).
+  // Phase 1: scan existing room history (candidates may arrive before polling starts).
+  // Phase 2: poll for new candidates via onRoomEvent.
+  const pollCandidates = async (channel, callId, ownPartyId) => {
+    // Phase 1: Scan existing room history for candidates that arrived before polling started.
+    // This fixes a race where onRoomEvent marks existing events as "seen" and never returns them.
+    try {
+      const existingJson = await client.findRoomEvents(signalingRoomId, 'm.call.candidates', 20);
+      const existing = JSON.parse(existingJson);
+      for (const evt of existing) {
+        const content = evt.content || evt;
+        if (content.call_id !== callId) continue;
+        if (content.party_id === ownPartyId) continue;
+        const cands = content.candidates || [];
+        console.log('[p2p] Found', cands.length, 'existing candidates for call', callId);
+        for (const c of cands) {
+          channel.addIceCandidate(c);
+        }
+      }
+    } catch (err) {
+      console.log('[p2p] findRoomEvents scan failed:', err.message);
     }
-    throw err;
-  }
 
-  // Wait for answer
-  const answerJson = await client.onRoomEvent(dmRoomId, 'm.call.answer', 30);
-  if (!answerJson || answerJson === 'null') {
-    channel.close();
-    throw new Error('No P2P answer received');
-  }
-
-  const answerEvent = JSON.parse(answerJson);
-  const answerContent = answerEvent.content || answerEvent;
-  if (answerContent.call_id !== callId) {
-    channel.close();
-    throw new Error('Answer call_id mismatch');
-  }
-
-  await channel.acceptAnswer({ sdp: answerContent.answer.sdp, type: answerContent.answer.type });
-
-  // Poll for remote ICE candidates in background
-  const pollCandidates = async () => {
+    // Phase 2: Poll for new candidates arriving after polling started
     for (let i = 0; i < 30; i++) {
-      const candJson = await client.onRoomEvent(dmRoomId, 'm.call.candidates', 1);
+      if (settled && i > 5) return; // After settle, poll a few more for stragglers
+      const candJson = await client.onRoomEvent(signalingRoomId, 'm.call.candidates', 1);
       if (!candJson || candJson === 'null') continue;
       try {
         const candEvent = JSON.parse(candJson);
         const candContent = candEvent.content || candEvent;
         if (candContent.call_id !== callId) continue;
-        for (const c of (candContent.candidates || [])) {
+        if (candContent.party_id === ownPartyId) continue; // Skip own candidates
+        const cands = candContent.candidates || [];
+        console.log('[p2p] Got', cands.length, 'new candidates for call', callId);
+        for (const c of cands) {
           channel.addIceCandidate(c);
         }
-      } catch { /* malformed candidate event */ }
+      } catch { /* malformed */ }
     }
   };
-  pollCandidates().catch(() => {});
 
-  await channel.waitForDataChannel();
+  // Pre-generate offerer's call_id so the answerer can skip our own invite
+  // (can't use sender check since browser and launcher may share the same Matrix user ID)
+  const offererCallId = P2PSignaling.generateCallId();
 
-  transport.setDataChannel(channel);
+  // --- Answerer path: wait for launcher's offer ---
+  const answererPath = async () => {
+    console.log('[p2p] Answerer: polling for launcher invite...');
+    let inviteEvent = null;
+
+    // Poll for incoming m.call.invite (launcher sends after 5s delay)
+    // onRoomEvent marks existing events as "seen" so we only get NEW invites
+    const answererDeadline = Date.now() + 20_000; // 20s to receive launcher invite
+    while (Date.now() < answererDeadline && !settled) {
+      const json = await client.onRoomEvent(signalingRoomId, 'm.call.invite', 3);
+      if (!json || json === 'null') continue;
+      try {
+        const evt = JSON.parse(json);
+        const evtContent = evt.content || evt;
+        if (evtContent.call_id === offererCallId) {
+          console.log('[p2p] Answerer: skipping own invite');
+          continue;
+        }
+        inviteEvent = evt;
+        break;
+      } catch { continue; }
+    }
+
+    if (settled || !inviteEvent) {
+      throw new Error('No incoming offer from launcher');
+    }
+
+    const inviteContent = inviteEvent.content || inviteEvent;
+    console.log('[p2p] Answerer: got invite from', inviteEvent.sender, 'call_id:', inviteContent.call_id);
+    const callId = inviteContent.call_id;
+    if (!callId || !inviteContent.offer?.sdp) {
+      throw new Error('Invalid invite');
+    }
+
+    // Extract shared session key from offerer's invite
+    let answererP2PCrypto = null;
+    if (inviteContent.session_key) {
+      answererP2PCrypto = await createP2PCrypto(inviteContent.session_key);
+      console.log('[p2p] Answerer: using shared session key from invite');
+    }
+
+    const channel = new BrowserWebRTCChannel({ iceServers, turnOnly });
+    channel.onStateChange((state) => console.log('[p2p] Answerer ICE state:', state));
+    const partyId = P2PSignaling.generatePartyId();
+    wireIceBatching(channel, callId, partyId);
+
+    const answer = await channel.acceptOffer({ sdp: inviteContent.offer.sdp, type: 'offer' });
+    const signaling = new P2PSignaling(
+      {
+        sendEvent: (roomId, type, content) => client.sendEvent(roomId, type, content),
+        onRoomEvent: (roomId, cb) => client.onRoomEvent(roomId, cb),
+      },
+      signalingRoomId,
+      client.userId(),
+    );
+    await signaling.sendAnswer({ callId, partyId, sdp: answer.sdp });
+
+    console.log('[p2p] Answerer: answer sent, waiting for data channel...');
+    pollCandidates(channel, callId, partyId).catch(() => {});
+    await Promise.race([
+      channel.waitForDataChannel(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Data channel open timeout (30s)')), 30_000)),
+    ]);
+    console.log('[p2p] Answerer: data channel open!');
+    settle(channel, callId, 'answerer', answererP2PCrypto);
+  };
+
+  // --- Offerer path: client creates offer after 5s delay ---
+  const offererPath = async () => {
+    console.log('[p2p] Offerer: waiting 8s before offering...');
+    // Wait 8s to give launcher's offer a chance to arrive and be answered first
+    await new Promise((r) => setTimeout(r, 8000));
+    if (settled) { console.log('[p2p] Offerer: answerer already settled, skipping'); return; }
+
+    const channel = new BrowserWebRTCChannel({ iceServers, turnOnly });
+    channel.onStateChange((state) => console.log('[p2p] Offerer ICE state:', state));
+    const callId = offererCallId;
+    const partyId = P2PSignaling.generatePartyId();
+    wireIceBatching(channel, callId, partyId);
+
+    // Generate session key for P2P encryption — shared via E2EE Matrix invite
+    const offerSessionKey = await generateSessionKey();
+    const offerP2PCrypto = await createP2PCrypto(offerSessionKey);
+
+    const offer = await channel.createOffer();
+    const signaling = new P2PSignaling(
+      {
+        sendEvent: (roomId, type, content) => client.sendEvent(roomId, type, content),
+        onRoomEvent: (roomId, cb) => client.onRoomEvent(roomId, cb),
+      },
+      signalingRoomId,
+      client.userId(),
+    );
+
+    try {
+      await signaling.sendInvite({ callId, partyId, sdp: offer.sdp, lifetime: 30000, sessionKey: offerSessionKey });
+    } catch (err) {
+      channel.close();
+      if (String(err).includes('429') || String(err).includes('M_LIMIT_EXCEEDED')) {
+        updateP2PStatus('rate-limited', 'Matrix (rate-limited)');
+        throw new Error('P2P signaling rate-limited');
+      }
+      throw err;
+    }
+
+    console.log('[p2p] Offerer: invite sent, waiting for answer...');
+    // Note: do NOT filter by sender — browser and launcher may share the same
+    // Matrix user ID (same-user, different device). The call_id check is sufficient.
+    let answerContent = null;
+    const offerDeadline = Date.now() + 30_000;
+    while (Date.now() < offerDeadline && !settled) {
+      const answerJson = await client.onRoomEvent(signalingRoomId, 'm.call.answer', 5);
+      if (!answerJson || answerJson === 'null') continue;
+      try {
+        const answerEvent = JSON.parse(answerJson);
+        const content = answerEvent.content || answerEvent;
+        if (content.call_id !== callId) continue;
+        answerContent = content;
+        break;
+      } catch { continue; }
+    }
+    if (!answerContent || settled) {
+      channel.close();
+      throw new Error('No P2P answer received');
+    }
+
+    console.log('[p2p] Offerer: answer received, accepting');
+    await channel.acceptAnswer({ sdp: answerContent.answer.sdp, type: answerContent.answer.type });
+    pollCandidates(channel, callId, partyId).catch(() => {});
+    await Promise.race([
+      channel.waitForDataChannel(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Data channel open timeout (30s)')), 30_000)),
+    ]);
+    settle(channel, callId, 'offerer', offerP2PCrypto);
+  };
+
+  // Race both paths — answerer (launcher's offer) vs offerer (client fallback)
+  console.log('[p2p] Starting race: answerer + offerer');
+  await Promise.any([
+    answererPath().catch((err) => { console.log('[p2p] Answerer failed:', err.message); throw err; }),
+    offererPath().catch((err) => { console.log('[p2p] Offerer failed:', err.message); throw err; }),
+  ]).catch((err) => {
+    const msg = err instanceof AggregateError
+      ? err.errors.map(e => e.message).join('; ')
+      : err.message;
+    console.log('[p2p] Both paths failed:', msg);
+    throw new Error(msg);
+  });
 }
 
 /**
@@ -417,7 +608,7 @@ export async function setupTerminalView(client, launcher, { onClose, onSessionSt
     const sessionId = sessionContent.session_id;
 
     // Set up P2P transport (or Matrix-only wrapper) — non-blocking
-    const p2pTransport = await getOrCreateRoomTransport(client, dmRoomId);
+    const p2pTransport = await getOrCreateRoomTransport(client, dmRoomId, launcher.exec_room_id);
     const socket = new TerminalSocket(p2pTransport, dmRoomId, { pollIntervalMs: 100, batchMs: negotiatedBatchMs, sessionId });
     activeSocket = socket;
 
@@ -469,7 +660,7 @@ export async function setupTerminalView(client, launcher, { onClose, onSessionSt
   }
 }
 
-export async function reconnectTerminalView(client, launcher, session, { onClose }) {
+export async function reconnectTerminalView(client, launcher, session, { onClose, onReconnectFailed }) {
   const container = document.getElementById('terminal-container');
   container.replaceChildren();
 
@@ -515,6 +706,7 @@ export async function reconnectTerminalView(client, launcher, session, { onClose
 
     if (!responseJson || responseJson === 'null') {
       term.writeln('\r\nTimeout: launcher did not respond.');
+      if (onReconnectFailed) onReconnectFailed();
       return;
     }
 
@@ -523,11 +715,13 @@ export async function reconnectTerminalView(client, launcher, session, { onClose
 
     if (sessionContent.status === 'expired') {
       term.writeln('\r\nSession expired — tmux session no longer exists.');
+      if (onReconnectFailed) onReconnectFailed();
       return;
     }
 
     if (sessionContent.status !== 'reconnected' || !sessionContent.room_id) {
       term.writeln(`\r\nReconnect failed: ${sessionContent.status || 'unknown'}`);
+      if (onReconnectFailed) onReconnectFailed();
       return;
     }
 
@@ -565,7 +759,7 @@ export async function reconnectTerminalView(client, launcher, session, { onClose
     const negotiatedBatchMs = sessionContent.batch_ms || 200;
 
     // Set up P2P transport (or Matrix-only wrapper) — non-blocking
-    const p2pTransport = await getOrCreateRoomTransport(client, dmRoomId);
+    const p2pTransport = await getOrCreateRoomTransport(client, dmRoomId, launcher.exec_room_id);
     const socket = new TerminalSocket(p2pTransport, dmRoomId, { pollIntervalMs: 100, batchMs: negotiatedBatchMs, sessionId: session.session_id });
     activeSocket = socket;
 

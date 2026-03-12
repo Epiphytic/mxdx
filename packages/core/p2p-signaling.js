@@ -42,14 +42,16 @@ export class P2PSignaling {
    * Send m.call.invite with SDP offer.
    * @param {{ callId: string, partyId: string, sdp: string, lifetime?: number }} opts
    */
-  async sendInvite({ callId, partyId, sdp, lifetime = 60000 }) {
-    await this.#send('m.call.invite', {
+  async sendInvite({ callId, partyId, sdp, lifetime = 60000, sessionKey = null }) {
+    const content = {
       call_id: callId,
       party_id: partyId,
       version: '1',
       lifetime,
       offer: { type: 'offer', sdp },
-    });
+    };
+    if (sessionKey) content.session_key = sessionKey;
+    await this.#send('m.call.invite', content);
   }
 
   /**

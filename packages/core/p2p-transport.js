@@ -94,27 +94,56 @@ export class P2PTransport {
   }
 
   /**
+   * Replace the P2P encryption key. Called when a shared key is negotiated
+   * during signaling (the offerer's key, sent via E2EE Matrix invite).
+   */
+  setP2PCrypto(p2pCrypto) {
+    this.#p2pCrypto = p2pCrypto;
+  }
+
+  /**
    * Attach a WebRTC data channel. Registers message/close handlers.
    * Automatically initiates peer verification handshake.
    * The channel is NOT used for terminal data until both sides verify.
    */
   setDataChannel(channel) {
+    // Close old channel if being replaced (prevents stale onClose from killing new channel)
+    if (this.#dataChannel && this.#dataChannel !== channel) {
+      this.#log('[p2p-transport] replacing existing data channel');
+      try { this.#dataChannel.close(); } catch { /* already closed */ }
+    }
+
     this.#dataChannel = channel;
     this.#peerVerified = false;
     this.#localVerified = false;
     this.#localNonce = null;
     this.#remoteNonce = null;
 
+    this.#log('[p2p-transport] setDataChannel called, isOpen:', channel.isOpen);
+
     channel.onMessage((msg) => {
       this.#handleDataChannelMessage(msg);
     });
 
     channel.onClose(() => {
+      // Only handle close if this is still the current channel
+      if (this.#dataChannel !== channel) {
+        this.#log('[p2p-transport] stale channel closed (ignored)');
+        return;
+      }
+      this.#log('[p2p-transport] channel closed');
       this.#handleChannelClose();
     });
 
     // Start peer verification automatically
     this.#startVerification();
+  }
+
+  #log(...args) {
+    // Log to console (works in both browser and Node.js)
+    if (typeof console !== 'undefined') {
+      console.log(...args);
+    }
   }
 
   /**
@@ -151,12 +180,13 @@ export class P2PTransport {
           return;
         }
 
+        this.#log('[p2p-transport] sending encrypted frame via P2P, type=', type, 'len=', frame.length);
         this.#dataChannel.send(frame);
         // Track for potential requeue
         this.#pendingAcks.push({ roomId, type, contentJson });
         return;
-      } catch {
-        // Encryption or send failed — fall back to Matrix
+      } catch (err) {
+        this.#log('[p2p-transport] send via P2P failed:', err.message || err, '— falling back to Matrix');
       }
     }
 
@@ -211,6 +241,7 @@ export class P2PTransport {
 
   #startVerification() {
     this.#localNonce = randomHex(32);
+    this.#log('[p2p-transport] sending peer_verify, channel isOpen:', this.#dataChannel?.isOpen);
     this.#sendControlFrame({
       type: 'peer_verify',
       nonce: this.#localNonce,
@@ -232,6 +263,7 @@ export class P2PTransport {
   }
 
   #handlePeerVerify(frame) {
+    this.#log('[p2p-transport] received peer_verify from device:', frame.device_id);
     this.#remoteNonce = frame.nonce;
     const remoteDeviceId = frame.device_id;
     if (!this.#remoteNonce || !remoteDeviceId) return;
@@ -247,6 +279,7 @@ export class P2PTransport {
   }
 
   #handlePeerVerifyResponse(frame) {
+    this.#log('[p2p-transport] received peer_verify_response, nonce match:', frame.nonce === this.#localNonce);
     if (!frame.nonce || !frame.device_id) return;
     if (frame.nonce !== this.#localNonce) return;
 
@@ -256,6 +289,7 @@ export class P2PTransport {
   }
 
   #checkVerificationComplete() {
+    this.#log('[p2p-transport] checkVerification: localVerified=', this.#localVerified, 'remoteNonce=', !!this.#remoteNonce);
     // Both sides must have exchanged: we got their response (localVerified)
     // AND they got our challenge (remoteNonce is set, meaning we responded)
     if (this.#localVerified && this.#remoteNonce) {
@@ -299,6 +333,8 @@ export class P2PTransport {
       return; // Malformed frame, drop
     }
 
+    this.#log('[p2p-transport] received frame type:', frame.type);
+
     switch (frame.type) {
       case 'encrypted':
         this.#handleEncryptedFrame(frame);
@@ -323,12 +359,17 @@ export class P2PTransport {
   }
 
   async #handleEncryptedFrame(frame) {
-    if (!this.#peerVerified || !this.#p2pCrypto) return;
+    if (!this.#peerVerified || !this.#p2pCrypto) {
+      this.#log('[p2p-transport] encrypted frame dropped: verified=', this.#peerVerified, 'hasCrypto=', !!this.#p2pCrypto);
+      return;
+    }
 
     try {
       const plaintext = await this.#p2pCrypto.decrypt(frame.ciphertext);
       const event = JSON.parse(plaintext);
       const eventType = event.type || frame.event_type;
+
+      this.#log('[p2p-transport] decrypted frame: eventType=', eventType, 'hasData=', !!event.data, 'seq=', event.seq);
 
       if (!eventType) return;
 
@@ -343,10 +384,13 @@ export class P2PTransport {
       if (waiters && waiters.length > 0) {
         const waiter = waiters.shift();
         clearTimeout(waiter.timer);
+        this.#log('[p2p-transport] resolving waiter for', eventType);
         waiter.resolve(this.#p2pInbox.get(eventType).shift());
+      } else {
+        this.#log('[p2p-transport] no waiter for', eventType, 'inbox size=', this.#p2pInbox.get(eventType).length);
       }
-    } catch {
-      // Decryption failed — frame tampered or wrong key. Drop silently.
+    } catch (err) {
+      this.#log('[p2p-transport] decryption FAILED:', err.message || err);
     }
   }
 

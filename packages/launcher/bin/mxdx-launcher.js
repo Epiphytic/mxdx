@@ -24,7 +24,8 @@ program
   .option('--p2p-enabled <bool>', 'Enable P2P transport (default: true)')
   .option('--p2p-batch-ms <ms>', 'P2P batch window in ms (default: 10)')
   .option('--p2p-idle-timeout-s <seconds>', 'P2P idle timeout in seconds (default: 300)')
-  .option('--p2p-advertise-ips <bool>', 'Include internal IPs in telemetry (default: false)');
+  .option('--p2p-advertise-ips <bool>', 'Include internal IPs in telemetry (default: false)')
+  .option('--p2p-turn-only <bool>', 'Force P2P through TURN relay only — no direct connections (default: false)');
 
 async function resolveConfig(opts) {
   const configPath = opts.config || LauncherConfig.defaultPath();
@@ -65,6 +66,7 @@ async function resolveConfig(opts) {
   if (opts.p2pBatchMs) config.p2pBatchMs = parseInt(opts.p2pBatchMs, 10);
   if (opts.p2pIdleTimeoutS) config.p2pIdleTimeoutS = parseInt(opts.p2pIdleTimeoutS, 10);
   if (opts.p2pAdvertiseIps !== undefined) config.p2pAdvertiseIps = opts.p2pAdvertiseIps === 'true';
+  if (opts.p2pTurnOnly !== undefined) config.p2pTurnOnly = opts.p2pTurnOnly === 'true';
 
   return config;
 }

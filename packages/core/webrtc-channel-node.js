@@ -19,6 +19,7 @@ export class NodeWebRTCChannel {
   #dc = null;
   #iceCandidateCallbacks = [];
   #messageCallbacks = [];
+  #messageBuffer = []; // Buffer messages before any handler is registered
   #closeCallbacks = [];
   #stateChangeCallbacks = [];
   #dcOpenResolvers = [];
@@ -26,16 +27,37 @@ export class NodeWebRTCChannel {
   #remoteDescSet = false;
   #pendingCandidates = [];
 
-  constructor({ iceServers = [] } = {}) {
-    const iceServerStrs = [];
+  constructor({ iceServers = [], turnOnly = false } = {}) {
+    // Convert browser-format iceServers ({urls, username, credential}) to
+    // node-datachannel format ({hostname, port, username, password, relayType})
+    const ndcServers = [];
     for (const server of iceServers) {
       const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
       for (const url of urls) {
-        iceServerStrs.push(url);
+        // In turnOnly mode, skip STUN servers — only use TURN (relay) servers
+        if (turnOnly && !url.startsWith('turn:') && !url.startsWith('turns:')) continue;
+        try {
+          // Parse turn:host:port?transport=xxx or turns:host:port?transport=xxx
+          const match = url.match(/^(turns?|stun):([^:?]+):(\d+)/);
+          if (!match) continue;
+          const [, scheme, hostname, port] = match;
+          const transport = url.includes('transport=tcp') ? 'tcp' : 'udp';
+          const relayType = scheme === 'turns' ? 'TurnTls'
+            : transport === 'tcp' ? 'TurnTcp' : 'TurnUdp';
+          ndcServers.push({
+            hostname,
+            port: parseInt(port, 10),
+            username: server.username || '',
+            password: server.credential || '',
+            relayType: scheme === 'stun' ? undefined : relayType,
+          });
+        } catch { /* skip malformed */ }
       }
     }
 
-    this.#pc = new nodeDataChannel.PeerConnection('mxdx', { iceServers: iceServerStrs });
+    const config = { iceServers: ndcServers };
+    if (turnOnly) config.iceTransportPolicy = 'relay';
+    this.#pc = new nodeDataChannel.PeerConnection('mxdx', config);
 
     this.#pc.onLocalCandidate((candidate, mid) => {
       for (const cb of this.#iceCandidateCallbacks) {
@@ -73,8 +95,13 @@ export class NodeWebRTCChannel {
 
     dc.onMessage((msg) => {
       const str = typeof msg === 'string' ? msg : msg.toString('utf8');
-      for (const cb of this.#messageCallbacks) {
-        cb(str);
+      if (this.#messageCallbacks.length === 0) {
+        // Buffer messages until a handler is registered
+        this.#messageBuffer.push(str);
+      } else {
+        for (const cb of this.#messageCallbacks) {
+          cb(str);
+        }
       }
     });
 
@@ -149,6 +176,13 @@ export class NodeWebRTCChannel {
 
   onMessage(cb) {
     this.#messageCallbacks.push(cb);
+    // Flush any messages that arrived before handler was registered
+    if (this.#messageBuffer.length > 0) {
+      const buffered = this.#messageBuffer.splice(0);
+      for (const msg of buffered) {
+        cb(msg);
+      }
+    }
   }
 
   onClose(cb) {

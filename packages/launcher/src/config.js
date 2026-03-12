@@ -19,6 +19,7 @@ export class LauncherConfig {
     p2pBatchMs = 10,
     p2pIdleTimeoutS = 300,
     p2pAdvertiseIps = false,
+    p2pTurnOnly = false,
     telemetryIntervalS = 60,
   } = {}) {
     this.username = username || os.hostname();
@@ -35,6 +36,7 @@ export class LauncherConfig {
     this.p2pBatchMs = p2pBatchMs;
     this.p2pIdleTimeoutS = p2pIdleTimeoutS;
     this.p2pAdvertiseIps = p2pAdvertiseIps;
+    this.p2pTurnOnly = p2pTurnOnly;
     this.telemetryIntervalS = Math.max(10, telemetryIntervalS);
   }
 
@@ -54,6 +56,7 @@ export class LauncherConfig {
       p2pBatchMs: args.p2pBatchMs ? parseInt(args.p2pBatchMs, 10) : 10,
       p2pIdleTimeoutS: args.p2pIdleTimeoutS ? parseInt(args.p2pIdleTimeoutS, 10) : 300,
       p2pAdvertiseIps: args.p2pAdvertiseIps === 'true' || args.p2pAdvertiseIps === true,
+      p2pTurnOnly: args.p2pTurnOnly === 'true' || args.p2pTurnOnly === true,
       telemetryIntervalS: args.telemetryIntervalS ? parseInt(args.telemetryIntervalS, 10) : 60,
     });
   }
@@ -76,6 +79,7 @@ export class LauncherConfig {
         p2p_batch_ms: this.p2pBatchMs,
         p2p_idle_timeout_s: this.p2pIdleTimeoutS,
         p2p_advertise_ips: this.p2pAdvertiseIps,
+        p2p_turn_only: this.p2pTurnOnly,
         telemetry_interval_s: this.telemetryIntervalS,
       },
     });
@@ -101,6 +105,7 @@ export class LauncherConfig {
       p2pBatchMs: l.p2p_batch_ms || 10,
       p2pIdleTimeoutS: l.p2p_idle_timeout_s || 300,
       p2pAdvertiseIps: l.p2p_advertise_ips === true,
+      p2pTurnOnly: l.p2p_turn_only === true,
       telemetryIntervalS: l.telemetry_interval_s || 60,
     });
   }
