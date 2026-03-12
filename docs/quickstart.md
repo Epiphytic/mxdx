@@ -5,8 +5,21 @@ mxdx is a Matrix-native fleet management system. Launchers run on remote machine
 ## Prerequisites
 
 - **Node.js v22+**
-- **Rust toolchain** (stable) -- required for WASM builds
-- **wasm-pack** -- install with `cargo install wasm-pack`
+- A **Matrix homeserver** -- either your own (Tuwunel) or a public server (matrix.org)
+
+## Install
+
+Install the CLI globally:
+
+```sh
+npm install -g @mxdx/cli
+```
+
+This gives you the `mxdx` command (and `mx` shorthand). Or run without installing:
+
+```sh
+npx -y @mxdx/cli --help
+```
 
 ---
 
@@ -33,29 +46,12 @@ registration_token = "my-secret-token"
 
 Start Tuwunel and confirm it is listening on port 8008.
 
-### 3. Clone and install mxdx
+### 3. Start the launcher
+
+On the machine you want to manage, run:
 
 ```sh
-git clone https://github.com/Epiphytic/mxdx.git
-cd mxdx
-npm install
-```
-
-### 4. Build WASM
-
-Both targets must be built -- nodejs for the launcher/client, web for the browser console:
-
-```sh
-wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm
-wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/web-console/wasm
-```
-
-You must rebuild WASM after any Rust code changes.
-
-### 5. Start the launcher
-
-```sh
-node packages/launcher/bin/mxdx-launcher.js \
+mx launcher start \
   --servers http://localhost:8008 \
   --username my-launcher \
   --password secretpass \
@@ -68,12 +64,18 @@ node packages/launcher/bin/mxdx-launcher.js \
 
 The launcher registers itself on the server, creates its room topology, and begins posting telemetry. The password is stored in your OS keyring after the first run.
 
-### 6. Use the CLI client
+Or run without a global install:
+
+```sh
+npx -y @mxdx/launcher start --servers http://localhost:8008 ...
+```
+
+### 4. Use the CLI client
 
 Run a one-shot command:
 
 ```sh
-node packages/client/bin/mxdx-client.js \
+mx client \
   --server http://localhost:8008 \
   --username admin \
   --password adminpass \
@@ -83,20 +85,32 @@ node packages/client/bin/mxdx-client.js \
 Open an interactive shell:
 
 ```sh
-node packages/client/bin/mxdx-client.js \
+mx client \
   --server http://localhost:8008 \
   --username admin \
   --password adminpass \
   shell my-launcher
 ```
 
-### 7. Use the web console
+Or run standalone:
 
 ```sh
-cd packages/web-console && npx vite
+npx -y @mxdx/client --server http://localhost:8008 --username admin exec my-launcher echo hello
 ```
 
-Open [http://localhost:5173](http://localhost:5173) in your browser.
+### 5. Use the web console
+
+```sh
+mx web-console
+```
+
+Open [http://localhost:5173](http://localhost:5173) in your browser. Log in with your admin Matrix credentials.
+
+Or run standalone:
+
+```sh
+npx -y @mxdx/web-console
+```
 
 ---
 
@@ -112,14 +126,10 @@ Register two accounts on [https://matrix.org](https://matrix.org) -- one for the
 
 Open both accounts in Element (or another client that supports cross-signing) and verify them. This establishes the trust chain that mxdx relies on for E2EE.
 
-### 3. Clone, install, and build WASM
-
-Follow steps 3 and 4 from Option A above.
-
-### 4. Start the launcher
+### 3. Start the launcher
 
 ```sh
-node packages/launcher/bin/mxdx-launcher.js \
+mx launcher start \
   --servers https://matrix.org \
   --username my-launcher \
   --password launcherpass \
@@ -129,7 +139,7 @@ node packages/launcher/bin/mxdx-launcher.js \
   --log-format text
 ```
 
-### 5. Connect with the client or web console
+### 4. Connect with the client or web console
 
 Use the same client commands from Option A, replacing `--server` with `https://matrix.org` and using your admin credentials.
 
@@ -202,7 +212,7 @@ Public servers enforce rate limits (roughly 1 event/sec on matrix.org). One-shot
 
 ## Web Console
 
-The web console is a browser-based UI built with Vite and xterm.js.
+The web console is a browser-based UI with xterm.js.
 
 1. **Login** -- Enter your Matrix server URL, username, and password. The console logs in via the WASM Matrix SDK and establishes an E2EE session.
 
@@ -215,3 +225,9 @@ The web console is a browser-based UI built with Vite and xterm.js.
    - Yellow: Matrix transport (relayed through the homeserver, higher latency)
 
 5. **Exec** -- Run one-shot commands from the dashboard without opening a full terminal session.
+
+---
+
+## Development
+
+To contribute or build from source, see the [Development Methodology](mxdx-development-methodology.md). The source requires Rust (stable), wasm-pack, and Node.js v22+.

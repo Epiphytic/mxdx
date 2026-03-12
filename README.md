@@ -29,26 +29,75 @@ Matrix-native fleet management with interactive browser terminals, end-to-end en
       PTY/exec                               xterm.js
 ```
 
-## Quick Start
-
-See the [Quickstart Guide](docs/quickstart.md) for full setup and deployment instructions.
+## Install
 
 ```sh
-npm install
-wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm
-wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/web-console/wasm
+npm install -g @mxdx/cli
 ```
 
-## Components
+This installs the `mxdx` command (and `mx` alias) with all components: launcher, client, and web console.
 
-| Package | Path | Description |
+Or run directly without installing:
+
+```sh
+npx -y @mxdx/cli launcher --help
+npx -y @mxdx/cli client --help
+```
+
+Individual packages can also be installed standalone:
+
+```sh
+npx -y @mxdx/launcher start --servers http://localhost:8008
+npx -y @mxdx/client exec my-launcher echo hello
+npx -y @mxdx/web-console
+```
+
+## Quick Start
+
+**1. Start a launcher on a managed host:**
+
+```sh
+mx launcher start \
+  --servers http://localhost:8008 \
+  --registration-token my-secret-token \
+  --admin-user @admin:localhost \
+  --allowed-commands echo,ls,date,uname \
+  --allowed-cwd /tmp,/home
+```
+
+**2. Run a command from the client:**
+
+```sh
+mx client exec my-launcher echo hello
+```
+
+**3. Open an interactive shell:**
+
+```sh
+mx client shell my-launcher
+```
+
+**4. Launch the web console:**
+
+```sh
+mx web-console
+```
+
+Open [http://localhost:5173](http://localhost:5173) in your browser.
+
+See the [Quickstart Guide](docs/quickstart.md) for full setup instructions including homeserver configuration.
+
+## Packages
+
+| Package | npm | Description |
 | :--- | :--- | :--- |
-| `@mxdx/core` | `packages/core` | WASM bindings (Rust matrix-sdk via wasm-pack), TerminalSocket, BatchedSender, P2P transport, credentials |
-| Launcher | `packages/launcher` | Node.js agent running on managed hosts; creates PTY sessions, handles commands |
-| Client | `packages/client` | CLI for fleet management: exec commands, shell sessions, telemetry |
-| Web Console | `packages/web-console` | Vite SPA with xterm.js -- login, dashboard, terminal, and exec views |
-| E2E Tests | `packages/e2e-tests` | End-to-end tests with TuwunelInstance helper and performance benchmarks |
-| Core WASM | `crates/mxdx-core-wasm` | Rust crate compiled to WASM; wraps matrix-sdk for both Node.js and browser targets |
+| `@mxdx/cli` | [![npm](https://img.shields.io/npm/v/@mxdx/cli)](https://www.npmjs.com/package/@mxdx/cli) | Meta-package with `mxdx` and `mx` CLI aliases |
+| `@mxdx/core` | [![npm](https://img.shields.io/npm/v/@mxdx/core)](https://www.npmjs.com/package/@mxdx/core) | WASM bindings, TerminalSocket, BatchedSender, P2P transport, credentials |
+| `@mxdx/launcher` | [![npm](https://img.shields.io/npm/v/@mxdx/launcher)](https://www.npmjs.com/package/@mxdx/launcher) | Node.js agent running on managed hosts; creates PTY sessions, handles commands |
+| `@mxdx/client` | [![npm](https://img.shields.io/npm/v/@mxdx/client)](https://www.npmjs.com/package/@mxdx/client) | CLI for fleet management: exec commands, shell sessions, telemetry |
+| `@mxdx/web-console` | [![npm](https://img.shields.io/npm/v/@mxdx/web-console)](https://www.npmjs.com/package/@mxdx/web-console) | Browser console with xterm.js -- login, dashboard, terminal, and exec views |
+
+Rust crates are also published on [crates.io](https://crates.io/search?q=mxdx) for developers building on the mxdx platform.
 
 ## Security Model
 
