@@ -176,8 +176,10 @@ jobs:
           curl -fsSL -o /tmp/tuwunel.deb \
             "https://github.com/matrix-construct/tuwunel/releases/download/v1.5.0/v1.5.0-release-all-x86_64-v1-linux-gnu-tuwunel.deb"
           sudo dpkg -i /tmp/tuwunel.deb
-      - name: Build WASM
-        run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm
+      - name: Build WASM (nodejs)
+        run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
+      - name: Build WASM (web)
+        run: wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/core/wasm/web
       - name: Install npm dependencies
         run: npm install
       - name: Run launcher unit tests
@@ -186,6 +188,41 @@ jobs:
         run: node --test packages/e2e-tests/tests/launcher-onboarding.test.js
       - name: Run local E2E tests (commands)
         run: node --test packages/e2e-tests/tests/launcher-commands.test.js
+
+  npm-pack:
+    needs: npm-e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Build WASM (nodejs)
+        run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
+      - name: Build WASM (web)
+        run: wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/core/wasm/web
+      - name: Install npm deps
+        run: npm install
+      - name: Build web-console
+        run: cd packages/web-console && npx vite build
+      - name: Pack all packages (dry-run)
+        run: |
+          cd packages/core && npm pack --dry-run && cd ../..
+          cd packages/launcher && npm pack --dry-run && cd ../..
+          cd packages/client && npm pack --dry-run && cd ../..
+          cd packages/web-console && npm pack --dry-run && cd ../..
+          cd packages/mxdx && npm pack --dry-run && cd ../..
+      - name: Smoke test dispatcher
+        run: |
+          node packages/mxdx/bin/mxdx.js --help
+          node packages/mxdx/bin/mxdx.js launcher --help
+          node packages/mxdx/bin/mxdx.js client --help
 
   npm-public-server:
     needs: preflight
@@ -208,8 +245,8 @@ jobs:
           node-version: "22"
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-      - name: Build WASM
-        run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm
+      - name: Build WASM (nodejs)
+        run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
       - name: Install npm dependencies
         run: npm install
       - name: Write test credentials
