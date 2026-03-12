@@ -1,0 +1,37 @@
+{
+  "branches": ["main"],
+  "verifyConditions": [
+    "@semantic-release/github",
+    "@semantic-release/git"
+  ],
+  "plugins": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/release-notes-generator",
+    [
+      "@semantic-release/exec",
+      {
+        "prepareCmd": "node scripts/bump-versions.mjs ${nextRelease.version}",
+        "publishCmd": "bash scripts/publish-crates.sh && bash scripts/publish-npm.sh"
+      }
+    ],
+    [
+      "@semantic-release/github",
+      {
+        "successComment": false,
+        "failTitle": false
+      }
+    ],
+    [
+      "@semantic-release/git",
+      {
+        "assets": [
+          "Cargo.toml",
+          "crates/*/Cargo.toml",
+          "packages/*/package.json",
+          "Cargo.lock"
+        ],
+        "message": "chore(release): ${nextRelease.version} [skip ci]"
+      }
+    ]
+  ]
+}
