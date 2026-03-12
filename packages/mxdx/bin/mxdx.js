@@ -58,7 +58,6 @@ if (!target) {
   process.exit(1);
 }
 
-// Resolve the target package's bin script
 let binPath;
 try {
   binPath = require.resolve(target);
@@ -69,7 +68,6 @@ try {
   process.exit(1);
 }
 
-// Delegate to the target with remaining args
 const childArgs = args.slice(1);
 try {
   execFileSync(process.execPath, [binPath, ...childArgs], { stdio: 'inherit' });

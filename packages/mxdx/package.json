@@ -1,5 +1,5 @@
 {
-  "name": "mxdx",
+  "name": "@mxdx/cli",
   "version": "0.1.0",
   "description": "Matrix-native fleet management with E2EE terminals and P2P transport",
   "type": "module",
@@ -10,6 +10,9 @@
   "files": [
     "bin/"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "engines": {
     "node": ">=22"
   },

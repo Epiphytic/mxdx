@@ -15,7 +15,7 @@ cd packages/client && npm publish --provenance --access public && cd ../..
 echo "Publishing @mxdx/web-console..."
 cd packages/web-console && npm publish --provenance --access public && cd ../..
 
-echo "Publishing mxdx..."
+echo "Publishing @mxdx/cli..."
 cd packages/mxdx && npm publish --provenance --access public && cd ../..
 
 echo "All npm packages published."
