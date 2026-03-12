@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  id-token: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Install system deps
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build workspace
+        run: cargo build --workspace --exclude mxdx-core-wasm
+
+      - name: Run Rust tests
+        run: cargo test --workspace --lib --exclude mxdx-core-wasm
+
+      - name: Build WASM (nodejs)
+        run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
+
+      - name: Build WASM (web)
+        run: wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/core/wasm/web
+
+      - name: Install npm deps
+        run: npm install
+
+      - name: Build web-console
+        run: cd packages/web-console && npx vite build
+
+      - name: Smoke test dispatcher
+        run: |
+          node packages/mxdx/bin/mxdx.js --help
+          node packages/mxdx/bin/mxdx.js --version
+          node packages/mxdx/bin/mxdx.js launcher --help
+          node packages/mxdx/bin/mxdx.js client --help
+
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npx semantic-release
