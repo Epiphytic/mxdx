@@ -10,7 +10,7 @@ export default defineConfig({
     },
   },
   optimizeDeps: {
-    exclude: ['./wasm/mxdx_core_wasm.js'],
+    exclude: ['../../core/wasm/web/mxdx_core_wasm.js'],
   },
   server: {
     port: 5173,

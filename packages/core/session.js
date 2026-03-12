@@ -1,4 +1,4 @@
-import { WasmMatrixClient } from './wasm/mxdx_core_wasm.js';
+import { WasmMatrixClient } from './wasm/nodejs/mxdx_core_wasm.js';
 import { CredentialStore } from './credentials.js';
 import { saveIndexedDB, restoreIndexedDB } from './persistent-indexeddb.js';
 

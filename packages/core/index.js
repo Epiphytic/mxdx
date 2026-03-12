@@ -2,7 +2,7 @@
 // In browser environments this module is not used (browser has real IndexedDB).
 export { saveIndexedDB, restoreIndexedDB } from './persistent-indexeddb.js';
 
-export * from './wasm/mxdx_core_wasm.js';
+export * from './wasm/nodejs/mxdx_core_wasm.js';
 export { CredentialStore } from './credentials.js';
 export { connectWithSession } from './session.js';
 export { TerminalSocket } from './terminal-socket.js';

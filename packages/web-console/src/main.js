@@ -1,4 +1,4 @@
-import init, { WasmMatrixClient } from '../wasm/mxdx_core_wasm.js';
+import init, { WasmMatrixClient } from '../../core/wasm/web/mxdx_core_wasm.js';
 import { setupAuth } from './auth.js';
 import { setupDashboard, stopDashboardRefresh } from './dashboard.js';
 import { setupTerminalView, reconnectTerminalView } from './terminal-view.js';

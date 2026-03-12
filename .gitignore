@@ -11,8 +11,8 @@ node_modules/
 test-credentials.toml
 
 # WASM build artifacts (regenerated from crates/mxdx-core-wasm)
+# Dual-target layout: packages/core/wasm/nodejs/ and packages/core/wasm/web/
 packages/core/wasm/
-packages/web-console/wasm/
 
 # Web console build output
 packages/web-console/dist/

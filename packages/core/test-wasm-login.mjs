@@ -7,7 +7,7 @@
  *   TUWUNEL_URL=http://127.0.0.1:PORT node packages/core/test-wasm-login.mjs
  */
 
-import { WasmMatrixClient } from './wasm/mxdx_core_wasm.js';
+import { WasmMatrixClient } from './wasm/nodejs/mxdx_core_wasm.js';
 
 const url = process.env.TUWUNEL_URL;
 if (!url) {
