@@ -1,7 +1,13 @@
 [package]
 name = "mxdx-secrets"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Age encryption and secret management for mxdx"
 
 [[bin]]
 name = "mxdx-secrets"
@@ -12,8 +18,8 @@ name = "mxdx_secrets"
 path = "src/lib.rs"
 
 [dependencies]
-mxdx-types = { path = "../mxdx-types" }
-mxdx-matrix = { path = "../mxdx-matrix" }
+mxdx-types = { path = "../mxdx-types", version = "0.1.0" }
+mxdx-matrix = { path = "../mxdx-matrix", version = "0.1.0" }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

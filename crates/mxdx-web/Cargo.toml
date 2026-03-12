@@ -1,7 +1,13 @@
 [package]
 name = "mxdx-web"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Web server backend for mxdx management console"
 
 [[bin]]
 name = "mxdx-web"
@@ -12,7 +18,7 @@ name = "mxdx_web"
 path = "src/lib.rs"
 
 [dependencies]
-mxdx-types = { path = "../mxdx-types" }
+mxdx-types = { path = "../mxdx-types", version = "0.1.0" }
 axum = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

@@ -1,7 +1,13 @@
 [package]
 name = "mxdx-core-wasm"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "WASM bindings for mxdx Matrix operations"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -23,7 +29,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 matrix-sdk = { version = "0.16", default-features = false, features = ["e2e-encryption", "js", "indexeddb", "rustls-tls"] }
 matrix-sdk-base = { version = "0.16", default-features = false, features = ["experimental-encrypted-state-events"] }
 
-mxdx-types = { path = "../mxdx-types" }
+mxdx-types = { path = "../mxdx-types", version = "0.1.0" }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

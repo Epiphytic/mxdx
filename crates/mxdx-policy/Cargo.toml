@@ -1,11 +1,17 @@
 [package]
 name = "mxdx-policy"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Access control and appservice registration for mxdx"
 
 [dependencies]
-mxdx-types = { path = "../mxdx-types" }
-mxdx-matrix = { path = "../mxdx-matrix" }
+mxdx-types = { path = "../mxdx-types", version = "0.1.0" }
+mxdx-matrix = { path = "../mxdx-matrix", version = "0.1.0" }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

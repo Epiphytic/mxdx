@@ -1,7 +1,13 @@
 [package]
 name = "mxdx-launcher"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Fleet management launcher agent for mxdx"
 
 [[bin]]
 name = "mxdx-launcher"
@@ -16,8 +22,8 @@ default = ["native"]
 native = ["dep:mxdx-matrix", "dep:tokio"]
 
 [dependencies]
-mxdx-types = { path = "../mxdx-types" }
-mxdx-matrix = { path = "../mxdx-matrix", optional = true }
+mxdx-types = { path = "../mxdx-types", version = "0.1.0" }
+mxdx-matrix = { path = "../mxdx-matrix", version = "0.1.0", optional = true }
 anyhow = { workspace = true }
 tokio = { workspace = true, optional = true }
 tracing = { workspace = true }
