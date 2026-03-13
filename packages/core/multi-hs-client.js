@@ -25,12 +25,13 @@ export class MultiHsClient {
   static async connect(configs, options = {}) {
     const { preferredServer, log = () => {} } = options;
 
-    const results = await Promise.all(
-      configs.map(async (cfg) => {
-        const { client } = await connectWithSession(cfg);
-        return { client, server: cfg.server };
-      }),
-    );
+    // Connect sequentially — IndexedDB crypto store is process-global,
+    // parallel connectWithSession calls conflict on save/restore.
+    const results = [];
+    for (const cfg of configs) {
+      const { client } = await connectWithSession(cfg);
+      results.push({ client, server: cfg.server });
+    }
 
     return MultiHsClient._createFromClients(results, { preferredServer, log });
   }
