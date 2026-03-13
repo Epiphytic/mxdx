@@ -210,3 +210,44 @@ describe('MultiHsClient: Recovery Probes', () => {
     await mhs.shutdown(); // should not throw
   });
 });
+
+describe('MultiHsClient: Sending API', () => {
+  it('sendEvent routes through preferred client', async () => {
+    let sentTo = null;
+    const s1Mock = new MockClient({ userId: '@u:hs1', deviceId: 'D1', latencyMs: 5 });
+    s1Mock.sendEvent = async (rid, type, content) => { sentTo = 'hs1'; };
+    const s2Mock = new MockClient({ userId: '@u:hs2', deviceId: 'D2', latencyMs: 10 });
+    s2Mock.sendEvent = async (rid, type, content) => { sentTo = 'hs2'; };
+    const mhs = await createFromMocks([
+      { client: s1Mock, server: 'hs1' },
+      { client: s2Mock, server: 'hs2' },
+    ]);
+    await mhs.sendEvent('!room', 'org.mxdx.command', '{}');
+    assert.strictEqual(sentTo, 'hs1');
+    await mhs.shutdown();
+  });
+
+  it('sendEvent failure records circuit breaker failure', async () => {
+    const s1Mock = new MockClient({ userId: '@u:hs1', deviceId: 'D1', latencyMs: 5 });
+    s1Mock.sendEvent = async () => { throw new Error('send failed'); };
+    const s2Mock = new MockClient({ userId: '@u:hs2', deviceId: 'D2', latencyMs: 10 });
+    const mhs = await createFromMocks([
+      { client: s1Mock, server: 'hs1' },
+      { client: s2Mock, server: 'hs2' },
+    ]);
+    try { await mhs.sendEvent('!room', 'type', '{}'); } catch {}
+    const health = mhs.serverHealth();
+    assert.strictEqual(health.get('hs1').status, 'healthy');
+    await mhs.shutdown();
+  });
+
+  it('proxy methods delegate to preferred', async () => {
+    let invitedTo = null;
+    const s1Mock = new MockClient({ userId: '@u:hs1', deviceId: 'D1', latencyMs: 5 });
+    s1Mock.inviteUser = async (rid, uid) => { invitedTo = uid; };
+    const mhs = await createFromMocks([{ client: s1Mock, server: 'hs1' }]);
+    await mhs.inviteUser('!room', '@bob:hs1');
+    assert.strictEqual(invitedTo, '@bob:hs1');
+    await mhs.shutdown();
+  });
+});

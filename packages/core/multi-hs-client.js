@@ -95,6 +95,49 @@ export class MultiHsClient {
 
   onPreferredChange(cb) { this.#onPreferredChangeCb = cb; }
 
+  // ── Sending API (routes through preferred) ──
+
+  async sendEvent(roomId, type, contentJson) {
+    try {
+      const result = await this.preferred.client.sendEvent(roomId, type, contentJson);
+      this._recordSuccess(this.#preferredIndex);
+      return result;
+    } catch (err) {
+      this._recordFailure(this.#preferredIndex);
+      throw err;
+    }
+  }
+
+  async sendStateEvent(roomId, type, stateKey, contentJson) {
+    try {
+      const result = await this.preferred.client.sendStateEvent(roomId, type, stateKey, contentJson);
+      this._recordSuccess(this.#preferredIndex);
+      return result;
+    } catch (err) {
+      this._recordFailure(this.#preferredIndex);
+      throw err;
+    }
+  }
+
+  // ── Proxy methods (delegate to preferred) ──
+
+  async syncOnce() { return this.preferred.client.syncOnce(); }
+  async joinRoom(roomId) { return this.preferred.client.joinRoom(roomId); }
+  async createDmRoom(userId) { return this.preferred.client.createDmRoom(userId); }
+  async inviteUser(roomId, userId) { return this.preferred.client.inviteUser(roomId, userId); }
+  invitedRoomIds() { return this.preferred.client.invitedRoomIds(); }
+  async getOrCreateLauncherSpace(name) { return this.preferred.client.getOrCreateLauncherSpace(name); }
+  async collectRoomEvents(roomId, limit) { return this.preferred.client.collectRoomEvents(roomId, limit); }
+  async exportSession() { return this.preferred.client.exportSession(); }
+  async bootstrapCrossSigningIfNeeded(pw) { return this.preferred.client.bootstrapCrossSigningIfNeeded(pw); }
+  async verifyOwnIdentity() { return this.preferred.client.verifyOwnIdentity(); }
+  async createRoom(config) { return this.preferred.client.createRoom(config); }
+  async readRoomEvents(roomId) { return this.preferred.client.readRoomEvents(roomId); }
+  async findRoomEvents(roomId, type, limit) { return this.preferred.client.findRoomEvents(roomId, type, limit); }
+  async listLauncherSpaces() { return this.preferred.client.listLauncherSpaces(); }
+
+  // ── Deduplication ──
+
   _isDuplicate(eventId) {
     if (this.isSingleServer) return false;
     if (this.#seenEvents.has(eventId)) return true;
