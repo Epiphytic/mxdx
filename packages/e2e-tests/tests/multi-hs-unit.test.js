@@ -399,3 +399,40 @@ describe('ClientConfig: Multi-HS fields', () => {
     assert.strictEqual(config.preferredServer, null);
   });
 });
+
+describe('MultiHsClient: Telemetry fields', () => {
+  it('serverHealth returns map of all servers', async () => {
+    const s1 = { client: new MockClient({ userId: '@u:hs1', deviceId: 'D1', latencyMs: 5 }), server: 'hs1' };
+    const s2 = { client: new MockClient({ userId: '@u:hs2', deviceId: 'D2', latencyMs: 10 }), server: 'hs2' };
+    const mhs = await createFromMocks([s1, s2]);
+    const health = mhs.serverHealth();
+    assert.strictEqual(health.size, 2);
+    assert.strictEqual(health.get('hs1').status, 'healthy');
+    assert.strictEqual(health.get('hs2').status, 'healthy');
+    assert.ok(health.get('hs1').latencyMs < health.get('hs2').latencyMs);
+    await mhs.shutdown();
+  });
+
+  it('allUserIds returns all user IDs', async () => {
+    const s1 = { client: new MockClient({ userId: '@u:hs1', deviceId: 'D1' }), server: 'hs1' };
+    const s2 = { client: new MockClient({ userId: '@u:hs2', deviceId: 'D2' }), server: 'hs2' };
+    const mhs = await createFromMocks([s1, s2]);
+    assert.deepStrictEqual(mhs.allUserIds(), ['@u:hs1', '@u:hs2']);
+    await mhs.shutdown();
+  });
+
+  it('onPreferredChange fires on failover', async () => {
+    const s1 = { client: new MockClient({ userId: '@u:hs1', deviceId: 'D1', latencyMs: 5 }), server: 'hs1' };
+    const s2 = { client: new MockClient({ userId: '@u:hs2', deviceId: 'D2', latencyMs: 10 }), server: 'hs2' };
+    const mhs = await createFromMocks([s1, s2]);
+    let changed = false;
+    mhs.onPreferredChange((newPref, oldPref) => {
+      changed = true;
+      assert.strictEqual(newPref.server, 'hs2');
+      assert.strictEqual(oldPref.server, 'hs1');
+    });
+    for (let i = 0; i < 5; i++) mhs._recordFailure(0);
+    assert.ok(changed);
+    await mhs.shutdown();
+  });
+});

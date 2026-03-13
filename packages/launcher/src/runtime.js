@@ -332,31 +332,62 @@ export class LauncherRuntime {
   }
 
   async start() {
-    const server = this.#config.servers[0];
+    const servers = this.#config.servers;
     const username = this.#config.username;
     const log = (msg) => this.#log.info(msg);
 
     // ── 1. Connect (crypto store is persistent via IndexedDB snapshots) ──
-    const { client, freshLogin, password } = await connectWithSession({
-      username,
-      server,
-      password: this.#config.password,
-      registrationToken: this.#config.registrationToken,
-      configDir: this.#config.configDir,
-      useKeychain: true,
-      log,
-    });
-    this.#client = client;
+    if (servers.length > 1) {
+      const { MultiHsClient } = await import('@mxdx/core');
+      const configs = servers.map(server => {
+        const creds = this.#config.serverCredentials?.[server];
+        return {
+          username: creds?.username || username,
+          server,
+          password: creds?.password || this.#config.password,
+          registrationToken: this.#config.registrationToken,
+          configDir: this.#config.configDir,
+          useKeychain: true,
+          log,
+        };
+      });
+      this.#client = await MultiHsClient.connect(configs, {
+        preferredServer: this.#config.preferredServer,
+        log,
+      });
 
-    // ── 2. Remove password from config file after keyring storage ─
-    if (freshLogin && this.#config.password && this.#config.configPath) {
-      this.#config.password = undefined;
-      this.#config._password = undefined;
-      try {
-        this.#config.save(this.#config.configPath);
-        log('Password removed from config file (now in keyring)');
-      } catch {
-        // Non-fatal: config may be read-only
+      this.#client.onPreferredChange((newPreferred, oldPreferred) => {
+        this.#log.info('Preferred server changed', {
+          from: oldPreferred.server,
+          to: newPreferred.server,
+        });
+        this.#postTelemetry().catch(err =>
+          this.#log.warn('telemetry post failed after failover', { error: err.message })
+        );
+      });
+    } else {
+      const server = servers[0];
+      const { client, freshLogin } = await connectWithSession({
+        username,
+        server,
+        password: this.#config.password,
+        registrationToken: this.#config.registrationToken,
+        configDir: this.#config.configDir,
+        useKeychain: true,
+        log,
+      });
+      this.#client = client;
+
+      // ── 2. Remove password from config file after keyring storage ─
+      if (freshLogin && this.#config.password && this.#config.configPath) {
+        this.#config.password = undefined;
+        this.#config._password = undefined;
+        try {
+          this.#config.save(this.#config.configPath);
+          log('Password removed from config file (now in keyring)');
+        } catch {
+          // Non-fatal: config may be read-only
+        }
       }
     }
 
@@ -924,6 +955,22 @@ export class LauncherRuntime {
     if (this.#config.p2pAdvertiseIps) {
       telemetry.p2p.internal_ips = this.#getInternalIps();
     }
+
+    // Multi-homeserver fields
+    if (this.#client.serverCount > 1) {
+      telemetry.preferred_server = this.#client.preferred.server;
+      telemetry.preferred_identity = this.#client.preferred.userId;
+      telemetry.accounts = this.#client.allUserIds();
+      telemetry.server_health = {};
+      for (const [server, health] of this.#client.serverHealth()) {
+        telemetry.server_health[server] = {
+          status: health.status,
+          latency_ms: Math.round(health.latencyMs),
+        };
+      }
+    }
+
+    telemetry.status = 'online';
 
     await this.#client.sendStateEvent(
       this.#topology.exec_room_id,
