@@ -251,3 +251,51 @@ describe('MultiHsClient: Sending API', () => {
     await mhs.shutdown();
   });
 });
+
+describe('MultiHsClient: Receiving API', () => {
+  it('single-server: delegates directly to client.onRoomEvent', async () => {
+    const s1Mock = new MockClient({ userId: '@u:hs1', deviceId: 'D1' });
+    s1Mock.onRoomEvent = async (rid, type, timeout) => JSON.stringify({ event_id: '$e1', type, content: {} });
+    const mhs = await createFromMocks([{ client: s1Mock, server: 'hs1' }]);
+    const result = await mhs.onRoomEvent('!room', 'org.mxdx.command', 5);
+    assert.ok(result);
+    const parsed = JSON.parse(result);
+    assert.strictEqual(parsed.event_id, '$e1');
+    await mhs.shutdown();
+  });
+
+  it('two servers: first to deliver wins, second is deduplicated', async () => {
+    const s1Mock = new MockClient({ userId: '@u:hs1', deviceId: 'D1' });
+    s1Mock.onRoomEvent = async (rid, type, timeout) => {
+      await new Promise(r => setTimeout(r, 50));
+      return JSON.stringify({ event_id: '$same', type, content: { from: 'hs1' } });
+    };
+    const s2Mock = new MockClient({ userId: '@u:hs2', deviceId: 'D2' });
+    s2Mock.onRoomEvent = async (rid, type, timeout) => {
+      await new Promise(r => setTimeout(r, 10));
+      return JSON.stringify({ event_id: '$same', type, content: { from: 'hs2' } });
+    };
+    const mhs = await createFromMocks([
+      { client: s1Mock, server: 'hs1' },
+      { client: s2Mock, server: 'hs2' },
+    ]);
+    const result = await mhs.onRoomEvent('!room', 'org.mxdx.command', 5);
+    const parsed = JSON.parse(result);
+    assert.strictEqual(parsed.content.from, 'hs2');
+    await mhs.shutdown();
+  });
+
+  it('timeout returns null when no server delivers', async () => {
+    const s1Mock = new MockClient({ userId: '@u:hs1', deviceId: 'D1' });
+    s1Mock.onRoomEvent = async (rid, type, timeout) => null;
+    const s2Mock = new MockClient({ userId: '@u:hs2', deviceId: 'D2' });
+    s2Mock.onRoomEvent = async (rid, type, timeout) => null;
+    const mhs = await createFromMocks([
+      { client: s1Mock, server: 'hs1' },
+      { client: s2Mock, server: 'hs2' },
+    ]);
+    const result = await mhs.onRoomEvent('!room', 'type', 1);
+    assert.strictEqual(result, null);
+    await mhs.shutdown();
+  });
+});

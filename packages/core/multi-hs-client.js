@@ -136,6 +136,47 @@ export class MultiHsClient {
   async findRoomEvents(roomId, type, limit) { return this.preferred.client.findRoomEvents(roomId, type, limit); }
   async listLauncherSpaces() { return this.preferred.client.listLauncherSpaces(); }
 
+  // ── Receiving API (deduplicated across all servers) ──
+
+  async onRoomEvent(roomId, type, timeoutSecs) {
+    if (this.isSingleServer) {
+      return this.preferred.client.onRoomEvent(roomId, type, timeoutSecs);
+    }
+
+    return new Promise((resolve) => {
+      let resolved = false;
+      const timerId = setTimeout(() => {
+        if (!resolved) { resolved = true; resolve(null); }
+      }, timeoutSecs * 1000);
+
+      for (let i = 0; i < this.#entries.length; i++) {
+        const entry = this.#entries[i];
+        const idx = i;
+        const state = this.#circuitBreakers.get(entry.server);
+        if (state?.status === 'down') continue;
+
+        entry.client.onRoomEvent(roomId, type, timeoutSecs)
+          .then((eventJson) => {
+            if (resolved || !eventJson || eventJson === 'null') return;
+            try {
+              const event = JSON.parse(eventJson);
+              const eventId = event?.event_id;
+              if (eventId && this._isDuplicate(eventId)) return;
+            } catch { /* parse failed, deliver anyway */ }
+            if (!resolved) {
+              resolved = true;
+              clearTimeout(timerId);
+              this._recordSuccess(idx);
+              resolve(eventJson);
+            }
+          })
+          .catch(() => {
+            this._recordFailure(idx);
+          });
+      }
+    });
+  }
+
   // ── Deduplication ──
 
   _isDuplicate(eventId) {
