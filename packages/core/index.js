@@ -14,3 +14,4 @@ export { NodeWebRTCChannel } from './webrtc-channel-node.js';
 export { P2PSignaling } from './p2p-signaling.js';
 export { P2PTransport } from './p2p-transport.js';
 export { P2PCrypto, generateSessionKey, createP2PCrypto } from './p2p-crypto.js';
+export { MultiHsClient } from './multi-hs-client.js';
