@@ -6,6 +6,9 @@ export class MultiHsClient {
   #preferredOverride = null;
   #onPreferredChangeCb = null;
   #running = true;
+  #seenEvents = new Map();  // eventId -> timestamp
+  static #MAX_SEEN = 10_000;
+  static #EVICT_BATCH = 2_000;
 
   /**
    * Connect to multiple homeservers, measure latency, select preferred.
@@ -82,6 +85,20 @@ export class MultiHsClient {
   get isSingleServer() { return this.#entries.length <= 1; }
 
   onPreferredChange(cb) { this.#onPreferredChangeCb = cb; }
+
+  _isDuplicate(eventId) {
+    if (this.isSingleServer) return false;
+    if (this.#seenEvents.has(eventId)) return true;
+    this.#seenEvents.set(eventId, Date.now());
+    if (this.#seenEvents.size > MultiHsClient.#MAX_SEEN) {
+      let count = 0;
+      for (const key of this.#seenEvents.keys()) {
+        if (count++ >= MultiHsClient.#EVICT_BATCH) break;
+        this.#seenEvents.delete(key);
+      }
+    }
+    return false;
+  }
 
   async shutdown() {
     this.#running = false;

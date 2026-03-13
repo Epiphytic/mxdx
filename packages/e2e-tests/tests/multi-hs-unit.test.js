@@ -79,3 +79,42 @@ describe('MultiHsClient: Core', () => {
     await mhs.shutdown(); // no throw
   });
 });
+
+describe('MultiHsClient: Deduplication', () => {
+  it('first event is not a duplicate', async () => {
+    const mock = { client: new MockClient({ userId: '@u:hs1', deviceId: 'D1' }), server: 'hs1' };
+    const fast = { client: new MockClient({ userId: '@u:hs2', deviceId: 'D2' }), server: 'hs2' };
+    const mhs = await createFromMocks([mock, fast]);
+    assert.strictEqual(mhs._isDuplicate('$event1'), false);
+    await mhs.shutdown();
+  });
+
+  it('second occurrence of same event ID is a duplicate', async () => {
+    const mock = { client: new MockClient({ userId: '@u:hs1', deviceId: 'D1' }), server: 'hs1' };
+    const fast = { client: new MockClient({ userId: '@u:hs2', deviceId: 'D2' }), server: 'hs2' };
+    const mhs = await createFromMocks([mock, fast]);
+    mhs._isDuplicate('$event1');
+    assert.strictEqual(mhs._isDuplicate('$event1'), true);
+    await mhs.shutdown();
+  });
+
+  it('evicts oldest entries when seen set exceeds max size', async () => {
+    const mock = { client: new MockClient({ userId: '@u:hs1', deviceId: 'D1' }), server: 'hs1' };
+    const fast = { client: new MockClient({ userId: '@u:hs2', deviceId: 'D2' }), server: 'hs2' };
+    const mhs = await createFromMocks([mock, fast]);
+    for (let i = 0; i < 10001; i++) {
+      mhs._isDuplicate(`$evt${i}`);
+    }
+    assert.strictEqual(mhs._isDuplicate('$evt0'), false); // was evicted
+    assert.strictEqual(mhs._isDuplicate('$evt10000'), true); // still in set
+    await mhs.shutdown();
+  });
+
+  it('single-server mode: always returns false', async () => {
+    const mock = { client: new MockClient({ userId: '@u:hs1', deviceId: 'D1' }), server: 'hs1' };
+    const mhs = await createFromMocks([mock]);
+    assert.strictEqual(mhs._isDuplicate('$event1'), false);
+    assert.strictEqual(mhs._isDuplicate('$event1'), false); // still false
+    await mhs.shutdown();
+  });
+});
