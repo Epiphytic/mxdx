@@ -19,7 +19,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Pin to 1.93.1: rustc 1.94.0 has a trait solver regression
+      # ("queries overflow the depth limit") when compiling matrix-sdk 0.16
+      - uses: dtolnay/rust-toolchain@1.93.1
         with:
           targets: wasm32-unknown-unknown
 

@@ -43,7 +43,7 @@ async function compress(data: Uint8Array): Promise<Uint8Array> {
     const cs = new CompressionStream("deflate");
     const writer = cs.writable.getWriter();
     const reader = cs.readable.getReader();
-    writer.write(data);
+    writer.write(data as unknown as BufferSource);
     writer.close();
     const chunks: Uint8Array[] = [];
     let totalLength = 0;
@@ -71,7 +71,7 @@ async function decompress(data: Uint8Array): Promise<Uint8Array> {
     const ds = new DecompressionStream("deflate");
     const writer = ds.writable.getWriter();
     const reader = ds.readable.getReader();
-    writer.write(data);
+    writer.write(data as unknown as BufferSource);
     writer.close();
     const chunks: Uint8Array[] = [];
     let totalLength = 0;
@@ -180,7 +180,7 @@ export class TerminalSocket {
       const event = this._buffer.shift()!;
       this._expectedSeq++;
       if (this.onmessage) {
-        this.onmessage({ data: event.data.buffer.slice(
+        this.onmessage({ data: (event.data.buffer as ArrayBuffer).slice(
           event.data.byteOffset,
           event.data.byteOffset + event.data.byteLength,
         ) });
