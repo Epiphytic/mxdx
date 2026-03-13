@@ -176,3 +176,37 @@ describe('MultiHsClient: Circuit Breaker', () => {
     await mhs.shutdown();
   });
 });
+
+describe('MultiHsClient: Recovery Probes', () => {
+  it('recovery probe jitter is in range [60000, 160000]', async () => {
+    const s1 = { client: new MockClient({ userId: '@u:hs1', deviceId: 'D1' }), server: 'hs1' };
+    const s2 = { client: new MockClient({ userId: '@u:hs2', deviceId: 'D2' }), server: 'hs2' };
+    const mhs = await createFromMocks([s1, s2]);
+    for (let i = 0; i < 100; i++) {
+      const jitter = mhs._recoveryJitterMs();
+      assert.ok(jitter >= 60000, `Jitter ${jitter} should be >= 60000`);
+      assert.ok(jitter <= 160000, `Jitter ${jitter} should be <= 160000`);
+    }
+    await mhs.shutdown();
+  });
+
+  it('recovered server does not auto-become preferred', async () => {
+    const s1 = { client: new MockClient({ userId: '@u:hs1', deviceId: 'D1', latencyMs: 5 }), server: 'hs1' };
+    const s2 = { client: new MockClient({ userId: '@u:hs2', deviceId: 'D2', latencyMs: 10 }), server: 'hs2' };
+    const mhs = await createFromMocks([s1, s2]);
+    for (let i = 0; i < 5; i++) mhs._recordFailure(0);
+    assert.strictEqual(mhs.preferred.server, 'hs2');
+    mhs._recordSuccess(0);
+    assert.strictEqual(mhs.preferred.server, 'hs2');
+    assert.strictEqual(mhs.serverHealth().get('hs1').status, 'healthy');
+    await mhs.shutdown();
+  });
+
+  it('shutdown clears recovery timers', async () => {
+    const s1 = { client: new MockClient({ userId: '@u:hs1', deviceId: 'D1', latencyMs: 5 }), server: 'hs1' };
+    const s2 = { client: new MockClient({ userId: '@u:hs2', deviceId: 'D2', latencyMs: 10 }), server: 'hs2' };
+    const mhs = await createFromMocks([s1, s2]);
+    for (let i = 0; i < 5; i++) mhs._recordFailure(0);
+    await mhs.shutdown(); // should not throw
+  });
+});
