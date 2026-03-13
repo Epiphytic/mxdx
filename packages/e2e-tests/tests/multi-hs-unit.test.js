@@ -330,3 +330,52 @@ describe('MultiHsClient: Discovery', () => {
     await mhs.shutdown();
   });
 });
+
+// ── Config Tests ──
+
+import { LauncherConfig } from '@mxdx/launcher/src/config.js';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+describe('LauncherConfig: Multi-HS fields', () => {
+  const tmpDir = path.join(os.tmpdir(), `mhs-config-test-${Date.now()}`);
+  const tmpFile = path.join(tmpDir, 'test.toml');
+
+  it('preferredServer defaults to null', () => {
+    const config = new LauncherConfig({ username: 'test', servers: ['hs1'] });
+    assert.strictEqual(config.preferredServer, null);
+  });
+
+  it('serverCredentials defaults to empty object', () => {
+    const config = new LauncherConfig({ username: 'test', servers: ['hs1'] });
+    assert.deepStrictEqual(config.serverCredentials, {});
+  });
+
+  it('round-trips preferredServer through save/load', () => {
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const config = new LauncherConfig({
+      username: 'test',
+      servers: ['hs1', 'hs2'],
+      preferredServer: 'hs2',
+    });
+    config.save(tmpFile);
+    const loaded = LauncherConfig.load(tmpFile);
+    assert.strictEqual(loaded.preferredServer, 'hs2');
+  });
+
+  it('round-trips serverCredentials through save/load', () => {
+    const config = new LauncherConfig({
+      username: 'test',
+      servers: ['hs1', 'hs2'],
+      serverCredentials: { 'hs2': { username: 'alt', password: 'secret' } },
+    });
+    config.save(tmpFile);
+    const loaded = LauncherConfig.load(tmpFile);
+    assert.deepStrictEqual(loaded.serverCredentials, { 'hs2': { username: 'alt', password: 'secret' } });
+  });
+
+  after(() => {
+    try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
+  });
+});

@@ -21,6 +21,9 @@ export class LauncherConfig {
     p2pAdvertiseIps = false,
     p2pTurnOnly = false,
     telemetryIntervalS = 60,
+    preferredServer = null,
+    serverCredentials = {},
+    password = null,
   } = {}) {
     this.username = username || os.hostname();
     this.servers = servers;
@@ -38,6 +41,9 @@ export class LauncherConfig {
     this.p2pAdvertiseIps = p2pAdvertiseIps;
     this.p2pTurnOnly = p2pTurnOnly;
     this.telemetryIntervalS = Math.max(10, telemetryIntervalS);
+    this.preferredServer = preferredServer;
+    this.serverCredentials = serverCredentials;
+    this.password = password;
   }
 
   static fromArgs(args) {
@@ -58,6 +64,8 @@ export class LauncherConfig {
       p2pAdvertiseIps: args.p2pAdvertiseIps === 'true' || args.p2pAdvertiseIps === true,
       p2pTurnOnly: args.p2pTurnOnly === 'true' || args.p2pTurnOnly === true,
       telemetryIntervalS: args.telemetryIntervalS ? parseInt(args.telemetryIntervalS, 10) : 60,
+      preferredServer: args.preferredServer || null,
+      password: args.password || null,
     });
   }
 
@@ -81,6 +89,8 @@ export class LauncherConfig {
         p2p_advertise_ips: this.p2pAdvertiseIps,
         p2p_turn_only: this.p2pTurnOnly,
         telemetry_interval_s: this.telemetryIntervalS,
+        ...(this.preferredServer ? { preferred_server: this.preferredServer } : {}),
+        ...(Object.keys(this.serverCredentials).length ? { server_credentials: this.serverCredentials } : {}),
       },
     });
     fs.writeFileSync(filePath, toml, { mode: 0o600 });
@@ -107,6 +117,8 @@ export class LauncherConfig {
       p2pAdvertiseIps: l.p2p_advertise_ips === true,
       p2pTurnOnly: l.p2p_turn_only === true,
       telemetryIntervalS: l.telemetry_interval_s || 60,
+      preferredServer: l.preferred_server || null,
+      serverCredentials: l.server_credentials || {},
     });
   }
 
