@@ -315,31 +315,66 @@ async function connect(opts) {
   const configPath = opts.config || ClientConfig.defaultPath();
   let config = ClientConfig.load(configPath);
 
-  const server = opts.server || config?.server;
-  const username = opts.username || config?.username;
-  const password = opts.password || config?.password;
+  // Build servers list: CLI --servers flag → config → CLI --server flag
+  let servers;
+  if (opts.servers) {
+    servers = opts.servers.split(',');
+  } else if (config?.servers?.length) {
+    servers = config.servers;
+  } else if (opts.server) {
+    servers = [opts.server];
+  } else if (config?.server) {
+    servers = [config.server];
+  } else {
+    servers = [];
+  }
 
-  if (!server || !username) {
-    console.error('Required: --server, --username (password will be prompted if not in keyring)');
+  const username = opts.username || config?.username;
+  let password = opts.password || config?.password;
+
+  if (!servers.length || !username) {
+    console.error('Required: --server(s), --username (password will be prompted if not in keyring)');
     process.exit(1);
   }
 
   const log = (msg) => console.error(`[client] ${msg}`);
 
-  const result = await connectWithSession({
-    username,
-    server,
-    password,
-    registrationToken: opts.registrationToken,
-    useKeychain: true,
-    log,
-  });
+  let client;
+  if (servers.length > 1) {
+    const { MultiHsClient } = await import('@mxdx/core');
+    const configs = servers.map(server => {
+      const creds = config?.serverCredentials?.[server] || {};
+      return {
+        username: creds.username || username,
+        server,
+        password: creds.password || password,
+        registrationToken: opts.registrationToken,
+        useKeychain: true,
+        log,
+      };
+    });
+    client = await MultiHsClient.connect(configs, {
+      preferredServer: opts.preferredServer || config?.preferredServer,
+      log,
+    });
+  } else {
+    const result = await connectWithSession({
+      username,
+      server: servers[0],
+      password,
+      registrationToken: opts.registrationToken,
+      useKeychain: true,
+      log,
+    });
+    client = result.client;
+    password = result.password;
+  }
 
   // Save config for future use (without password)
   if (!config) {
-    config = new ClientConfig({ username, server });
+    config = new ClientConfig({ username, servers });
     config.save(configPath);
   }
 
-  return result;
+  return { client, password };
 }

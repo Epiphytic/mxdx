@@ -379,3 +379,23 @@ describe('LauncherConfig: Multi-HS fields', () => {
     try { fs.rmSync(tmpDir, { recursive: true }); } catch {}
   });
 });
+
+import { ClientConfig } from '@mxdx/client/src/config.js';
+
+describe('ClientConfig: Multi-HS fields', () => {
+  it('supports servers array with backward compat from server string', () => {
+    const config = new ClientConfig({ username: 'test', server: 'hs1' });
+    assert.deepStrictEqual(config.servers, ['hs1']);
+    assert.strictEqual(config.server, 'hs1');
+  });
+
+  it('servers array takes precedence', () => {
+    const config = new ClientConfig({ username: 'test', servers: ['hs1', 'hs2'], server: 'hs1' });
+    assert.deepStrictEqual(config.servers, ['hs1', 'hs2']);
+  });
+
+  it('preferredServer defaults to null', () => {
+    const config = new ClientConfig({ username: 'test', server: 'hs1' });
+    assert.strictEqual(config.preferredServer, null);
+  });
+});
