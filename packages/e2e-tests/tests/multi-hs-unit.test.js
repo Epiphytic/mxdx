@@ -299,3 +299,34 @@ describe('MultiHsClient: Receiving API', () => {
     await mhs.shutdown();
   });
 });
+
+describe('MultiHsClient: Discovery', () => {
+  it('findLauncherSpace returns first match from any server', async () => {
+    const s1Mock = new MockClient({ userId: '@u:hs1', deviceId: 'D1' });
+    s1Mock.findLauncherSpace = async () => null;
+    const s2Mock = new MockClient({ userId: '@u:hs2', deviceId: 'D2' });
+    s2Mock.findLauncherSpace = async (name) => ({ space_id: '!s', exec_room_id: '!e', logs_room_id: '!l' });
+    const mhs = await createFromMocks([
+      { client: s1Mock, server: 'hs1' },
+      { client: s2Mock, server: 'hs2' },
+    ]);
+    const result = await mhs.findLauncherSpace('my-launcher');
+    assert.ok(result);
+    assert.strictEqual(result.exec_room_id, '!e');
+    await mhs.shutdown();
+  });
+
+  it('returns null when no server has the launcher', async () => {
+    const s1Mock = new MockClient({ userId: '@u:hs1', deviceId: 'D1' });
+    s1Mock.findLauncherSpace = async () => null;
+    const s2Mock = new MockClient({ userId: '@u:hs2', deviceId: 'D2' });
+    s2Mock.findLauncherSpace = async () => null;
+    const mhs = await createFromMocks([
+      { client: s1Mock, server: 'hs1' },
+      { client: s2Mock, server: 'hs2' },
+    ]);
+    const result = await mhs.findLauncherSpace('missing');
+    assert.strictEqual(result, null);
+    await mhs.shutdown();
+  });
+});

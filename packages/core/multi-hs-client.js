@@ -136,6 +136,17 @@ export class MultiHsClient {
   async findRoomEvents(roomId, type, limit) { return this.preferred.client.findRoomEvents(roomId, type, limit); }
   async listLauncherSpaces() { return this.preferred.client.listLauncherSpaces(); }
 
+  async findLauncherSpace(launcherName) {
+    if (this.isSingleServer) {
+      return this.preferred.client.findLauncherSpace(launcherName);
+    }
+    const promises = this.#entries
+      .filter((_, i) => this.#circuitBreakers.get(this.#entries[i].server)?.status !== 'down')
+      .map(entry => entry.client.findLauncherSpace(launcherName).catch(() => null));
+    const results = await Promise.all(promises);
+    return results.find(r => r !== null && r !== undefined) ?? null;
+  }
+
   // ── Receiving API (deduplicated across all servers) ──
 
   async onRoomEvent(roomId, type, timeoutSecs) {
