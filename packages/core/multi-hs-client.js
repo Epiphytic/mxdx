@@ -9,6 +9,10 @@ export class MultiHsClient {
   #seenEvents = new Map();  // eventId -> timestamp
   static #MAX_SEEN = 10_000;
   static #EVICT_BATCH = 2_000;
+  #circuitBreakers = new Map(); // server -> { failures: number[], status: 'healthy'|'down' }
+  #recoveryTimers = new Map();
+  static #FAIL_WINDOW_MS = 5 * 60 * 1000;
+  static #FAIL_THRESHOLD = 5;
 
   /**
    * Connect to multiple homeservers, measure latency, select preferred.
@@ -74,6 +78,11 @@ export class MultiHsClient {
       }
     }
 
+    // Initialize circuit breakers
+    for (const entry of instance.#entries) {
+      instance.#circuitBreakers.set(entry.server, { failures: [], status: 'healthy' });
+    }
+
     log(`MultiHsClient: ${instance.#entries.length} server(s), preferred=${instance.preferred.server} (${Math.round(instance.preferred.latencyMs)}ms)`);
     return instance;
   }
@@ -100,7 +109,110 @@ export class MultiHsClient {
     return false;
   }
 
+  // ── Circuit Breaker ──
+
+  _recordFailure(serverIndex) {
+    if (this.isSingleServer) return;
+    const entry = this.#entries[serverIndex];
+    const state = this.#circuitBreakers.get(entry.server);
+    const now = Date.now();
+    state.failures = state.failures.filter(t => now - t < MultiHsClient.#FAIL_WINDOW_MS);
+    state.failures.push(now);
+
+    if (state.failures.length >= MultiHsClient.#FAIL_THRESHOLD) {
+      // Cross-server sanity: if ALL servers are failing, assume network issue
+      const allFailing = this.#entries.every((_, i) => {
+        const s = this.#circuitBreakers.get(this.#entries[i].server);
+        return s.status === 'down' || s.failures.length >= MultiHsClient.#FAIL_THRESHOLD;
+      });
+      if (allFailing) {
+        for (const [, s] of this.#circuitBreakers) {
+          s.failures = [];
+          s.status = 'healthy';
+        }
+        return;
+      }
+      state.status = 'down';
+      if (serverIndex === this.#preferredIndex) {
+        this.#triggerFailover();
+      }
+      this.#startRecoveryProbe(serverIndex);
+    }
+  }
+
+  _recordSuccess(serverIndex) {
+    if (this.isSingleServer) return;
+    const state = this.#circuitBreakers.get(this.#entries[serverIndex].server);
+    state.failures = [];
+    if (state.status === 'down') {
+      state.status = 'healthy';
+      const timer = this.#recoveryTimers.get(this.#entries[serverIndex].server);
+      if (timer) { clearTimeout(timer); this.#recoveryTimers.delete(this.#entries[serverIndex].server); }
+    }
+  }
+
+  #triggerFailover() {
+    // Synchronous failover: pick lowest-latency healthy server
+    let bestIdx = -1;
+    let bestLatency = Infinity;
+    for (let i = 0; i < this.#entries.length; i++) {
+      if (i === this.#preferredIndex) continue;
+      const s = this.#circuitBreakers.get(this.#entries[i].server);
+      if (s.status === 'down') continue;
+      if (this.#entries[i].latencyMs < bestLatency) {
+        bestLatency = this.#entries[i].latencyMs;
+        bestIdx = i;
+      }
+    }
+    if (bestIdx < 0) return;
+    const old = this.#preferredIndex;
+    this.#preferredIndex = bestIdx;
+    if (this.#onPreferredChangeCb) {
+      this.#onPreferredChangeCb(this.preferred, this.#entries[old]);
+    }
+  }
+
+  serverHealth() {
+    return new Map(this.#entries.map(entry => [
+      entry.server,
+      {
+        status: this.#circuitBreakers.get(entry.server)?.status || 'healthy',
+        latencyMs: entry.latencyMs,
+      },
+    ]));
+  }
+
+  allUserIds() {
+    return this.#entries.map(e => e.userId);
+  }
+
+  // ── Recovery Probes ──
+
+  _recoveryJitterMs() {
+    return 60_000 + Math.floor(Math.random() * 100_001);
+  }
+
+  #startRecoveryProbe(serverIndex) {
+    const server = this.#entries[serverIndex].server;
+    if (this.#recoveryTimers.has(server)) return;
+    const jitterMs = this._recoveryJitterMs();
+    const timer = setTimeout(async () => {
+      this.#recoveryTimers.delete(server);
+      if (!this.#running) return;
+      try {
+        await this.#entries[serverIndex].client.syncOnce();
+        this._recordSuccess(serverIndex);
+      } catch {
+        if (this.#running) this.#startRecoveryProbe(serverIndex);
+      }
+    }, jitterMs);
+    timer.unref?.();
+    this.#recoveryTimers.set(server, timer);
+  }
+
   async shutdown() {
     this.#running = false;
+    for (const [, timer] of this.#recoveryTimers) clearTimeout(timer);
+    this.#recoveryTimers.clear();
   }
 }

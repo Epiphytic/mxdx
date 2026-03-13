@@ -118,3 +118,61 @@ describe('MultiHsClient: Deduplication', () => {
     await mhs.shutdown();
   });
 });
+
+describe('MultiHsClient: Circuit Breaker', () => {
+  it('4 failures in window: server stays healthy', async () => {
+    const s1 = { client: new MockClient({ userId: '@u:hs1', deviceId: 'D1', latencyMs: 5 }), server: 'hs1' };
+    const s2 = { client: new MockClient({ userId: '@u:hs2', deviceId: 'D2', latencyMs: 10 }), server: 'hs2' };
+    const mhs = await createFromMocks([s1, s2]);
+    for (let i = 0; i < 4; i++) mhs._recordFailure(0);
+    const health = mhs.serverHealth();
+    assert.strictEqual(health.get('hs1').status, 'healthy');
+    await mhs.shutdown();
+  });
+
+  it('5 failures in window: server marked down, failover triggers', async () => {
+    const s1 = { client: new MockClient({ userId: '@u:hs1', deviceId: 'D1', latencyMs: 5 }), server: 'hs1' };
+    const s2 = { client: new MockClient({ userId: '@u:hs2', deviceId: 'D2', latencyMs: 10 }), server: 'hs2' };
+    const mhs = await createFromMocks([s1, s2]);
+    assert.strictEqual(mhs.preferred.server, 'hs1');
+    for (let i = 0; i < 5; i++) mhs._recordFailure(0);
+    const health = mhs.serverHealth();
+    assert.strictEqual(health.get('hs1').status, 'down');
+    assert.strictEqual(mhs.preferred.server, 'hs2');
+    await mhs.shutdown();
+  });
+
+  it('all servers failing: no circuit break (network sanity)', async () => {
+    const s1 = { client: new MockClient({ userId: '@u:hs1', deviceId: 'D1', shouldFail: true }), server: 'hs1' };
+    const s2 = { client: new MockClient({ userId: '@u:hs2', deviceId: 'D2', shouldFail: true }), server: 'hs2' };
+    const mhs = await createFromMocks([s1, s2]);
+    for (let i = 0; i < 5; i++) {
+      mhs._recordFailure(0);
+      mhs._recordFailure(1);
+    }
+    const health = mhs.serverHealth();
+    assert.strictEqual(health.get('hs1').status, 'healthy');
+    assert.strictEqual(health.get('hs2').status, 'healthy');
+    await mhs.shutdown();
+  });
+
+  it('single-server: no circuit breaking', async () => {
+    const s1 = { client: new MockClient({ userId: '@u:hs1', deviceId: 'D1' }), server: 'hs1' };
+    const mhs = await createFromMocks([s1]);
+    for (let i = 0; i < 10; i++) mhs._recordFailure(0);
+    const health = mhs.serverHealth();
+    assert.strictEqual(health.get('hs1').status, 'healthy');
+    await mhs.shutdown();
+  });
+
+  it('recordSuccess resets failure count', async () => {
+    const s1 = { client: new MockClient({ userId: '@u:hs1', deviceId: 'D1', latencyMs: 5 }), server: 'hs1' };
+    const s2 = { client: new MockClient({ userId: '@u:hs2', deviceId: 'D2', latencyMs: 10 }), server: 'hs2' };
+    const mhs = await createFromMocks([s1, s2]);
+    for (let i = 0; i < 4; i++) mhs._recordFailure(0);
+    mhs._recordSuccess(0);
+    for (let i = 0; i < 4; i++) mhs._recordFailure(0);
+    assert.strictEqual(mhs.serverHealth().get('hs1').status, 'healthy');
+    await mhs.shutdown();
+  });
+});
