@@ -1,6 +1,6 @@
 {
   "name": "@mxdx/core",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "WASM bindings and shared modules for mxdx fleet management",
   "type": "module",
   "main": "index.js",
@@ -33,7 +33,13 @@
   },
   "homepage": "https://github.com/Epiphytic/mxdx",
   "license": "MIT",
-  "keywords": ["matrix", "e2ee", "wasm", "fleet-management", "webrtc"],
+  "keywords": [
+    "matrix",
+    "e2ee",
+    "wasm",
+    "fleet-management",
+    "webrtc"
+  ],
   "dependencies": {
     "fake-indexeddb": "^6.2.5",
     "node-datachannel": "^0.32.1",

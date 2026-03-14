@@ -1,6 +1,6 @@
 {
   "name": "@mxdx/web-console",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Browser-based management console for mxdx fleet management",
   "type": "module",
   "bin": {
@@ -28,7 +28,13 @@
   },
   "homepage": "https://github.com/Epiphytic/mxdx",
   "license": "MIT",
-  "keywords": ["matrix", "fleet-management", "web-console", "xterm", "terminal"],
+  "keywords": [
+    "matrix",
+    "fleet-management",
+    "web-console",
+    "xterm",
+    "terminal"
+  ],
   "dependencies": {
     "@xterm/xterm": "^5.5.0",
     "@xterm/addon-fit": "^0.10.0",

@@ -10,7 +10,7 @@ categories.workspace = true
 description = "Matrix SDK client facade for mxdx with E2EE support"
 
 [dependencies]
-mxdx-types = { path = "../mxdx-types", version = "0.1.0" }
+mxdx-types = { path = "../mxdx-types", version = "1.0.0" }
 matrix-sdk = { workspace = true }
 ruma = { workspace = true }
 anyhow = { workspace = true }

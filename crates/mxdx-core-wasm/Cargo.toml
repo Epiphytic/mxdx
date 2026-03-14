@@ -29,7 +29,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 matrix-sdk = { version = "0.16", default-features = false, features = ["e2e-encryption", "js", "indexeddb", "rustls-tls"] }
 matrix-sdk-base = { version = "0.16", default-features = false, features = ["experimental-encrypted-state-events"] }
 
-mxdx-types = { path = "../mxdx-types", version = "0.1.0" }
+mxdx-types = { path = "../mxdx-types", version = "1.0.0" }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"

@@ -1,6 +1,6 @@
 {
   "name": "@mxdx/client",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "CLI client for mxdx fleet management",
   "type": "module",
   "bin": {
@@ -23,9 +23,15 @@
   },
   "homepage": "https://github.com/Epiphytic/mxdx",
   "license": "MIT",
-  "keywords": ["matrix", "fleet-management", "cli", "e2ee", "terminal"],
+  "keywords": [
+    "matrix",
+    "fleet-management",
+    "cli",
+    "e2ee",
+    "terminal"
+  ],
   "dependencies": {
-    "@mxdx/core": "0.1.0",
+    "@mxdx/core": "1.0.0",
     "commander": "^12.0.0",
     "smol-toml": "^1.0.0"
   }

@@ -18,8 +18,8 @@ name = "mxdx_secrets"
 path = "src/lib.rs"
 
 [dependencies]
-mxdx-types = { path = "../mxdx-types", version = "0.1.0" }
-mxdx-matrix = { path = "../mxdx-matrix", version = "0.1.0" }
+mxdx-types = { path = "../mxdx-types", version = "1.0.0" }
+mxdx-matrix = { path = "../mxdx-matrix", version = "1.0.0" }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
