@@ -268,6 +268,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore] // requires tuwunel binary
     async fn tuwunel_starts_and_responds_to_health_check() {
         let mut instance = TuwunelInstance::start().await.unwrap();
         let resp = reqwest::get(format!(
@@ -281,6 +282,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires tuwunel binary
     async fn tuwunel_can_register_user() {
         let mut instance = TuwunelInstance::start().await.unwrap();
         let client = instance
@@ -293,6 +295,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires tuwunel binary
     async fn tuwunel_uses_os_assigned_port() {
         // Verify no hardcoded ports (mxdx-ji1)
         let mut instance = TuwunelInstance::start().await.unwrap();

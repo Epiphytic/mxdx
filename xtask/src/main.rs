@@ -80,14 +80,16 @@ fn generate_symbol_tables(workspace_root: &Path) -> Result<String> {
 
         let mut symbols = Vec::new();
 
-        for rs_entry in WalkDir::new(&src_dir)
+        let mut rs_files: Vec<_> = WalkDir::new(&src_dir)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| {
                 e.file_type().is_file()
                     && e.path().extension().map(|ext| ext == "rs").unwrap_or(false)
             })
-        {
+            .collect();
+        rs_files.sort_by(|a, b| a.path().cmp(b.path()));
+        for rs_entry in rs_files {
             let rel_path = rs_entry
                 .path()
                 .strip_prefix(workspace_root)

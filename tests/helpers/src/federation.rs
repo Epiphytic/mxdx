@@ -87,6 +87,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    #[ignore] // requires tuwunel binary
     async fn two_instances_can_federate() {
         let mut pair = FederatedPair::start().await.unwrap();
         let user_a = pair.hs_a.register_user("alice", "pass").await.unwrap();
