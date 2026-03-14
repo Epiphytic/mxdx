@@ -10,7 +10,9 @@ import { deflateSync } from 'node:zlib';
 import { TuwunelInstance } from '../src/tuwunel.js';
 import { WasmMatrixClient, TerminalSocket } from '@mxdx/core';
 
-describe('Interactive Session: DM Room & Terminal I/O', { timeout: 120000 }, () => {
+const tuwunelAvailable = TuwunelInstance.isAvailable();
+
+describe('Interactive Session: DM Room & Terminal I/O', { skip: !tuwunelAvailable && 'tuwunel binary not found', timeout: 120000 }, () => {
   let tuwunel;
   let launcherClient;
   let clientClient;

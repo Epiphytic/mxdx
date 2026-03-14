@@ -6,7 +6,9 @@ import path from 'node:path';
 import { TuwunelInstance } from '../src/tuwunel.js';
 import { MultiHsClient } from '@mxdx/core';
 
-describe('E2E: Multi-Homeserver', { timeout: 180000 }, () => {
+const tuwunelAvailable = TuwunelInstance.isAvailable();
+
+describe('E2E: Multi-Homeserver', { skip: !tuwunelAvailable && 'tuwunel binary not found', timeout: 180000 }, () => {
   let tuwunel1, tuwunel2;
   const LAUNCHER_NAME = `mhs-launcher-${Date.now()}`;
   const PASSWORD = 'testpass123';

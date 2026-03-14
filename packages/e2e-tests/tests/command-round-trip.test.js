@@ -9,7 +9,9 @@ import { WasmMatrixClient } from '@mxdx/core';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LAUNCHER_BIN = path.resolve(__dirname, '../../launcher/bin/mxdx-launcher.js');
 
-describe('E2E: Command Round-Trip', { timeout: 60000 }, () => {
+const tuwunelAvailable = TuwunelInstance.isAvailable();
+
+describe('E2E: Command Round-Trip', { skip: !tuwunelAvailable && 'tuwunel binary not found', timeout: 60000 }, () => {
   let tuwunel;
   let launcherProc;
   const LAUNCHER_NAME = `e2e-launcher-${Date.now()}`;

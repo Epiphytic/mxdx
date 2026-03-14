@@ -220,6 +220,7 @@ mod tests {
     use mxdx_test_helpers::tuwunel::TuwunelInstance;
 
     #[tokio::test]
+    #[ignore] // requires tuwunel binary
     async fn multi_hs_launcher_connects_to_single_homeserver() {
         let instance = TuwunelInstance::start().await.unwrap();
         let url = format!("http://127.0.0.1:{}", instance.port);
@@ -232,6 +233,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires tuwunel binary
     async fn multi_hs_launcher_selects_lowest_latency_primary() {
         let instance_a = TuwunelInstance::start().await.unwrap();
         let instance_b = TuwunelInstance::start().await.unwrap();
@@ -258,6 +260,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires tuwunel binary
     async fn health_check_returns_active_when_primary_healthy() {
         let instance = TuwunelInstance::start().await.unwrap();
         let url = format!("http://127.0.0.1:{}", instance.port);
@@ -270,6 +273,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires tuwunel binary
     async fn launcher_fails_over_from_primary_to_secondary() {
         let mut instance_a = TuwunelInstance::start().await.unwrap();
         let mut instance_b = TuwunelInstance::start().await.unwrap();
@@ -310,6 +314,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires tuwunel binary
     async fn launcher_enters_unavailable_when_all_down() {
         let mut instance_a = TuwunelInstance::start().await.unwrap();
         let mut instance_b = TuwunelInstance::start().await.unwrap();
@@ -334,6 +339,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires tuwunel binary
     async fn security_non_launcher_cannot_update_identity_event() {
         // Verify that the launcher creates rooms where only it has state-event
         // permissions. This is a simplified check: the launcher client (room creator)

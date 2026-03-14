@@ -19,6 +19,8 @@ import { performance } from 'node:perf_hooks';
 import { TuwunelInstance } from '../src/tuwunel.js';
 import { WasmMatrixClient, P2PTransport, BatchedSender } from '@mxdx/core';
 
+const tuwunelAvailable = TuwunelInstance.isAvailable();
+
 // WASM matrix-sdk-crypto fires async "Session expired" panics after tests end.
 // These are harmless (test process is exiting) but crash the test runner.
 process.on('uncaughtException', (err) => {
@@ -149,7 +151,7 @@ function stats(latencies) {
 // ─── Collect all results for HTML report ──────────────────────────────────────
 const allResults = [];
 
-describe('Terminal Performance: P2P vs Matrix', { timeout: 180000 }, () => {
+describe('Terminal Performance: P2P vs Matrix', { skip: !tuwunelAvailable && 'tuwunel binary not found', timeout: 180000 }, () => {
   let tuwunel;
   let launcherClient;
   let clientClient;
@@ -531,7 +533,7 @@ describe('Terminal Performance: P2P vs Matrix', { timeout: 180000 }, () => {
 
 // ─── Public Server Performance (optional, requires credentials) ───────────────
 
-describe('Terminal Performance: Public Server', { timeout: 300000 }, () => {
+describe('Terminal Performance: Public Server', { skip: !tuwunelAvailable && 'tuwunel binary not found', timeout: 300000 }, () => {
   let creds;
   let client1;
   let client2;

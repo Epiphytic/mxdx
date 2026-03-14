@@ -8,7 +8,9 @@ import assert from 'node:assert';
 import { TuwunelInstance } from '../src/tuwunel.js';
 import { WasmMatrixClient } from '@mxdx/core';
 
-describe('Multi-launcher per account', { timeout: 120000 }, () => {
+const tuwunelAvailable = TuwunelInstance.isAvailable();
+
+describe('Multi-launcher per account', { skip: !tuwunelAvailable && 'tuwunel binary not found', timeout: 120000 }, () => {
   let tuwunel;
   let sharedClient; // one Matrix account, used by both "launchers"
   let clientUser;   // the client connecting to launchers

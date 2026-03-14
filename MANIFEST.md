@@ -27,6 +27,43 @@
 
 <!-- BEGIN GENERATED SYMBOL TABLES -->
 
+### mxdx-core-wasm
+
+| Symbol | Kind | File |
+|:---|:---|:---|
+| `init` | fn | `crates/mxdx-core-wasm/src/lib.rs` |
+| `sdk_version` | fn | `crates/mxdx-core-wasm/src/lib.rs` |
+| `LauncherTopology` | struct | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient` | struct | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::register` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::login` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::is_logged_in` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::user_id` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::sync_once` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::invite_user` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::join_room` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::invited_room_ids` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::export_session` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::restore_session` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::bootstrap_cross_signing` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::bootstrap_cross_signing_if_needed` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::device_id` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::verify_user` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::verify_own_identity` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::is_user_verified` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::create_launcher_space` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::find_launcher_space` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::get_or_create_launcher_space` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::list_launcher_spaces` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::send_event` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::send_state_event` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::read_room_events` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::collect_room_events` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::create_dm_room` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::create_room` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::find_room_events` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+| `WasmMatrixClient::on_room_event` | method | `crates/mxdx-core-wasm/src/lib.rs` |
+
 ### mxdx-launcher
 
 | Symbol | Kind | File |
@@ -96,6 +133,7 @@
 | Symbol | Kind | File |
 |:---|:---|:---|
 | `MatrixClient` | struct | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::login_and_connect` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::register_and_connect` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::is_logged_in` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::crypto_enabled` | method | `crates/mxdx-matrix/src/client.rs` |
@@ -107,9 +145,15 @@
 | `MatrixClient::send_state_event` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::sync_once` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::sync_and_collect_events` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::wait_for_key_exchange` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::set_room_creation_delay` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::room_creation_delay` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::set_room_creation_timeout` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::inner` | method | `crates/mxdx-matrix/src/client.rs` |
 | `LauncherTopology` | struct | `crates/mxdx-matrix/src/rooms.rs` |
 | `MatrixClient::create_launcher_space` | method | `crates/mxdx-matrix/src/rooms.rs` |
+| `MatrixClient::find_launcher_space` | method | `crates/mxdx-matrix/src/rooms.rs` |
+| `MatrixClient::get_or_create_launcher_space` | method | `crates/mxdx-matrix/src/rooms.rs` |
 | `MatrixClient::create_terminal_session_dm` | method | `crates/mxdx-matrix/src/rooms.rs` |
 | `MatrixClient::tombstone_room` | method | `crates/mxdx-matrix/src/rooms.rs` |
 | `MatrixClient::get_room_state` | method | `crates/mxdx-matrix/src/rooms.rs` |
@@ -133,6 +177,9 @@
 | `PolicyEngine::is_authorized` | method | `crates/mxdx-policy/src/policy.rs` |
 | `PolicyEngine::evaluate` | method | `crates/mxdx-policy/src/policy.rs` |
 | `PolicyRejection` | enum | `crates/mxdx-policy/src/policy.rs` |
+| `AppserviceRegistrar` | trait | `crates/mxdx-policy/src/appservice.rs` |
+| `TuwunelRegistrar` | struct | `crates/mxdx-policy/src/appservice.rs` |
+| `ManualRegistrar` | struct | `crates/mxdx-policy/src/appservice.rs` |
 | `AppserviceRegistration` | struct | `crates/mxdx-policy/src/appservice.rs` |
 | `Namespaces` | struct | `crates/mxdx-policy/src/appservice.rs` |
 | `NamespaceEntry` | struct | `crates/mxdx-policy/src/appservice.rs` |

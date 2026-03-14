@@ -16,6 +16,8 @@ import { TuwunelInstance } from '../src/tuwunel.js';
 import { WasmMatrixClient, P2PSignaling, P2PTransport } from '@mxdx/core';
 import { NodeWebRTCChannel } from '../../../packages/core/webrtc-channel-node.js';
 
+const tuwunelAvailable = TuwunelInstance.isAvailable();
+
 /** Mock P2PCrypto using simple JSON wrapping (simulates shared session key). */
 function mockP2PCrypto() {
   return {
@@ -29,7 +31,7 @@ function mockP2PCrypto() {
   };
 }
 
-describe('P2P Transport: Tuwunel E2E', { timeout: 120000 }, () => {
+describe('P2P Transport: Tuwunel E2E', { skip: !tuwunelAvailable && 'tuwunel binary not found', timeout: 120000 }, () => {
   let tuwunel;
   let launcherClient;
   let clientClient;

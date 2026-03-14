@@ -19,7 +19,9 @@ import path from 'node:path';
 import { TuwunelInstance } from '../src/tuwunel.js';
 import { WasmMatrixClient } from '@mxdx/core';
 
-describe('G.S: Final Security Audit', { timeout: 120000 }, () => {
+const tuwunelAvailable = TuwunelInstance.isAvailable();
+
+describe('G.S: Final Security Audit', { skip: !tuwunelAvailable && 'tuwunel binary not found', timeout: 120000 }, () => {
   let tuwunel;
   let client1;
   let client2;

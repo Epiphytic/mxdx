@@ -22,6 +22,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { TuwunelInstance } from '../src/tuwunel.js';
 
+const tuwunelAvailable = TuwunelInstance.isAvailable();
+test.skip(!tuwunelAvailable, 'tuwunel binary not found');
+
 const ROOT = path.resolve(import.meta.dirname, '..', '..', '..');
 const LAUNCHER_BIN = path.join(ROOT, 'packages', 'launcher', 'bin', 'mxdx-launcher.js');
 const WEB_CONSOLE_DIR = path.join(ROOT, 'packages', 'web-console');

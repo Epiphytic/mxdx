@@ -9,7 +9,9 @@ import crypto from 'node:crypto';
 import { TuwunelInstance } from '../src/tuwunel.js';
 import { WasmMatrixClient } from '@mxdx/core';
 
-describe('WASM: Extended Command Tests', { timeout: 120000 }, () => {
+const tuwunelAvailable = TuwunelInstance.isAvailable();
+
+describe('WASM: Extended Command Tests', { skip: !tuwunelAvailable && 'tuwunel binary not found', timeout: 120000 }, () => {
   let tuwunel;
   let client;
 

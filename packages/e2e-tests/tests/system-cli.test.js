@@ -11,7 +11,9 @@ import { TuwunelInstance } from '../src/tuwunel.js';
 import { WasmMatrixClient } from '@mxdx/core';
 import { LauncherRuntime } from '@mxdx/launcher/src/runtime.js';
 
-describe('G.1T: CLI Non-Interactive Full System E2E', { timeout: 120000 }, () => {
+const tuwunelAvailable = TuwunelInstance.isAvailable();
+
+describe('G.1T: CLI Non-Interactive Full System E2E', { skip: !tuwunelAvailable && 'tuwunel binary not found', timeout: 120000 }, () => {
   let tuwunel;
   let launcherClient;
   let clientClient;
@@ -204,7 +206,7 @@ describe('G.1T: CLI Non-Interactive Full System E2E', { timeout: 120000 }, () =>
   });
 });
 
-describe('G.2T: CLI Interactive Full System E2E', { timeout: 120000 }, () => {
+describe('G.2T: CLI Interactive Full System E2E', { skip: !tuwunelAvailable && 'tuwunel binary not found', timeout: 120000 }, () => {
   let tuwunel;
   let launcherClient;
   let clientClient;

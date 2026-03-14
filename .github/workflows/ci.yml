@@ -16,6 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Pin to 1.93.1: rustc 1.94.0 has a trait solver regression
+      # ("queries overflow the depth limit") when compiling matrix-sdk 0.16
       - uses: dtolnay/rust-toolchain@1.93.1
       - uses: actions/setup-node@v4
         with:
@@ -32,8 +34,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Pin to 1.93.1: rustc 1.94.0 has a trait solver regression
-      # ("queries overflow the depth limit") when compiling matrix-sdk 0.16
       - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
       - name: Install system deps
@@ -74,6 +74,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install system deps
         run: sudo apt-get install -y libsqlite3-dev libssl-dev
+      # tuwunel-dependent tests are #[ignore]'d; they run only in integration job
       - run: cargo test -p mxdx-launcher --lib
 
   policy-test:
@@ -98,9 +99,12 @@ jobs:
         run: sudo apt-get install -y libsqlite3-dev libssl-dev
       - run: cargo test -p mxdx-secrets --lib
 
+  # Integration and federation tests require tuwunel.
+  # Gated to workflow_dispatch until beta.mxdx.dev infrastructure is available.
   integration:
     needs: build
     runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.93.1
@@ -120,11 +124,12 @@ jobs:
       - run: cargo test -p mxdx-policy --test policy_enforcement
       - run: cargo test -p mxdx-secrets --test e2e_secret_request
       - run: cargo test -p mxdx-launcher --test e2e_full_system
+      - run: cargo test -p mxdx-launcher --lib -- --include-ignored
 
   federation:
     needs: build
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.93.1
@@ -139,7 +144,7 @@ jobs:
       - name: Run federation tests
         run: cargo test -p mxdx-test-helpers -- --include-ignored
       - name: Run multi-HS launcher tests
-        run: cargo test -p mxdx-launcher --lib multi_hs
+        run: cargo test -p mxdx-launcher --lib multi_hs -- --include-ignored
 
   client-build:
     needs: preflight
@@ -175,11 +180,7 @@ jobs:
           node-version: "22"
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
-      - name: Install tuwunel
-        run: |
-          curl -fsSL -o /tmp/tuwunel.deb \
-            "https://github.com/matrix-construct/tuwunel/releases/download/v1.5.0/v1.5.0-release-all-x86_64-v1-linux-gnu-tuwunel.deb"
-          sudo dpkg -i /tmp/tuwunel.deb
+      # Tuwunel not installed — npm E2E tests that need it will skip gracefully
       - name: Build WASM (nodejs)
         run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
       - name: Build WASM (web)

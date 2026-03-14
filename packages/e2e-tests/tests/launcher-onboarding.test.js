@@ -11,7 +11,9 @@ import { WasmMatrixClient } from '@mxdx/core';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LAUNCHER_BIN = path.resolve(__dirname, '../../launcher/bin/mxdx-launcher.js');
 
-describe('E2E: Launcher Onboarding', () => {
+const tuwunelAvailable = TuwunelInstance.isAvailable();
+
+describe('E2E: Launcher Onboarding', { skip: !tuwunelAvailable && 'tuwunel binary not found' }, () => {
   let tuwunel;
 
   before(async () => {
@@ -82,7 +84,7 @@ describe('E2E: Launcher Onboarding', () => {
 
 // ─── WASM: Room Topology ────────────────────────────────────────────────────
 
-describe('WASM: Room Topology', { timeout: 120000 }, () => {
+describe('WASM: Room Topology', { skip: !tuwunelAvailable && 'tuwunel binary not found', timeout: 120000 }, () => {
   let tuwunel;
   let client;
 

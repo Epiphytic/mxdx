@@ -29,6 +29,14 @@ export class TuwunelInstance {
   #process;
   #dataDir;
 
+  /**
+   * Check whether the tuwunel binary is available on this system.
+   * @returns {boolean}
+   */
+  static isAvailable() {
+    return TUWUNEL_PATHS.some((p) => fs.existsSync(p));
+  }
+
   constructor({ port, serverName, process: proc, dataDir }) {
     this.port = port;
     this.serverName = serverName;

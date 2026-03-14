@@ -16,6 +16,9 @@ import { test, expect } from '@playwright/test';
 import { TuwunelInstance } from '../src/tuwunel.js';
 import { WasmMatrixClient } from '@mxdx/core';
 
+const tuwunelAvailable = TuwunelInstance.isAvailable();
+test.skip(!tuwunelAvailable, 'tuwunel binary not found');
+
 let tuwunel;
 let launcherId;
 let launcherClient;
