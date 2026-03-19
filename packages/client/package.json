@@ -1,6 +1,6 @@
 {
   "name": "@mxdx/client",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "CLI client for mxdx fleet management",
   "type": "module",
   "bin": {
@@ -31,7 +31,7 @@
     "terminal"
   ],
   "dependencies": {
-    "@mxdx/core": "1.0.0",
+    "@mxdx/core": "1.1.0",
     "commander": "^12.0.0",
     "smol-toml": "^1.0.0"
   }

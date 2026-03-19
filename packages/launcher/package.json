@@ -1,6 +1,6 @@
 {
   "name": "@mxdx/launcher",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Matrix-native fleet management launcher agent",
   "type": "module",
   "bin": {
@@ -31,7 +31,7 @@
     "terminal"
   ],
   "dependencies": {
-    "@mxdx/core": "1.0.0",
+    "@mxdx/core": "1.1.0",
     "commander": "^12.0.0",
     "inquirer": "^12.0.0",
     "smol-toml": "^1.0.0"

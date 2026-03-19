@@ -2454,7 +2454,7 @@ dependencies = [
 
 [[package]]
 name = "mxdx-core-wasm"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.3.4",
@@ -2475,7 +2475,7 @@ dependencies = [
 
 [[package]]
 name = "mxdx-launcher"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "age",
  "anyhow",
@@ -2499,7 +2499,7 @@ dependencies = [
 
 [[package]]
 name = "mxdx-matrix"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "matrix-sdk",
@@ -2517,7 +2517,7 @@ dependencies = [
 
 [[package]]
 name = "mxdx-policy"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "lru",
@@ -2535,7 +2535,7 @@ dependencies = [
 
 [[package]]
 name = "mxdx-secrets"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "age",
  "anyhow",
@@ -2564,7 +2564,7 @@ dependencies = [
 
 [[package]]
 name = "mxdx-types"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2573,7 +2573,7 @@ dependencies = [
 
 [[package]]
 name = "mxdx-web"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "axum",
  "http",

@@ -1,6 +1,6 @@
 {
   "name": "@mxdx/cli",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Matrix-native fleet management with E2EE terminals and P2P transport",
   "type": "module",
   "bin": {
@@ -32,8 +32,8 @@
     "p2p"
   ],
   "dependencies": {
-    "@mxdx/launcher": "1.0.0",
-    "@mxdx/client": "1.0.0",
-    "@mxdx/web-console": "1.0.0"
+    "@mxdx/launcher": "1.1.0",
+    "@mxdx/client": "1.1.0",
+    "@mxdx/web-console": "1.1.0"
   }
 }
