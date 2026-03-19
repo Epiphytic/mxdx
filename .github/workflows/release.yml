@@ -50,6 +50,9 @@ jobs:
       - name: Build WASM (web)
         run: wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/core/wasm/web
 
+      - name: Clean wasm-pack artifacts that block npm pack
+        run: rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/nodejs/package.json packages/core/wasm/web/.gitignore packages/core/wasm/web/package.json
+
       - name: Install npm deps
         run: npm install
 

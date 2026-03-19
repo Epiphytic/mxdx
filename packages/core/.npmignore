@@ -1,0 +1,2 @@
+# Intentionally empty — overrides .gitignore so that the "files" allowlist
+# in package.json controls what gets packed (including wasm/ build artifacts).

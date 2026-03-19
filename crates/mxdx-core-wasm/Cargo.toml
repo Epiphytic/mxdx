@@ -3,10 +3,12 @@ name = "mxdx-core-wasm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-repository.workspace = true
-homepage.workspace = true
-keywords.workspace = true
-categories.workspace = true
+# wasm-pack cannot resolve workspace-inherited compound fields (arrays/maps),
+# so repository, homepage, keywords, and categories are inlined here.
+repository = "https://github.com/Epiphytic/mxdx"
+homepage = "https://github.com/Epiphytic/mxdx"
+keywords = ["matrix", "fleet-management", "e2ee", "terminal", "webrtc"]
+categories = ["command-line-utilities", "network-programming", "cryptography"]
 description = "WASM bindings for mxdx Matrix operations"
 
 [lib]
