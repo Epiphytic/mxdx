@@ -5,9 +5,7 @@ use matrix_sdk::{
     room::MessagesOptions,
     ruma::{
         api::client::room::create_room::v3::Request as CreateRoomRequest,
-        events::{
-            room::encryption::RoomEncryptionEventContent, EmptyStateKey, InitialStateEvent,
-        },
+        events::{room::encryption::RoomEncryptionEventContent, EmptyStateKey, InitialStateEvent},
         OwnedRoomId, OwnedUserId, RoomId, UserId,
     },
     Client,
@@ -35,11 +33,9 @@ impl MatrixClient {
         username: &str,
         password: &str,
     ) -> Result<Self> {
-        let store_dir =
-            tempfile::TempDir::new().map_err(|e| MatrixClientError::Other(e.into()))?;
+        let store_dir = tempfile::TempDir::new().map_err(|e| MatrixClientError::Other(e.into()))?;
 
-        let builder = Client::builder()
-            .sqlite_store(store_dir.path(), None);
+        let builder = Client::builder().sqlite_store(store_dir.path(), None);
 
         // If it looks like a URL (has ://), use it directly.
         // Otherwise treat it as a server name and let the SDK do .well-known discovery.
@@ -111,8 +107,7 @@ impl MatrixClient {
         }
 
         // Build the matrix-sdk client with sqlite store for E2EE
-        let store_dir =
-            tempfile::TempDir::new().map_err(|e| MatrixClientError::Other(e.into()))?;
+        let store_dir = tempfile::TempDir::new().map_err(|e| MatrixClientError::Other(e.into()))?;
 
         let client = Client::builder()
             .homeserver_url(homeserver_url)
@@ -159,8 +154,10 @@ impl MatrixClient {
 
     /// Create an encrypted room and invite the given users.
     pub async fn create_encrypted_room(&self, invite: &[OwnedUserId]) -> Result<OwnedRoomId> {
-        let encryption_event =
-            InitialStateEvent::new(EmptyStateKey, RoomEncryptionEventContent::with_recommended_defaults());
+        let encryption_event = InitialStateEvent::new(
+            EmptyStateKey,
+            RoomEncryptionEventContent::with_recommended_defaults(),
+        );
 
         let mut request = CreateRoomRequest::new();
         request.invite = invite.to_vec();
@@ -172,8 +169,10 @@ impl MatrixClient {
 
     /// Create a DM room with a single user (encrypted, direct).
     pub async fn create_dm(&self, user_id: &UserId) -> Result<OwnedRoomId> {
-        let encryption_event =
-            InitialStateEvent::new(EmptyStateKey, RoomEncryptionEventContent::with_recommended_defaults());
+        let encryption_event = InitialStateEvent::new(
+            EmptyStateKey,
+            RoomEncryptionEventContent::with_recommended_defaults(),
+        );
 
         let mut request = CreateRoomRequest::new();
         request.invite = vec![user_id.to_owned()];
@@ -187,6 +186,16 @@ impl MatrixClient {
     /// Join a room by ID.
     pub async fn join_room(&self, room_id: &RoomId) -> Result<()> {
         self.client.join_room_by_id(room_id).await?;
+        Ok(())
+    }
+
+    pub async fn invite_user(&self, room_id: &RoomId, user_id: &UserId) -> Result<()> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| MatrixClientError::RoomNotFound(room_id.to_string()))?;
+
+        room.invite_user_by_id(user_id).await?;
         Ok(())
     }
 
@@ -281,11 +290,7 @@ impl MatrixClient {
 
     /// Wait until E2EE key exchange completes for a room, with timeout.
     /// Syncs in a loop until the room has encryption keys for all members.
-    pub async fn wait_for_key_exchange(
-        &self,
-        room_id: &RoomId,
-        timeout: Duration,
-    ) -> Result<()> {
+    pub async fn wait_for_key_exchange(&self, room_id: &RoomId, timeout: Duration) -> Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
 
         while tokio::time::Instant::now() < deadline {
@@ -300,7 +305,9 @@ impl MatrixClient {
                 continue;
             }
 
-            let members = room.members(matrix_sdk::RoomMemberships::ACTIVE).await
+            let members = room
+                .members(matrix_sdk::RoomMemberships::ACTIVE)
+                .await
                 .map_err(|e| MatrixClientError::Other(e.into()))?;
 
             let mut all_keys_available = true;
@@ -357,17 +364,14 @@ impl MatrixClient {
         &self,
         request: CreateRoomRequest,
     ) -> Result<matrix_sdk::room::Room> {
-        match tokio::time::timeout(
-            self.room_creation_timeout,
-            self.client.create_room(request),
-        )
-        .await
+        match tokio::time::timeout(self.room_creation_timeout, self.client.create_room(request))
+            .await
         {
             Ok(result) => Ok(result?),
-            Err(_) => Err(MatrixClientError::RoomCreationTimeout(
-                format!("Room creation timed out after {}s — server may be rate-limiting",
-                    self.room_creation_timeout.as_secs()),
-            )),
+            Err(_) => Err(MatrixClientError::RoomCreationTimeout(format!(
+                "Room creation timed out after {}s — server may be rate-limiting",
+                self.room_creation_timeout.as_secs()
+            ))),
         }
     }
 }

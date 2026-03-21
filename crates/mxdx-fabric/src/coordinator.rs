@@ -100,7 +100,7 @@ impl CoordinatorBot {
         }
     }
 
-    async fn handle_task_event(&mut self, task: TaskEvent) -> Result<()> {
+    pub async fn handle_task_event(&mut self, task: TaskEvent) -> Result<()> {
         info!(
             uuid = %task.uuid,
             sender = %task.sender_id,
@@ -192,7 +192,19 @@ impl CoordinatorBot {
         Ok(())
     }
 
-    fn handle_claim_event(&mut self, claim: &ClaimEvent) {
+    pub fn watchlist_len(&self) -> usize {
+        self.watchlist.len()
+    }
+
+    pub fn watchlist_contains(&self, uuid: &str) -> bool {
+        self.watchlist.contains_key(uuid)
+    }
+
+    pub fn capability_index(&self) -> &CapabilityIndex {
+        &self.capability_index
+    }
+
+    pub fn handle_claim_event(&mut self, claim: &ClaimEvent) {
         info!(
             uuid = %claim.task_uuid,
             worker = %claim.worker_id,
@@ -214,7 +226,7 @@ impl CoordinatorBot {
         }
     }
 
-    fn handle_heartbeat_event(&mut self, hb: &HeartbeatEvent) {
+    pub fn handle_heartbeat_event(&mut self, hb: &HeartbeatEvent) {
         debug!(
             uuid = %hb.task_uuid,
             worker = %hb.worker_id,
@@ -232,7 +244,7 @@ impl CoordinatorBot {
         }
     }
 
-    fn handle_result_event(&mut self, result: &TaskResultEvent) {
+    pub fn handle_result_event(&mut self, result: &TaskResultEvent) {
         info!(
             uuid = %result.task_uuid,
             worker = %result.worker_id,

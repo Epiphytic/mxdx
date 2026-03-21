@@ -210,9 +210,19 @@ impl MatrixClient {
             .access_token()
             .expect("Client is not logged in \u{2014} no access_token");
 
+        let encoded_state_key: String = state_key
+            .bytes()
+            .flat_map(|b| {
+                if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
+                    vec![b as char]
+                } else {
+                    format!("%{:02X}", b).chars().collect()
+                }
+            })
+            .collect();
         let url = format!(
             "{}_matrix/client/v3/rooms/{}/state/{}/{}",
-            homeserver, room_id, event_type, state_key,
+            homeserver, room_id, event_type, encoded_state_key,
         );
 
         let http_client = reqwest::Client::new();

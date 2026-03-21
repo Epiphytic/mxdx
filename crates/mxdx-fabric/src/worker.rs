@@ -29,11 +29,7 @@ impl WorkerClient {
         }
     }
 
-    pub async fn advertise_capabilities(
-        &self,
-        caps: &[String],
-        room_id: &RoomId,
-    ) -> Result<()> {
+    pub async fn advertise_capabilities(&self, caps: &[String], room_id: &RoomId) -> Result<()> {
         info!(
             worker_id = %self.worker_id,
             capabilities = ?caps,
