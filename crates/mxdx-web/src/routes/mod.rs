@@ -39,9 +39,7 @@ mod tests {
         build_router(state)
     }
 
-    fn build_test_app_with_launchers(
-        launchers: Vec<crate::state::LauncherInfo>,
-    ) -> Router {
+    fn build_test_app_with_launchers(launchers: Vec<crate::state::LauncherInfo>) -> Router {
         let state = AppState::new();
         // We can't async-set in a non-async fn, so use try_write
         *state.launchers.try_write().unwrap() = launchers;

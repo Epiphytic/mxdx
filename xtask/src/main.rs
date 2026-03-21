@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use syn::visit::Visit;
-use syn::{Visibility, ImplItem, Item};
+use syn::{ImplItem, Item, Visibility};
 use walkdir::WalkDir;
 
 const BEGIN_MARKER: &str = "<!-- BEGIN GENERATED SYMBOL TABLES -->";
@@ -132,7 +132,10 @@ fn generate_symbol_tables(workspace_root: &Path) -> Result<String> {
             output.push_str("| Symbol | Kind | File |\n");
             output.push_str("|:---|:---|:---|\n");
             for sym in symbols {
-                output.push_str(&format!("| `{}` | {} | `{}` |\n", sym.name, sym.kind, sym.file));
+                output.push_str(&format!(
+                    "| `{}` | {} | `{}` |\n",
+                    sym.name, sym.kind, sym.file
+                ));
             }
         }
     }

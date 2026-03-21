@@ -59,7 +59,9 @@ impl PolicyConfig {
 
 /// Escape regex special characters for use in Matrix namespace patterns.
 fn regex_escape(s: &str) -> String {
-    let special = ['.', '^', '$', '+', '?', '(', ')', '[', ']', '{', '}', '|', '\\'];
+    let special = [
+        '.', '^', '$', '+', '?', '(', ')', '[', ']', '{', '}', '|', '\\',
+    ];
     let mut result = String::with_capacity(s.len());
     for c in s.chars() {
         if special.contains(&c) {

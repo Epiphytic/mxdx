@@ -34,8 +34,8 @@ impl SecretStore {
 
     /// Encrypts and stores a value under the given key.
     pub fn add(&mut self, key: &str, value: &str) -> Result<()> {
-        let encrypted = encrypt_value(&self.recipient, value.as_bytes())
-            .context("failed to encrypt secret")?;
+        let encrypted =
+            encrypt_value(&self.recipient, value.as_bytes()).context("failed to encrypt secret")?;
         self.entries.insert(key.to_string(), encrypted);
         Ok(())
     }
@@ -45,10 +45,10 @@ impl SecretStore {
         let Some(encrypted) = self.entries.get(key) else {
             return Ok(None);
         };
-        let decrypted = decrypt_value(&self.identity, encrypted)
-            .context("failed to decrypt secret")?;
-        let plaintext = String::from_utf8(decrypted)
-            .context("decrypted value is not valid UTF-8")?;
+        let decrypted =
+            decrypt_value(&self.identity, encrypted).context("failed to decrypt secret")?;
+        let plaintext =
+            String::from_utf8(decrypted).context("decrypted value is not valid UTF-8")?;
         Ok(Some(plaintext))
     }
 
@@ -81,8 +81,9 @@ impl SecretStore {
 }
 
 fn encrypt_value(recipient: &Recipient, plaintext: &[u8]) -> Result<Vec<u8>> {
-    let encryptor = age::Encryptor::with_recipients(std::iter::once(recipient as &dyn age::Recipient))
-        .map_err(|e| anyhow::anyhow!("encryption setup failed: {e}"))?;
+    let encryptor =
+        age::Encryptor::with_recipients(std::iter::once(recipient as &dyn age::Recipient))
+            .map_err(|e| anyhow::anyhow!("encryption setup failed: {e}"))?;
     let mut encrypted = vec![];
     let mut writer = encryptor
         .wrap_output(&mut encrypted)

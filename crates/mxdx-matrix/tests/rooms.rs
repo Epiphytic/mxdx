@@ -23,19 +23,37 @@ async fn create_launcher_space_creates_space_with_child_rooms() {
     client.sync_once().await.unwrap();
 
     let exec_child = client
-        .get_room_state(&topology.space_id, &format!("m.space.child/{}", topology.exec_room_id))
+        .get_room_state(
+            &topology.space_id,
+            &format!("m.space.child/{}", topology.exec_room_id),
+        )
         .await;
-    assert!(exec_child.is_ok(), "exec room should be linked as space child");
+    assert!(
+        exec_child.is_ok(),
+        "exec room should be linked as space child"
+    );
 
     let status_child = client
-        .get_room_state(&topology.space_id, &format!("m.space.child/{}", topology.status_room_id))
+        .get_room_state(
+            &topology.space_id,
+            &format!("m.space.child/{}", topology.status_room_id),
+        )
         .await;
-    assert!(status_child.is_ok(), "status room should be linked as space child");
+    assert!(
+        status_child.is_ok(),
+        "status room should be linked as space child"
+    );
 
     let logs_child = client
-        .get_room_state(&topology.space_id, &format!("m.space.child/{}", topology.logs_room_id))
+        .get_room_state(
+            &topology.space_id,
+            &format!("m.space.child/{}", topology.logs_room_id),
+        )
         .await;
-    assert!(logs_child.is_ok(), "logs room should be linked as space child");
+    assert!(
+        logs_child.is_ok(),
+        "logs room should be linked as space child"
+    );
 
     hs.stop().await;
 }

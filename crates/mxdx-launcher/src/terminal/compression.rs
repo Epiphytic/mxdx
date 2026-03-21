@@ -49,10 +49,7 @@ pub fn decode_decompress_bounded(
                 }
                 total += n;
                 if total > max_bytes {
-                    anyhow::bail!(
-                        "decompressed size exceeds max_bytes {}",
-                        max_bytes
-                    );
+                    anyhow::bail!("decompressed size exceeds max_bytes {}", max_bytes);
                 }
                 output.extend_from_slice(&chunk[..n]);
             }

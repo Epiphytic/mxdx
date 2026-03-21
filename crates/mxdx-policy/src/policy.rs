@@ -29,9 +29,7 @@ impl PolicyEngine {
     /// Create a new PolicyEngine with default capacity and TTL.
     pub fn new() -> Self {
         Self {
-            replay_cache: LruCache::new(
-                NonZeroUsize::new(DEFAULT_CACHE_CAPACITY).unwrap(),
-            ),
+            replay_cache: LruCache::new(NonZeroUsize::new(DEFAULT_CACHE_CAPACITY).unwrap()),
             ttl: DEFAULT_TTL,
             authorized_users: HashSet::new(),
         }
@@ -40,9 +38,7 @@ impl PolicyEngine {
     /// Create a new PolicyEngine with custom capacity and TTL.
     pub fn with_capacity_and_ttl(capacity: usize, ttl: Duration) -> Self {
         Self {
-            replay_cache: LruCache::new(
-                NonZeroUsize::new(capacity).expect("capacity must be > 0"),
-            ),
+            replay_cache: LruCache::new(NonZeroUsize::new(capacity).expect("capacity must be > 0")),
             ttl,
             authorized_users: HashSet::new(),
         }
@@ -160,8 +156,7 @@ mod tests {
 
     #[test]
     fn expired_event_is_not_replay() {
-        let mut engine =
-            PolicyEngine::with_capacity_and_ttl(100, Duration::from_millis(1));
+        let mut engine = PolicyEngine::with_capacity_and_ttl(100, Duration::from_millis(1));
         engine.mark_seen("$event1");
         std::thread::sleep(Duration::from_millis(5));
         assert!(!engine.check_replay("$event1"));
@@ -192,7 +187,9 @@ mod tests {
     fn evaluate_authorized_new_event_passes() {
         let mut engine = PolicyEngine::new();
         engine.authorize_user("@alice:example.com");
-        assert!(engine.evaluate("$evt1", "@alice:example.com", "execute").is_ok());
+        assert!(engine
+            .evaluate("$evt1", "@alice:example.com", "execute")
+            .is_ok());
     }
 
     #[test]
@@ -208,7 +205,9 @@ mod tests {
     fn evaluate_replayed_event_rejected() {
         let mut engine = PolicyEngine::new();
         engine.authorize_user("@alice:example.com");
-        engine.evaluate("$evt1", "@alice:example.com", "execute").unwrap();
+        engine
+            .evaluate("$evt1", "@alice:example.com", "execute")
+            .unwrap();
         assert_eq!(
             engine.evaluate("$evt1", "@alice:example.com", "execute"),
             Err(PolicyRejection::Replay)

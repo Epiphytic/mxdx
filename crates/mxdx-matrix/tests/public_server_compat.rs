@@ -46,29 +46,39 @@ fn load_credentials() -> (Credentials, Option<Credentials>) {
         .join("test-credentials.toml");
 
     if toml_path.exists() {
-        let content = std::fs::read_to_string(&toml_path)
-            .expect("Failed to read test-credentials.toml");
-        let parsed: toml::Value = content.parse()
+        let content =
+            std::fs::read_to_string(&toml_path).expect("Failed to read test-credentials.toml");
+        let parsed: toml::Value = content
+            .parse()
             .expect("Failed to parse test-credentials.toml");
 
-        let hs_url = parsed["server"]["url"].as_str()
+        let hs_url = parsed["server"]["url"]
+            .as_str()
             .expect("server.url missing in test-credentials.toml")
             .to_string();
 
         let account1 = Credentials {
             hs_url: hs_url.clone(),
-            username: parsed["account1"]["username"].as_str()
-                .expect("account1.username missing").to_string(),
-            password: parsed["account1"]["password"].as_str()
-                .expect("account1.password missing").to_string(),
+            username: parsed["account1"]["username"]
+                .as_str()
+                .expect("account1.username missing")
+                .to_string(),
+            password: parsed["account1"]["password"]
+                .as_str()
+                .expect("account1.password missing")
+                .to_string(),
         };
 
         let account2 = parsed.get("account2").map(|a| Credentials {
             hs_url: hs_url.clone(),
-            username: a["username"].as_str()
-                .expect("account2.username missing").to_string(),
-            password: a["password"].as_str()
-                .expect("account2.password missing").to_string(),
+            username: a["username"]
+                .as_str()
+                .expect("account2.username missing")
+                .to_string(),
+            password: a["password"]
+                .as_str()
+                .expect("account2.password missing")
+                .to_string(),
         });
 
         return (account1, account2);
@@ -78,17 +88,17 @@ fn load_credentials() -> (Credentials, Option<Credentials>) {
         .expect("Set MXDX_PUBLIC_HS_URL or create test-credentials.toml");
     let account1 = Credentials {
         hs_url: hs_url.clone(),
-        username: std::env::var("MXDX_PUBLIC_USERNAME")
-            .expect("Set MXDX_PUBLIC_USERNAME"),
-        password: std::env::var("MXDX_PUBLIC_PASSWORD")
-            .expect("Set MXDX_PUBLIC_PASSWORD"),
+        username: std::env::var("MXDX_PUBLIC_USERNAME").expect("Set MXDX_PUBLIC_USERNAME"),
+        password: std::env::var("MXDX_PUBLIC_PASSWORD").expect("Set MXDX_PUBLIC_PASSWORD"),
     };
-    let account2 = std::env::var("MXDX_PUBLIC_USERNAME2").ok().map(|u| Credentials {
-        hs_url,
-        username: u,
-        password: std::env::var("MXDX_PUBLIC_PASSWORD2")
-            .expect("Set MXDX_PUBLIC_PASSWORD2 if MXDX_PUBLIC_USERNAME2 is set"),
-    });
+    let account2 = std::env::var("MXDX_PUBLIC_USERNAME2")
+        .ok()
+        .map(|u| Credentials {
+            hs_url,
+            username: u,
+            password: std::env::var("MXDX_PUBLIC_PASSWORD2")
+                .expect("Set MXDX_PUBLIC_PASSWORD2 if MXDX_PUBLIC_USERNAME2 is set"),
+        });
 
     (account1, account2)
 }
@@ -128,9 +138,10 @@ async fn login_account2() {
 #[ignore = "requires test-credentials.toml or env vars — creates rooms on public server"]
 async fn room_operations() {
     let (creds, _) = load_credentials();
-    let mut client = MatrixClient::login_and_connect(&creds.hs_url, &creds.username, &creds.password)
-        .await
-        .expect("Login failed");
+    let mut client =
+        MatrixClient::login_and_connect(&creds.hs_url, &creds.username, &creds.password)
+            .await
+            .expect("Login failed");
     client.set_room_creation_timeout(Duration::from_secs(120));
 
     // ── 1. Create encrypted room ──────────────────────────────────────
@@ -176,7 +187,10 @@ async fn room_operations() {
             .and_then(|u| u.as_str())
             == Some(&test_uuid)
     });
-    assert!(found, "Should find the custom event via sync_and_collect_events");
+    assert!(
+        found,
+        "Should find the custom event via sync_and_collect_events"
+    );
 
     tokio::time::sleep(Duration::from_secs(2)).await;
 
@@ -238,9 +252,10 @@ async fn room_operations() {
 #[ignore = "requires test-credentials.toml or env vars — creates launcher space on public server"]
 async fn launcher_space_operations() {
     let (creds, _) = load_credentials();
-    let mut client = MatrixClient::login_and_connect(&creds.hs_url, &creds.username, &creds.password)
-        .await
-        .expect("Login failed");
+    let mut client =
+        MatrixClient::login_and_connect(&creds.hs_url, &creds.username, &creds.password)
+            .await
+            .expect("Login failed");
     client.set_room_creation_delay(Some(Duration::from_secs(3)));
     client.set_room_creation_timeout(Duration::from_secs(120));
 
@@ -272,7 +287,12 @@ async fn launcher_space_operations() {
 
     // ── 3. Cleanup ────────────────────────────────────────────────────
     eprintln!("[3/3] Cleaning up...");
-    for rid in [&topology.space_id, &topology.exec_room_id, &topology.status_room_id, &topology.logs_room_id] {
+    for rid in [
+        &topology.space_id,
+        &topology.exec_room_id,
+        &topology.status_room_id,
+        &topology.logs_room_id,
+    ] {
         if let Some(room) = client.inner().get_room(rid) {
             let _ = room.leave().await;
             let _ = room.forget().await;

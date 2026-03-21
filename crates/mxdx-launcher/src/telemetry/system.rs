@@ -52,18 +52,19 @@ pub fn collect_telemetry(detail_level: TelemetryDetail) -> HostTelemetryEvent {
         },
         TelemetryDetail::Full => {
             let disks = Disks::new_with_refreshed_list();
-            let (disk_total, disk_used) =
-                disks.iter().fold((0u64, 0u64), |(total, used), d| {
-                    (
-                        total + d.total_space(),
-                        used + (d.total_space() - d.available_space()),
-                    )
-                });
+            let (disk_total, disk_used) = disks.iter().fold((0u64, 0u64), |(total, used), d| {
+                (
+                    total + d.total_space(),
+                    used + (d.total_space() - d.available_space()),
+                )
+            });
 
             let networks = Networks::new_with_refreshed_list();
-            let (rx, tx) = networks.iter().fold((0u64, 0u64), |(rx, tx), (_name, data)| {
-                (rx + data.total_received(), tx + data.total_transmitted())
-            });
+            let (rx, tx) = networks
+                .iter()
+                .fold((0u64, 0u64), |(rx, tx), (_name, data)| {
+                    (rx + data.total_received(), tx + data.total_transmitted())
+                });
 
             HostTelemetryEvent {
                 timestamp: String::new(),

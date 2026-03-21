@@ -19,7 +19,10 @@ impl fmt::Display for MatrixClientError {
             Self::Registration(e) => write!(f, "Registration error: {e}"),
             Self::RoomNotFound(id) => write!(f, "Room not found: {id}"),
             Self::KeyExchangeTimeout(msg) => write!(f, "Key exchange timeout: {msg}"),
-            Self::RoomCreationTimeout(msg) => write!(f, "Room creation timeout (server may be rate-limiting): {msg}"),
+            Self::RoomCreationTimeout(msg) => write!(
+                f,
+                "Room creation timeout (server may be rate-limiting): {msg}"
+            ),
             Self::Other(e) => write!(f, "{e}"),
         }
     }

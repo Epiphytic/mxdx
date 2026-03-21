@@ -35,18 +35,23 @@ async fn full_system_e2e() {
     // ── 2. Register users ─────────────────────────────────────────────
     let admin = hs.register_user("admin", "adminpass").await.unwrap();
 
-    let orchestrator = MatrixClient::register_and_connect(&base_url, "orchestrator", "pass", "mxdx-test-token")
-        .await
-        .unwrap();
-    let launcher = MatrixClient::register_and_connect(&base_url, "launcher", "pass", "mxdx-test-token")
-        .await
-        .unwrap();
+    let orchestrator =
+        MatrixClient::register_and_connect(&base_url, "orchestrator", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
+    let launcher =
+        MatrixClient::register_and_connect(&base_url, "launcher", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
 
     assert!(orchestrator.is_logged_in());
     assert!(launcher.is_logged_in());
 
     // ── 3. Create launcher topology (space + rooms) ───────────────────
-    let topology = launcher.create_launcher_space("e2e-launcher").await.unwrap();
+    let topology = launcher
+        .create_launcher_space("e2e-launcher")
+        .await
+        .unwrap();
     assert!(!topology.space_id.as_str().is_empty());
     assert!(!topology.exec_room_id.as_str().is_empty());
     assert!(!topology.status_room_id.as_str().is_empty());
@@ -113,11 +118,15 @@ async fn full_system_e2e() {
         max_sessions: 10,
     };
 
-    let validated = validate_command(&cap_config, &parsed.cmd, &["full-system-e2e"], Some("/tmp")).unwrap();
+    let validated =
+        validate_command(&cap_config, &parsed.cmd, &["full-system-e2e"], Some("/tmp")).unwrap();
     let result = execute_command(&validated).await.unwrap();
 
     assert_eq!(result.exit_code, Some(0));
-    assert!(result.stdout_lines.iter().any(|l| l.contains("full-system-e2e")));
+    assert!(result
+        .stdout_lines
+        .iter()
+        .any(|l| l.contains("full-system-e2e")));
 
     // ── 8. Verify telemetry collection ────────────────────────────────
     let telemetry = collect_telemetry(TelemetryDetail::Full);
@@ -150,7 +159,9 @@ async fn full_system_e2e() {
     let orch_user_id = orchestrator.user_id().to_string();
     policy.authorize_user(&orch_user_id);
 
-    assert!(policy.evaluate("$evt-e2e-1", &orch_user_id, "execute").is_ok());
+    assert!(policy
+        .evaluate("$evt-e2e-1", &orch_user_id, "execute")
+        .is_ok());
     assert_eq!(
         policy.evaluate("$evt-e2e-1", &orch_user_id, "execute"),
         Err(PolicyRejection::Replay)
@@ -211,12 +222,14 @@ async fn full_system_e2e() {
     );
 
     // ── 13. Secret request with double encryption over Matrix ─────────
-    let coord_client = MatrixClient::register_and_connect(&base_url, "coordinator", "pass", "mxdx-test-token")
-        .await
-        .unwrap();
-    let worker_client = MatrixClient::register_and_connect(&base_url, "worker", "pass", "mxdx-test-token")
-        .await
-        .unwrap();
+    let coord_client =
+        MatrixClient::register_and_connect(&base_url, "coordinator", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
+    let worker_client =
+        MatrixClient::register_and_connect(&base_url, "worker", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
 
     let secret_room_id = coord_client
         .create_encrypted_room(&[worker_client.user_id().to_owned()])
@@ -230,7 +243,9 @@ async fn full_system_e2e() {
     worker_client.sync_once().await.unwrap();
 
     let mut coord_store = SecretStore::new(Identity::generate());
-    coord_store.add("deploy.token", "tok_e2e_secret_value").unwrap();
+    coord_store
+        .add("deploy.token", "tok_e2e_secret_value")
+        .unwrap();
     let authorized: HashSet<String> = ["deploy.token".to_string()].into();
     let coordinator = SecretCoordinator::new(coord_store, authorized);
 
@@ -351,10 +366,14 @@ async fn config_and_executor_pipeline() {
     .unwrap();
     let result = execute_command(&validated).await.unwrap();
     assert_eq!(result.exit_code, Some(0));
-    assert!(result.stdout_lines.iter().any(|l| l.contains("config-pipeline-test")));
+    assert!(result
+        .stdout_lines
+        .iter()
+        .any(|l| l.contains("config-pipeline-test")));
 
     // Execute seq to verify ordered output
-    let validated = validate_command(&config.capabilities, "seq", &["1", "10"], Some("/tmp")).unwrap();
+    let validated =
+        validate_command(&config.capabilities, "seq", &["1", "10"], Some("/tmp")).unwrap();
     let result = execute_command(&validated).await.unwrap();
     assert_eq!(result.exit_code, Some(0));
     assert_eq!(result.stdout_lines.len(), 10);
@@ -407,14 +426,20 @@ async fn secret_store_and_coordinator_round_trip() {
     store.add("db.password", "super_secret_db_pass").unwrap();
     store.add("api.key", "sk_live_abc123").unwrap();
 
-    assert_eq!(store.get("db.password").unwrap().unwrap(), "super_secret_db_pass");
+    assert_eq!(
+        store.get("db.password").unwrap().unwrap(),
+        "super_secret_db_pass"
+    );
     assert_eq!(store.get("api.key").unwrap().unwrap(), "sk_live_abc123");
     assert!(store.get("nonexistent").unwrap().is_none());
 
     // Serialize and restore
     let serialized = store.serialize().unwrap();
     let restored = SecretStore::deserialize(&serialized, store.key()).unwrap();
-    assert_eq!(restored.get("db.password").unwrap().unwrap(), "super_secret_db_pass");
+    assert_eq!(
+        restored.get("db.password").unwrap().unwrap(),
+        "super_secret_db_pass"
+    );
 
     // Coordinator double-encryption
     let authorized: HashSet<String> = ["db.password".to_string()].into();
@@ -436,7 +461,10 @@ async fn secret_store_and_coordinator_round_trip() {
         .decode(response.encrypted_value.as_ref().unwrap())
         .unwrap();
     let plaintext = decrypt_with_identity(&worker_identity, &ciphertext).unwrap();
-    assert_eq!(String::from_utf8(plaintext).unwrap(), "super_secret_db_pass");
+    assert_eq!(
+        String::from_utf8(plaintext).unwrap(),
+        "super_secret_db_pass"
+    );
 
     // Unauthorized scope
     let bad_request = SecretRequestEvent {

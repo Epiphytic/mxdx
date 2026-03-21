@@ -93,7 +93,9 @@ async fn public_server_command_round_trip() {
     eprintln!("[3] Launcher joining room...");
     // Launcher needs to sync to see the invite
     launcher.sync_once().await.unwrap();
-    launcher.join_room(&cmd_room_id).await
+    launcher
+        .join_room(&cmd_room_id)
+        .await
         .expect("Launcher failed to join command room");
     eprintln!("[3] Launcher joined.");
 
@@ -147,11 +149,14 @@ async fn public_server_command_round_trip() {
     assert!(cmd_event.is_some(), "Launcher should receive command event");
 
     let content = cmd_event.unwrap().get("content").unwrap();
-    let parsed_cmd: CommandEvent = serde_json::from_value(content.clone())
-        .expect("Failed to parse command event");
+    let parsed_cmd: CommandEvent =
+        serde_json::from_value(content.clone()).expect("Failed to parse command event");
     assert_eq!(parsed_cmd.cmd, "echo");
     assert_eq!(parsed_cmd.args, vec!["hello-from-matrix-org"]);
-    eprintln!("[6] Launcher received command: {} {:?}", parsed_cmd.cmd, parsed_cmd.args);
+    eprintln!(
+        "[6] Launcher received command: {} {:?}",
+        parsed_cmd.cmd, parsed_cmd.args
+    );
 
     // ── 7. Launcher validates and executes the command locally ──────
     eprintln!("[7] Launcher validating and executing command...");
@@ -162,14 +167,26 @@ async fn public_server_command_round_trip() {
         max_sessions: 10,
     };
 
-    let validated = validate_command(&cap_config, &parsed_cmd.cmd, &["hello-from-matrix-org"], Some("/tmp"))
-        .expect("Command validation failed");
-    let result = execute_command(&validated).await
+    let validated = validate_command(
+        &cap_config,
+        &parsed_cmd.cmd,
+        &["hello-from-matrix-org"],
+        Some("/tmp"),
+    )
+    .expect("Command validation failed");
+    let result = execute_command(&validated)
+        .await
         .expect("Command execution failed");
 
     assert_eq!(result.exit_code, Some(0));
-    assert!(result.stdout_lines.iter().any(|l| l.contains("hello-from-matrix-org")));
-    eprintln!("[7] Command executed. exit_code=0, stdout={:?}", result.stdout_lines);
+    assert!(result
+        .stdout_lines
+        .iter()
+        .any(|l| l.contains("hello-from-matrix-org")));
+    eprintln!(
+        "[7] Command executed. exit_code=0, stdout={:?}",
+        result.stdout_lines
+    );
 
     // ── 8. Launcher sends output event back over Matrix ─────────────
     let output = OutputEvent {
@@ -207,7 +224,10 @@ async fn public_server_command_round_trip() {
                 .and_then(|u| u.as_str())
                 == Some(&test_uuid)
     });
-    assert!(output_event.is_some(), "Client should receive output event from launcher");
+    assert!(
+        output_event.is_some(),
+        "Client should receive output event from launcher"
+    );
 
     let output_content: OutputEvent =
         serde_json::from_value(output_event.unwrap()["content"].clone())
@@ -216,8 +236,10 @@ async fn public_server_command_round_trip() {
     assert_eq!(output_content.stream, OutputStream::Stdout);
 
     let decoded = String::from_utf8(BASE64.decode(&output_content.data).unwrap()).unwrap();
-    assert!(decoded.contains("hello-from-matrix-org"),
-        "Decoded output should contain 'hello-from-matrix-org', got: {decoded}");
+    assert!(
+        decoded.contains("hello-from-matrix-org"),
+        "Decoded output should contain 'hello-from-matrix-org', got: {decoded}"
+    );
     eprintln!("[9] Client received output: {decoded}");
 
     eprintln!("[✓] Full round-trip complete: client → matrix.org → launcher → execute → matrix.org → client");

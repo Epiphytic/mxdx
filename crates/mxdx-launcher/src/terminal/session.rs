@@ -40,9 +40,7 @@ impl TerminalSession {
     }
 
     /// Capture current output and return as compressed data with seq number.
-    pub async fn capture_output(
-        &mut self,
-    ) -> Result<Option<(String, String, u64)>, anyhow::Error> {
+    pub async fn capture_output(&mut self) -> Result<Option<(String, String, u64)>, anyhow::Error> {
         let output = self.tmux.capture_pane().await?;
         if output.is_empty() {
             return Ok(None);

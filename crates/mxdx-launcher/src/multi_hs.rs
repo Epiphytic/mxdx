@@ -77,7 +77,11 @@ impl MultiHsLauncher {
                 latencies.push((i, std::time::Duration::MAX));
             } else {
                 let elapsed = start.elapsed();
-                debug!(index = i, latency_ms = elapsed.as_millis(), "Sync latency measured");
+                debug!(
+                    index = i,
+                    latency_ms = elapsed.as_millis(),
+                    "Sync latency measured"
+                );
                 latencies.push((i, elapsed));
             }
         }
@@ -186,7 +190,11 @@ impl MultiHsLauncher {
             let start = Instant::now();
             if client.sync_once().await.is_ok() {
                 let elapsed = start.elapsed();
-                debug!(index = i, latency_ms = elapsed.as_millis(), "Failover candidate healthy");
+                debug!(
+                    index = i,
+                    latency_ms = elapsed.as_millis(),
+                    "Failover candidate healthy"
+                );
                 if best.is_none() || elapsed < best.unwrap().1 {
                     best = Some((i, elapsed));
                 }
@@ -225,7 +233,9 @@ mod tests {
         let instance = TuwunelInstance::start().await.unwrap();
         let url = format!("http://127.0.0.1:{}", instance.port);
 
-        let launcher = MultiHsLauncher::start(&[url], "mxdx-test-token").await.unwrap();
+        let launcher = MultiHsLauncher::start(&[url], "mxdx-test-token")
+            .await
+            .unwrap();
 
         assert!(launcher.primary().is_some());
         assert_eq!(launcher.connected_count(), 1);
@@ -238,10 +248,13 @@ mod tests {
         let instance_a = TuwunelInstance::start().await.unwrap();
         let instance_b = TuwunelInstance::start().await.unwrap();
 
-        let launcher = MultiHsLauncher::start(&[
-            format!("http://127.0.0.1:{}", instance_a.port),
-            format!("http://127.0.0.1:{}", instance_b.port),
-        ], "mxdx-test-token")
+        let launcher = MultiHsLauncher::start(
+            &[
+                format!("http://127.0.0.1:{}", instance_a.port),
+                format!("http://127.0.0.1:{}", instance_b.port),
+            ],
+            "mxdx-test-token",
+        )
         .await
         .unwrap();
 
@@ -265,7 +278,9 @@ mod tests {
         let instance = TuwunelInstance::start().await.unwrap();
         let url = format!("http://127.0.0.1:{}", instance.port);
 
-        let mut launcher = MultiHsLauncher::start(&[url], "mxdx-test-token").await.unwrap();
+        let mut launcher = MultiHsLauncher::start(&[url], "mxdx-test-token")
+            .await
+            .unwrap();
 
         let state = launcher.health_check().await;
         assert_eq!(state, FailoverState::Active);
@@ -281,10 +296,13 @@ mod tests {
         let port_a = instance_a.port;
         let port_b = instance_b.port;
 
-        let mut launcher = MultiHsLauncher::start(&[
-            format!("http://127.0.0.1:{}", port_a),
-            format!("http://127.0.0.1:{}", port_b),
-        ], "mxdx-test-token")
+        let mut launcher = MultiHsLauncher::start(
+            &[
+                format!("http://127.0.0.1:{}", port_a),
+                format!("http://127.0.0.1:{}", port_b),
+            ],
+            "mxdx-test-token",
+        )
         .await
         .unwrap();
 
@@ -319,10 +337,13 @@ mod tests {
         let mut instance_a = TuwunelInstance::start().await.unwrap();
         let mut instance_b = TuwunelInstance::start().await.unwrap();
 
-        let mut launcher = MultiHsLauncher::start(&[
-            format!("http://127.0.0.1:{}", instance_a.port),
-            format!("http://127.0.0.1:{}", instance_b.port),
-        ], "mxdx-test-token")
+        let mut launcher = MultiHsLauncher::start(
+            &[
+                format!("http://127.0.0.1:{}", instance_a.port),
+                format!("http://127.0.0.1:{}", instance_b.port),
+            ],
+            "mxdx-test-token",
+        )
         .await
         .unwrap();
 
@@ -347,19 +368,19 @@ mod tests {
         let instance = TuwunelInstance::start().await.unwrap();
         let url = format!("http://127.0.0.1:{}", instance.port);
 
-        let launcher = MultiHsLauncher::start(&[url.clone()], "mxdx-test-token").await.unwrap();
+        let launcher = MultiHsLauncher::start(&[url.clone()], "mxdx-test-token")
+            .await
+            .unwrap();
         let launcher_client = launcher.primary().unwrap();
 
         // Create a room as the launcher
-        let room_id = launcher_client
-            .create_encrypted_room(&[])
-            .await
-            .unwrap();
+        let room_id = launcher_client.create_encrypted_room(&[]).await.unwrap();
 
         // Register a separate non-launcher user
-        let non_launcher = MatrixClient::register_and_connect(&url, "intruder", "password123", "mxdx-test-token")
-            .await
-            .unwrap();
+        let non_launcher =
+            MatrixClient::register_and_connect(&url, "intruder", "password123", "mxdx-test-token")
+                .await
+                .unwrap();
 
         // The non-launcher should not be able to send state events to the room
         // (they aren't even a member, and even if invited, wouldn't have power level)

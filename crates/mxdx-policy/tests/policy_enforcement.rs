@@ -124,7 +124,10 @@ async fn test_security_replayed_event_does_not_double_execute() {
 
     // A different event ID should still work
     let different = engine.evaluate("$cmd-replay-test-2", user_id, action);
-    assert!(different.is_ok(), "Different event should still be processed");
+    assert!(
+        different.is_ok(),
+        "Different event should still be processed"
+    );
 }
 
 #[tokio::test]
@@ -149,5 +152,8 @@ async fn replay_cache_ttl_expires_entries() {
     tokio::time::sleep(Duration::from_millis(20)).await;
 
     // After TTL, the event should no longer be considered a replay
-    assert!(!engine.check_replay(event_id), "Expired entry should not be a replay");
+    assert!(
+        !engine.check_replay(event_id),
+        "Expired entry should not be a replay"
+    );
 }

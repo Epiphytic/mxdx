@@ -3,8 +3,8 @@ use std::io::Write;
 
 use age::x25519::Recipient;
 use anyhow::{Context, Result};
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 
 use mxdx_types::events::secret::{SecretRequestEvent, SecretResponseEvent};
 
@@ -140,10 +140,8 @@ mod tests {
 
     #[test]
     fn double_encrypted_round_trip() {
-        let coordinator = setup_coordinator(
-            &["github.token"],
-            &[("github.token", "ghp_secret123")],
-        );
+        let coordinator =
+            setup_coordinator(&["github.token"], &[("github.token", "ghp_secret123")]);
 
         let worker_identity = Identity::generate();
         let worker_pubkey = worker_identity.to_public().to_string();
@@ -169,10 +167,8 @@ mod tests {
 
     #[test]
     fn unauthorized_scope_denied() {
-        let coordinator = setup_coordinator(
-            &["github.token"],
-            &[("github.token", "ghp_secret123")],
-        );
+        let coordinator =
+            setup_coordinator(&["github.token"], &[("github.token", "ghp_secret123")]);
 
         let worker_identity = Identity::generate();
         let request = SecretRequestEvent {
@@ -212,10 +208,8 @@ mod tests {
 
     #[test]
     fn invalid_public_key_returns_error() {
-        let coordinator = setup_coordinator(
-            &["github.token"],
-            &[("github.token", "ghp_secret123")],
-        );
+        let coordinator =
+            setup_coordinator(&["github.token"], &[("github.token", "ghp_secret123")]);
 
         let request = SecretRequestEvent {
             request_id: "req-004".into(),
@@ -227,15 +221,16 @@ mod tests {
 
         let response = coordinator.handle_secret_request(&request);
         assert!(!response.granted);
-        assert!(response.error.unwrap().contains("invalid ephemeral public key"));
+        assert!(response
+            .error
+            .unwrap()
+            .contains("invalid ephemeral public key"));
     }
 
     #[test]
     fn wrong_private_key_cannot_decrypt() {
-        let coordinator = setup_coordinator(
-            &["github.token"],
-            &[("github.token", "ghp_secret123")],
-        );
+        let coordinator =
+            setup_coordinator(&["github.token"], &[("github.token", "ghp_secret123")]);
 
         let worker_identity = Identity::generate();
         let request = SecretRequestEvent {

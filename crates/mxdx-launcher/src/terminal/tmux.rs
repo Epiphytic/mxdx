@@ -88,10 +88,7 @@ impl TmuxSession {
                 return Ok(content);
             }
             if start.elapsed() >= timeout {
-                anyhow::bail!(
-                    "timed out waiting for {:?} in pane output",
-                    expected
-                );
+                anyhow::bail!("timed out waiting for {:?} in pane output", expected);
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }

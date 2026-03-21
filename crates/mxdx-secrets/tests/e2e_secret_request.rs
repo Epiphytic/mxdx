@@ -20,9 +20,10 @@ async fn worker_requests_secret_with_double_encryption() {
         MatrixClient::register_and_connect(&base_url, "coordinator", "pass", "mxdx-test-token")
             .await
             .unwrap();
-    let worker_client = MatrixClient::register_and_connect(&base_url, "worker", "pass", "mxdx-test-token")
-        .await
-        .unwrap();
+    let worker_client =
+        MatrixClient::register_and_connect(&base_url, "worker", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
 
     let room_id = coordinator_client
         .create_encrypted_room(&[worker_client.user_id().to_owned()])
@@ -118,10 +119,7 @@ async fn worker_requests_secret_with_double_encryption() {
         .decode(received_response.encrypted_value.as_ref().unwrap())
         .unwrap();
     let plaintext = decrypt_with_identity(&ephemeral_identity, &ciphertext).unwrap();
-    assert_eq!(
-        String::from_utf8(plaintext).unwrap(),
-        "ghp_live_token_xyz"
-    );
+    assert_eq!(String::from_utf8(plaintext).unwrap(), "ghp_live_token_xyz");
 
     hs.stop().await;
 }
@@ -135,9 +133,10 @@ async fn unauthorized_worker_cannot_get_secret() {
         MatrixClient::register_and_connect(&base_url, "coord2", "pass", "mxdx-test-token")
             .await
             .unwrap();
-    let worker_client = MatrixClient::register_and_connect(&base_url, "worker2", "pass", "mxdx-test-token")
-        .await
-        .unwrap();
+    let worker_client =
+        MatrixClient::register_and_connect(&base_url, "worker2", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
 
     let room_id = coordinator_client
         .create_encrypted_room(&[worker_client.user_id().to_owned()])
@@ -196,7 +195,11 @@ async fn unauthorized_worker_cannot_get_secret() {
     let response = coordinator.handle_secret_request(&received_request);
     assert!(!response.granted);
     assert!(response.encrypted_value.is_none());
-    assert!(response.error.as_ref().unwrap().contains("unauthorized scope"));
+    assert!(response
+        .error
+        .as_ref()
+        .unwrap()
+        .contains("unauthorized scope"));
 
     hs.stop().await;
 }

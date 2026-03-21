@@ -39,10 +39,7 @@ impl AppserviceRegistrar for ManualRegistrar {
     async fn register(&self, _registration: &AppserviceRegistration) -> anyhow::Result<()> {
         let path = &self.registration_path;
         if !path.exists() {
-            anyhow::bail!(
-                "Manual registration file not found: {}",
-                path.display()
-            );
+            anyhow::bail!("Manual registration file not found: {}", path.display());
         }
 
         let content = std::fs::read_to_string(path)?;
@@ -126,7 +123,10 @@ impl AppserviceRegistration {
         yaml.push_str(&format!("url: \"{}\"\n", self.url));
         yaml.push_str(&format!("as_token: \"{}\"\n", self.as_token));
         yaml.push_str(&format!("hs_token: \"{}\"\n", self.hs_token));
-        yaml.push_str(&format!("sender_localpart: \"{}\"\n", self.sender_localpart));
+        yaml.push_str(&format!(
+            "sender_localpart: \"{}\"\n",
+            self.sender_localpart
+        ));
         yaml.push_str("namespaces:\n");
         yaml.push_str("  users:\n");
         for entry in &self.namespaces.users {
@@ -231,10 +231,7 @@ async fn register_appservice_tuwunel(
                                 return Ok(());
                             }
                             if msg_body.contains("Command failed") {
-                                anyhow::bail!(
-                                    "Appservice registration failed: {}",
-                                    msg_body
-                                );
+                                anyhow::bail!("Appservice registration failed: {}", msg_body);
                             }
                         }
                     }

@@ -14,7 +14,10 @@ async fn execute_echo_captures_stdout() {
     let result = execute_command(&validated).await.unwrap();
 
     assert_eq!(result.exit_code, Some(0));
-    assert!(result.stdout_lines.iter().any(|l| l.contains("hello-world")));
+    assert!(result
+        .stdout_lines
+        .iter()
+        .any(|l| l.contains("hello-world")));
 }
 
 #[tokio::test]
@@ -26,8 +29,13 @@ async fn execute_separates_stdout_and_stderr() {
         max_sessions: 10,
     };
 
-    let validated =
-        validate_command(&config, "sh", &["-c", "echo out; echo err >&2"], Some("/tmp")).unwrap();
+    let validated = validate_command(
+        &config,
+        "sh",
+        &["-c", "echo out; echo err >&2"],
+        Some("/tmp"),
+    )
+    .unwrap();
     let result = execute_command(&validated).await.unwrap();
 
     assert_eq!(result.exit_code, Some(0));

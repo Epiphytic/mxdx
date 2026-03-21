@@ -57,7 +57,10 @@ mod tests {
         let parsed: SecretResponseEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.request_id, "req-001");
         assert!(parsed.granted);
-        assert_eq!(parsed.encrypted_value, Some("age-encrypted-ciphertext-base64".into()));
+        assert_eq!(
+            parsed.encrypted_value,
+            Some("age-encrypted-ciphertext-base64".into())
+        );
         assert!(parsed.error.is_none());
     }
 

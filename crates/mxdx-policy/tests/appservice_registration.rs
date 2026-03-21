@@ -55,10 +55,7 @@ async fn agent_namespace_is_exclusive() {
     // the normal registration API. This should be forbidden because the
     // appservice has exclusive claim on the namespace.
     let http_client = reqwest::Client::new();
-    let reg_url = format!(
-        "{}/_matrix/client/v3/register",
-        config.homeserver_url
-    );
+    let reg_url = format!("{}/_matrix/client/v3/register", config.homeserver_url);
     let body = serde_json::json!({
         "username": "agent-test",
         "password": "testpass",

@@ -1,5 +1,3 @@
-use wasm_bindgen::prelude::*;
-use wasm_bindgen::JsCast;
 use matrix_sdk::{
     config::SyncSettings,
     room::MessagesOptions,
@@ -23,6 +21,8 @@ use matrix_sdk::{
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
 
 #[wasm_bindgen(start)]
 pub fn init() {
@@ -76,7 +76,9 @@ async fn delete_indexeddb_store(name: &str) {
                     web_sys::console::log_1(&format!("[mxdx] Deleted IndexedDB: {db_name}").into());
                 }
                 Err(e) => {
-                    web_sys::console::warn_1(&format!("[mxdx] Failed to delete IndexedDB {db_name}: {:?}", e).into());
+                    web_sys::console::warn_1(
+                        &format!("[mxdx] Failed to delete IndexedDB {db_name}: {:?}", e).into(),
+                    );
                 }
             }
         }
@@ -99,7 +101,11 @@ impl WasmMatrixClient {
         password: &str,
         registration_token: &str,
     ) -> Result<WasmMatrixClient, JsValue> {
-        let store_name = format!("mxdx_{}_{}", username, homeserver_url.replace([':', '/', '.'], "_"));
+        let store_name = format!(
+            "mxdx_{}_{}",
+            username,
+            homeserver_url.replace([':', '/', '.'], "_")
+        );
         let client = Client::builder()
             .homeserver_url(homeserver_url)
             .indexeddb_store(&store_name, None)
@@ -126,7 +132,10 @@ impl WasmMatrixClient {
             .map_err(|e| to_js_err(format!("Registration request failed: {e}")))?;
 
         if !resp.status().is_success() {
-            let err_body = resp.text().await.unwrap_or_else(|_| "unknown error".to_string());
+            let err_body = resp
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
             return Err(to_js_err(format!("Registration failed: {err_body}")));
         }
 
@@ -155,15 +164,18 @@ impl WasmMatrixClient {
         username: &str,
         password: &str,
     ) -> Result<WasmMatrixClient, JsValue> {
-        let store_name = format!("mxdx_{}_{}", username, server_name.replace([':', '/', '.'], "_"));
+        let store_name = format!(
+            "mxdx_{}_{}",
+            username,
+            server_name.replace([':', '/', '.'], "_")
+        );
 
         // Fresh login = new device. Any existing crypto store is stale
         // (previous device may have been deleted, keys are invalid).
         // Clear it unconditionally to prevent sync hangs.
         delete_indexeddb_store(&store_name).await;
 
-        let builder = Client::builder()
-            .indexeddb_store(&store_name, None);
+        let builder = Client::builder().indexeddb_store(&store_name, None);
         let builder = if server_name.contains("://") {
             builder.homeserver_url(server_name)
         } else {
@@ -172,7 +184,8 @@ impl WasmMatrixClient {
 
         let client = builder.build().await.map_err(to_js_err)?;
 
-        client.matrix_auth()
+        client
+            .matrix_auth()
             .login_username(username, password)
             .initial_device_display_name("mxdx")
             .await
@@ -210,7 +223,9 @@ impl WasmMatrixClient {
     pub async fn invite_user(&self, room_id: &str, user_id: &str) -> Result<(), JsValue> {
         let rid = <&matrix_sdk::ruma::RoomId>::try_from(room_id).map_err(to_js_err)?;
         let uid = <&matrix_sdk::ruma::UserId>::try_from(user_id).map_err(to_js_err)?;
-        let room = self.client.get_room(rid)
+        let room = self
+            .client
+            .get_room(rid)
             .ok_or_else(|| to_js_err(format!("Room not found: {room_id}")))?;
         room.invite_user_by_id(uid).await.map_err(to_js_err)?;
         Ok(())
@@ -227,7 +242,11 @@ impl WasmMatrixClient {
     /// Get list of invited room IDs (pending invitations).
     #[wasm_bindgen(js_name = "invitedRoomIds")]
     pub fn invited_room_ids(&self) -> Vec<String> {
-        self.client.invited_rooms().iter().map(|r| r.room_id().to_string()).collect()
+        self.client
+            .invited_rooms()
+            .iter()
+            .map(|r| r.room_id().to_string())
+            .collect()
     }
 
     /// Export the current session as JSON for persistence.
@@ -235,7 +254,10 @@ impl WasmMatrixClient {
     /// Store this in the OS keyring — never write it to a config file.
     #[wasm_bindgen(js_name = "exportSession")]
     pub fn export_session(&self) -> Result<String, JsValue> {
-        let session = self.client.matrix_auth().session()
+        let session = self
+            .client
+            .matrix_auth()
+            .session()
             .ok_or_else(|| to_js_err("No active session to export"))?;
 
         let data = serde_json::json!({
@@ -255,20 +277,31 @@ impl WasmMatrixClient {
     pub async fn restore_session(session_json: &str) -> Result<WasmMatrixClient, JsValue> {
         let parsed: serde_json::Value = serde_json::from_str(session_json).map_err(to_js_err)?;
 
-        let homeserver_url = parsed["homeserver_url"].as_str()
+        let homeserver_url = parsed["homeserver_url"]
+            .as_str()
             .ok_or_else(|| to_js_err("Missing homeserver_url in session data"))?;
-        let user_id = parsed["user_id"].as_str()
+        let user_id = parsed["user_id"]
+            .as_str()
             .ok_or_else(|| to_js_err("Missing user_id in session data"))?;
-        let device_id = parsed["device_id"].as_str()
+        let device_id = parsed["device_id"]
+            .as_str()
             .ok_or_else(|| to_js_err("Missing device_id in session data"))?;
-        let access_token = parsed["access_token"].as_str()
+        let access_token = parsed["access_token"]
+            .as_str()
             .ok_or_else(|| to_js_err("Missing access_token in session data"))?;
 
         // Use stored store_name if available (ensures same IndexedDB as login),
         // fall back to old format for sessions exported before this fix
-        let store_name = parsed["store_name"].as_str()
+        let store_name = parsed["store_name"]
+            .as_str()
             .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("mxdx_{}_{}", user_id, homeserver_url.replace([':', '/', '.'], "_")));
+            .unwrap_or_else(|| {
+                format!(
+                    "mxdx_{}_{}",
+                    user_id,
+                    homeserver_url.replace([':', '/', '.'], "_")
+                )
+            });
         let client = Client::builder()
             .homeserver_url(homeserver_url)
             .indexeddb_store(&store_name, None)
@@ -310,13 +343,16 @@ impl WasmMatrixClient {
         match encryption.bootstrap_cross_signing(None).await {
             Ok(()) => return Ok(()),
             Err(e) => {
-                let uiaa_info = e.as_uiaa_response()
-                    .ok_or_else(|| to_js_err(format!("Cross-signing bootstrap failed (not UIA): {e}")))?;
+                let uiaa_info = e.as_uiaa_response().ok_or_else(|| {
+                    to_js_err(format!("Cross-signing bootstrap failed (not UIA): {e}"))
+                })?;
 
                 // Extract UIA session from the 401 response
                 let session = uiaa_info.session.clone();
 
-                let user_id = self.client.user_id()
+                let user_id = self
+                    .client
+                    .user_id()
                     .ok_or_else(|| to_js_err("Not logged in"))?;
 
                 let mut password_auth = uiaa::Password::new(
@@ -366,7 +402,8 @@ impl WasmMatrixClient {
     /// verify us back.
     #[wasm_bindgen(js_name = "verifyUser")]
     pub async fn verify_user(&self, user_id_str: &str) -> Result<(), JsValue> {
-        let user_id: OwnedUserId = user_id_str.try_into()
+        let user_id: OwnedUserId = user_id_str
+            .try_into()
             .map_err(|e| to_js_err(format!("Invalid user ID '{user_id_str}': {e}")))?;
 
         let encryption = self.client.encryption();
@@ -375,7 +412,9 @@ impl WasmMatrixClient {
             .map_err(|e| to_js_err(format!("Failed to get user identity: {e}")))?
             .ok_or_else(|| to_js_err(format!("No identity found for {user_id_str} — they may not have bootstrapped cross-signing")))?;
 
-        identity.verify().await
+        identity
+            .verify()
+            .await
             .map_err(|e| to_js_err(format!("Failed to verify {user_id_str}: {e}")))?;
 
         Ok(())
@@ -386,17 +425,23 @@ impl WasmMatrixClient {
     /// be verified first.
     #[wasm_bindgen(js_name = "verifyOwnIdentity")]
     pub async fn verify_own_identity(&self) -> Result<(), JsValue> {
-        let user_id = self.client.user_id()
+        let user_id = self
+            .client
+            .user_id()
             .ok_or_else(|| to_js_err("Not logged in"))?
             .to_owned();
 
         let encryption = self.client.encryption();
 
-        let identity = encryption.get_user_identity(&user_id).await
+        let identity = encryption
+            .get_user_identity(&user_id)
+            .await
             .map_err(|e| to_js_err(format!("Failed to get own identity: {e}")))?
             .ok_or_else(|| to_js_err("No identity found — bootstrap cross-signing first"))?;
 
-        identity.verify().await
+        identity
+            .verify()
+            .await
             .map_err(|e| to_js_err(format!("Failed to verify own identity: {e}")))?;
 
         Ok(())
@@ -405,10 +450,15 @@ impl WasmMatrixClient {
     /// Check if a user's identity is verified from our perspective.
     #[wasm_bindgen(js_name = "isUserVerified")]
     pub async fn is_user_verified(&self, user_id_str: &str) -> Result<bool, JsValue> {
-        let user_id: OwnedUserId = user_id_str.try_into()
+        let user_id: OwnedUserId = user_id_str
+            .try_into()
             .map_err(|e| to_js_err(format!("Invalid user ID '{user_id_str}': {e}")))?;
 
-        let identity = self.client.encryption().get_user_identity(&user_id).await
+        let identity = self
+            .client
+            .encryption()
+            .get_user_identity(&user_id)
+            .await
             .map_err(|e| to_js_err(format!("Failed to get user identity: {e}")))?;
 
         Ok(identity.map(|i| i.is_verified()).unwrap_or(false))
@@ -418,7 +468,9 @@ impl WasmMatrixClient {
     /// Returns JSON: { space_id, exec_room_id, logs_room_id }
     #[wasm_bindgen(js_name = "createLauncherSpace")]
     pub async fn create_launcher_space(&self, launcher_id: &str) -> Result<JsValue, JsValue> {
-        let server_name = self.client.user_id()
+        let server_name = self
+            .client
+            .user_id()
             .ok_or_else(|| to_js_err("Not logged in"))?
             .server_name()
             .to_string();
@@ -436,29 +488,39 @@ impl WasmMatrixClient {
         space_request.name = Some(format!("mxdx: {launcher_id}"));
         space_request.creation_content = Some(
             matrix_sdk::ruma::serde::Raw::new(&creation_content)
-                .map_err(|e| to_js_err(format!("Failed to serialize creation content: {e}")))?
+                .map_err(|e| to_js_err(format!("Failed to serialize creation content: {e}")))?,
         );
         space_request.initial_state = vec![space_topic.to_raw_any()];
 
-        let space = self.client.create_room(space_request).await.map_err(to_js_err)?;
+        let space = self
+            .client
+            .create_room(space_request)
+            .await
+            .map_err(to_js_err)?;
         let space_id = space.room_id().to_string();
 
         // Create exec room (E2EE + MSC4362)
-        let exec_room_id = self.create_named_encrypted_room(
-            &format!("mxdx: {launcher_id} — exec"),
-            &format!("org.mxdx.launcher.exec:{launcher_id}"),
-        ).await?;
+        let exec_room_id = self
+            .create_named_encrypted_room(
+                &format!("mxdx: {launcher_id} — exec"),
+                &format!("org.mxdx.launcher.exec:{launcher_id}"),
+            )
+            .await?;
 
         // Create logs room (E2EE + MSC4362)
-        let logs_room_id = self.create_named_encrypted_room(
-            &format!("mxdx: {launcher_id} — logs"),
-            &format!("org.mxdx.launcher.logs:{launcher_id}"),
-        ).await?;
+        let logs_room_id = self
+            .create_named_encrypted_room(
+                &format!("mxdx: {launcher_id} — logs"),
+                &format!("org.mxdx.launcher.logs:{launcher_id}"),
+            )
+            .await?;
 
         // Link child rooms to space
         let via = serde_json::json!({ "via": [server_name] });
         for child_id in [&exec_room_id, &logs_room_id] {
-            let room = self.client.get_room(space.room_id())
+            let room = self
+                .client
+                .get_room(space.room_id())
                 .ok_or_else(|| to_js_err("Space room not found"))?;
             room.send_state_event_raw("m.space.child", child_id, via.clone())
                 .await
@@ -515,7 +577,10 @@ impl WasmMatrixClient {
 
     /// Find or create a launcher space (idempotent).
     #[wasm_bindgen(js_name = "getOrCreateLauncherSpace")]
-    pub async fn get_or_create_launcher_space(&self, launcher_id: &str) -> Result<JsValue, JsValue> {
+    pub async fn get_or_create_launcher_space(
+        &self,
+        launcher_id: &str,
+    ) -> Result<JsValue, JsValue> {
         let existing = self.find_launcher_space(launcher_id).await?;
         if !existing.is_null() {
             return Ok(existing);
@@ -534,8 +599,10 @@ impl WasmMatrixClient {
 
         // Collect all rooms by topic prefix
         let mut spaces: Vec<(String, String)> = Vec::new(); // (launcher_id, room_id)
-        let mut exec_rooms: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        let mut logs_rooms: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut exec_rooms: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut logs_rooms: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
 
         for room in self.client.joined_rooms() {
             let topic = room.topic().unwrap_or_default();
@@ -552,7 +619,9 @@ impl WasmMatrixClient {
 
         let mut result: Vec<serde_json::Value> = Vec::new();
         for (launcher_id, space_id) in &spaces {
-            if let (Some(exec_id), Some(logs_id)) = (exec_rooms.get(launcher_id), logs_rooms.get(launcher_id)) {
+            if let (Some(exec_id), Some(logs_id)) =
+                (exec_rooms.get(launcher_id), logs_rooms.get(launcher_id))
+            {
                 result.push(serde_json::json!({
                     "launcher_id": launcher_id,
                     "space_id": space_id,
@@ -574,10 +643,14 @@ impl WasmMatrixClient {
         content_json: &str,
     ) -> Result<(), JsValue> {
         let rid = <&matrix_sdk::ruma::RoomId>::try_from(room_id).map_err(to_js_err)?;
-        let room = self.client.get_room(rid)
+        let room = self
+            .client
+            .get_room(rid)
             .ok_or_else(|| to_js_err(format!("Room not found: {room_id}")))?;
         let content: serde_json::Value = serde_json::from_str(content_json).map_err(to_js_err)?;
-        room.send_raw(event_type, content).await.map_err(to_js_err)?;
+        room.send_raw(event_type, content)
+            .await
+            .map_err(to_js_err)?;
         Ok(())
     }
 
@@ -591,10 +664,14 @@ impl WasmMatrixClient {
         content_json: &str,
     ) -> Result<(), JsValue> {
         let rid = <&matrix_sdk::ruma::RoomId>::try_from(room_id).map_err(to_js_err)?;
-        let room = self.client.get_room(rid)
+        let room = self
+            .client
+            .get_room(rid)
             .ok_or_else(|| to_js_err(format!("Room not found: {room_id}")))?;
         let content: serde_json::Value = serde_json::from_str(content_json).map_err(to_js_err)?;
-        room.send_state_event_raw(event_type, state_key, content).await.map_err(to_js_err)?;
+        room.send_state_event_raw(event_type, state_key, content)
+            .await
+            .map_err(to_js_err)?;
         Ok(())
     }
 
@@ -606,10 +683,15 @@ impl WasmMatrixClient {
         let rid = <&matrix_sdk::ruma::RoomId>::try_from(room_id).map_err(to_js_err)?;
 
         if let Some(room) = self.client.get_room(rid) {
-            let messages = room.messages(MessagesOptions::backward()).await.map_err(to_js_err)?;
+            let messages = room
+                .messages(MessagesOptions::backward())
+                .await
+                .map_err(to_js_err)?;
             let mut collected: Vec<serde_json::Value> = Vec::new();
             for event in &messages.chunk {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(event.raw().json().get()) {
+                if let Ok(json) =
+                    serde_json::from_str::<serde_json::Value>(event.raw().json().get())
+                {
                     let event_type = json.get("type").and_then(|t| t.as_str());
                     if event_type != Some("m.room.encrypted")
                         && event_type != Some("m.room.encryption")
@@ -640,11 +722,16 @@ impl WasmMatrixClient {
             self.sync_once().await?;
 
             if let Some(room) = self.client.get_room(rid) {
-                let messages = room.messages(MessagesOptions::backward()).await.map_err(to_js_err)?;
+                let messages = room
+                    .messages(MessagesOptions::backward())
+                    .await
+                    .map_err(to_js_err)?;
                 let mut collected: Vec<serde_json::Value> = Vec::new();
                 let mut encrypted_count: u32 = 0;
                 for event in &messages.chunk {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(event.raw().json().get()) {
+                    if let Ok(json) =
+                        serde_json::from_str::<serde_json::Value>(event.raw().json().get())
+                    {
                         let event_type = json.get("type").and_then(|t| t.as_str());
                         if event_type == Some("m.room.encrypted") {
                             encrypted_count += 1;
@@ -674,7 +761,8 @@ impl WasmMatrixClient {
     /// Used for interactive terminal sessions — only participants who join see messages.
     #[wasm_bindgen(js_name = "createDmRoom")]
     pub async fn create_dm_room(&self, user_id: &str) -> Result<String, JsValue> {
-        let uid: OwnedUserId = user_id.try_into()
+        let uid: OwnedUserId = user_id
+            .try_into()
             .map_err(|e| to_js_err(format!("Invalid user ID '{user_id}': {e}")))?;
 
         let encryption_event = InitialStateEvent::new(
@@ -689,10 +777,7 @@ impl WasmMatrixClient {
         let mut request = CreateRoomRequest::new();
         request.is_direct = true;
         request.invite = vec![uid];
-        request.initial_state = vec![
-            encryption_event.to_raw_any(),
-            history_event.to_raw_any(),
-        ];
+        request.initial_state = vec![encryption_event.to_raw_any(), history_event.to_raw_any()];
 
         let response = self.client.create_room(request).await.map_err(to_js_err)?;
         Ok(response.room_id().to_string())
@@ -727,23 +812,20 @@ impl WasmMatrixClient {
             RoomHistoryVisibilityEventContent::new(HistoryVisibility::Joined),
         );
 
-        let mut initial_state = vec![
-            encryption_event.to_raw_any(),
-            history_event.to_raw_any(),
-        ];
+        let mut initial_state = vec![encryption_event.to_raw_any(), history_event.to_raw_any()];
 
         // Add topic as initial state if provided
         if let Some(ref topic) = config.topic {
-            let topic_event = InitialStateEvent::new(
-                EmptyStateKey,
-                RoomTopicEventContent::new(topic.clone()),
-            );
+            let topic_event =
+                InitialStateEvent::new(EmptyStateKey, RoomTopicEventContent::new(topic.clone()));
             initial_state.push(topic_event.to_raw_any());
         }
 
         let mut request = CreateRoomRequest::new();
         request.is_direct = config.is_direct;
-        request.invite = config.invite.iter()
+        request.invite = config
+            .invite
+            .iter()
             .filter_map(|u| u.as_str().try_into().ok())
             .collect();
         request.initial_state = initial_state;
@@ -778,10 +860,15 @@ impl WasmMatrixClient {
 
         let rid = <&matrix_sdk::ruma::RoomId>::try_from(room_id).map_err(to_js_err)?;
         if let Some(room) = self.client.get_room(rid) {
-            let messages = room.messages(MessagesOptions::backward()).await.map_err(to_js_err)?;
+            let messages = room
+                .messages(MessagesOptions::backward())
+                .await
+                .map_err(to_js_err)?;
             let mut results = Vec::new();
             for event in &messages.chunk {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(event.raw().json().get()) {
+                if let Ok(json) =
+                    serde_json::from_str::<serde_json::Value>(event.raw().json().get())
+                {
                     let etype = json.get("type").and_then(|t| t.as_str());
                     if etype == Some(event_type) {
                         results.push(json);
@@ -808,13 +895,16 @@ impl WasmMatrixClient {
         let rid = <&matrix_sdk::ruma::RoomId>::try_from(room_id).map_err(to_js_err)?;
         let timeout = Duration::from_secs(timeout_secs as u64);
         let deadline = web_time::Instant::now() + timeout;
-        let mut seen_event_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut seen_event_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         // Collect already-seen event IDs on first pass
         if let Some(room) = self.client.get_room(rid) {
             if let Ok(messages) = room.messages(MessagesOptions::backward()).await {
                 for event in &messages.chunk {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(event.raw().json().get()) {
+                    if let Ok(json) =
+                        serde_json::from_str::<serde_json::Value>(event.raw().json().get())
+                    {
                         if let Some(eid) = json.get("event_id").and_then(|e| e.as_str()) {
                             seen_event_ids.insert(eid.to_string());
                         }
@@ -827,10 +917,15 @@ impl WasmMatrixClient {
             self.sync_once().await?;
 
             if let Some(room) = self.client.get_room(rid) {
-                let messages = room.messages(MessagesOptions::backward()).await.map_err(to_js_err)?;
+                let messages = room
+                    .messages(MessagesOptions::backward())
+                    .await
+                    .map_err(to_js_err)?;
                 let mut encrypted_count: u32 = 0;
                 for event in &messages.chunk {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(event.raw().json().get()) {
+                    if let Ok(json) =
+                        serde_json::from_str::<serde_json::Value>(event.raw().json().get())
+                    {
                         let etype = json.get("type").and_then(|t| t.as_str());
                         let eid = json.get("event_id").and_then(|e| e.as_str()).unwrap_or("");
 
@@ -844,10 +939,13 @@ impl WasmMatrixClient {
                     }
                 }
                 if encrypted_count > 0 {
-                    web_sys::console::warn_1(&format!(
-                        "[mxdx] {} undecryptable event(s) in room {} while waiting for '{}'",
-                        encrypted_count, room_id, event_type
-                    ).into());
+                    web_sys::console::warn_1(
+                        &format!(
+                            "[mxdx] {} undecryptable event(s) in room {} while waiting for '{}'",
+                            encrypted_count, room_id, event_type
+                        )
+                        .into(),
+                    );
                 }
             }
         }
@@ -858,15 +956,17 @@ impl WasmMatrixClient {
 
 // Private helpers
 impl WasmMatrixClient {
-    async fn create_named_encrypted_room(&self, name: &str, topic: &str) -> Result<String, JsValue> {
+    async fn create_named_encrypted_room(
+        &self,
+        name: &str,
+        topic: &str,
+    ) -> Result<String, JsValue> {
         let encryption_event = InitialStateEvent::new(
             EmptyStateKey,
             RoomEncryptionEventContent::with_recommended_defaults().with_encrypted_state(),
         );
-        let topic_event = InitialStateEvent::new(
-            EmptyStateKey,
-            RoomTopicEventContent::new(topic.to_string()),
-        );
+        let topic_event =
+            InitialStateEvent::new(EmptyStateKey, RoomTopicEventContent::new(topic.to_string()));
 
         let mut request = CreateRoomRequest::new();
         request.name = Some(name.to_string());

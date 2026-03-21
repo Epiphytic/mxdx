@@ -73,11 +73,7 @@ impl TestMatrixClient {
     }
 
     /// Wait for an invite to appear in sync.
-    pub async fn wait_for_invite(
-        &self,
-        room_id: &str,
-        timeout: Duration,
-    ) -> Result<()> {
+    pub async fn wait_for_invite(&self, room_id: &str, timeout: Duration) -> Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
         let mut since: Option<String> = None;
 

@@ -198,11 +198,7 @@ dual_protocol = true
             .context("Failed to parse registration response")?;
 
         if !status.is_success() {
-            bail!(
-                "Registration failed with status {}: {}",
-                status,
-                resp_body
-            );
+            bail!("Registration failed with status {}: {}", status, resp_body);
         }
 
         Ok(TestMatrixClient {

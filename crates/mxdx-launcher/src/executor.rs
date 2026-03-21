@@ -33,9 +33,7 @@ pub struct CommandResult {
 /// Execute a validated command, streaming stdout/stderr line by line.
 /// Returns (exit_code, stdout_lines, stderr_lines) for now.
 /// In full integration, this will send OutputEvents over Matrix.
-pub async fn execute_command(
-    validated: &ValidatedCommand,
-) -> Result<CommandResult, ExecutorError> {
+pub async fn execute_command(validated: &ValidatedCommand) -> Result<CommandResult, ExecutorError> {
     let mut cmd = TokioCommand::new(&validated.cmd);
     cmd.args(&validated.args);
     if let Some(ref cwd) = validated.cwd {
@@ -191,12 +189,10 @@ pub fn validate_command(
     cwd: Option<&str>,
 ) -> Result<ValidatedCommand, ExecutorError> {
     // 1. Allowlist check
-    if config.mode == CapabilityMode::Allowlist && !config.allowed_commands.contains(&cmd.to_string())
+    if config.mode == CapabilityMode::Allowlist
+        && !config.allowed_commands.contains(&cmd.to_string())
     {
-        return Err(ExecutorError(format!(
-            "command '{}' not permitted",
-            cmd
-        )));
+        return Err(ExecutorError(format!("command '{}' not permitted", cmd)));
     }
 
     // 2. cwd validation
@@ -207,10 +203,7 @@ pub fn validate_command(
             .iter()
             .any(|prefix| normalized.starts_with(prefix));
         if !permitted {
-            return Err(ExecutorError(format!(
-                "cwd not permitted: {}",
-                normalized
-            )));
+            return Err(ExecutorError(format!("cwd not permitted: {}", normalized)));
         }
         Some(normalized)
     } else {
@@ -271,7 +264,10 @@ mod tests {
         let config = test_config_with_cwd_prefixes(&["/workspace"]);
         let result = validate_command(&config, "cargo", &["build"], Some("/etc"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("cwd not permitted"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("cwd not permitted"));
     }
 
     #[test]
