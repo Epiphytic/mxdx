@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
-use mxdx_matrix::{MatrixClient, OwnedRoomId};
+use anyhow::{Context, Result};
+use mxdx_matrix::{MatrixClient, OwnedRoomId, UserId};
 use mxdx_types::events::fabric::{
     ClaimEvent, HeartbeatEvent, RoutingMode, TaskEvent, TaskResultEvent,
 };
@@ -155,12 +155,19 @@ impl CoordinatorBot {
             "routing direct: inviting sender to worker room"
         );
 
-        // TODO: MatrixClient does not yet have an invite_user method.
-        // When available, call: self.matrix_client.invite_user(worker_room_id, &task.sender_id).await?;
-        warn!(
+        let sender = <&UserId>::try_from(task.sender_id.as_str())
+            .context("invalid sender_id in task event")?;
+
+        self.matrix_client
+            .invite_user(worker_room_id, sender)
+            .await
+            .map_err(|e| anyhow::anyhow!("invite_user failed: {e}"))?;
+
+        info!(
             uuid = %task.uuid,
             sender = %task.sender_id,
-            "invite_user not yet implemented on MatrixClient - sender not invited"
+            worker_room = %worker_room_id,
+            "sender invited to worker room"
         );
 
         Ok(())
