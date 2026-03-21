@@ -8,6 +8,7 @@ members = [
     "crates/mxdx-web",
     "crates/mxdx-core-wasm",
     "crates/mxdx-fabric",
+    "crates/mxdx-fabric-cli",
     "xtask",
     "tests/helpers",
 ]

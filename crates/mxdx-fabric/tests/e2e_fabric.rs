@@ -955,3 +955,163 @@ async fn test_p2p_stream_unix_socket() {
 
     hs.stop().await;
 }
+
+#[tokio::test]
+async fn test_fabric_cli_post() {
+    let mut hs = TuwunelInstance::start().await.unwrap();
+    let base_url = format!("http://127.0.0.1:{}", hs.port);
+
+    let sender_user = hs.register_user("cli-sender", "pass").await.unwrap();
+    let worker_user = hs.register_user("cli-worker", "pass").await.unwrap();
+
+    let room_id = sender_user.create_room().await.unwrap();
+    sender_user
+        .invite(&room_id, &worker_user.user_id)
+        .await
+        .unwrap();
+
+    worker_user
+        .wait_for_invite(&room_id, Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    let http = reqwest::Client::new();
+    let join_url = format!(
+        "{}/_matrix/client/v3/join/{}",
+        base_url,
+        urlencoding::encode(&room_id),
+    );
+    let resp = http
+        .post(&join_url)
+        .bearer_auth(&worker_user.access_token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "worker join failed: {}",
+        resp.text().await.unwrap_or_default()
+    );
+
+    let worker_token = worker_user.access_token.clone();
+    let worker_base_url = base_url.clone();
+    let worker_room_id = room_id.clone();
+    let worker_handle = tokio::spawn(async move {
+        let http = reqwest::Client::new();
+        let mut since: Option<String> = None;
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+        while tokio::time::Instant::now() < deadline {
+            let mut sync_url = format!("{}/_matrix/client/v3/sync?timeout=3000", worker_base_url,);
+            if let Some(ref token) = since {
+                sync_url.push_str(&format!("&since={}", urlencoding::encode(token)));
+            }
+
+            let resp = http
+                .get(&sync_url)
+                .bearer_auth(&worker_token)
+                .send()
+                .await
+                .unwrap();
+            let body: serde_json::Value = resp.json().await.unwrap();
+            if let Some(next) = body["next_batch"].as_str() {
+                since = Some(next.to_string());
+            }
+
+            let timeline = &body["rooms"]["join"][&worker_room_id]["timeline"]["events"];
+            if let Some(events) = timeline.as_array() {
+                for event in events {
+                    let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    if event_type == "org.mxdx.fabric.task" {
+                        let content = event.get("content").unwrap();
+                        let task_uuid = content.get("uuid").and_then(|u| u.as_str()).unwrap();
+
+                        let result = serde_json::json!({
+                            "task_uuid": task_uuid,
+                            "worker_id": "cli-worker",
+                            "status": "success",
+                            "output": {"result": "cli test done"},
+                            "error": null,
+                            "duration_seconds": 1
+                        });
+
+                        let txn_id = uuid::Uuid::new_v4().to_string();
+                        let send_url = format!(
+                            "{}/_matrix/client/v3/rooms/{}/send/org.mxdx.fabric.result/{}",
+                            worker_base_url,
+                            urlencoding::encode(&worker_room_id),
+                            urlencoding::encode(&txn_id),
+                        );
+                        let send_resp = http
+                            .put(&send_url)
+                            .bearer_auth(&worker_token)
+                            .json(&result)
+                            .send()
+                            .await
+                            .unwrap();
+                        assert!(
+                            send_resp.status().is_success(),
+                            "failed to post result: {}",
+                            send_resp.text().await.unwrap_or_default()
+                        );
+                        return;
+                    }
+                }
+            }
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        panic!("worker timed out waiting for task event");
+    });
+
+    let fabric_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("target/debug/fabric");
+
+    let output = tokio::process::Command::new(&fabric_bin)
+        .args([
+            "post",
+            "--homeserver",
+            &base_url,
+            "--token",
+            &sender_user.access_token,
+            "--coordinator-room",
+            &room_id,
+            "--capabilities",
+            "rust",
+            "--prompt",
+            "test task from CLI",
+            "--timeout",
+            "60",
+        ])
+        .output()
+        .await
+        .expect("fabric binary should be runnable");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "fabric post should exit 0, stderr: {}, stdout: {}",
+        stderr,
+        stdout
+    );
+
+    let result_json: serde_json::Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout should be valid JSON: {e}, got: {stdout}"));
+    assert_eq!(
+        result_json.get("status").and_then(|s| s.as_str()),
+        Some("success"),
+        "result should be success, got: {}",
+        result_json
+    );
+
+    worker_handle.await.unwrap();
+    hs.stop().await;
+}

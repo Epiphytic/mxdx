@@ -1,0 +1,3 @@
+homeserver = "https://matrix.belthanior.local"
+token = "your-access-token"
+coordinator_room = "!room-id:belthanior.local"
