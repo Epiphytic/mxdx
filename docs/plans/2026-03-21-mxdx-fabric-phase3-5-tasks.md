@@ -82,43 +82,79 @@ Commit: `feat(fabric): P2P Unix socket stream for high-volume tasks`
 
 ---
 
-## Phase 5 — OpenClaw Skill
+## Phase 5 — fabric CLI + jcode skill + OpenClaw integration
 
-### Task 5.1 — OpenClaw fabric skill
+**No Python. All Rust + TypeScript.**
 
-Create `/home/openclaw/openclaw/skills/mxdx-fabric/SKILL.md`:
+### Task 5.1 — `mxdx-fabric-cli` binary crate
+
+Create `crates/mxdx-fabric-cli/` — a standalone Rust binary that both jcode and OpenClaw can shell out to.
+
+Subcommands:
+- `fabric post --homeserver URL --token TOKEN --coordinator-room ROOM_ID --capabilities rust,linux --prompt "..." --timeout 1800`
+  Posts a TaskEvent, waits for result, prints result JSON to stdout. Exit 0 on success, 1 on failure/timeout.
+- `fabric status --homeserver URL --token TOKEN --room ROOM_ID --task-uuid UUID`
+  Prints current task status (claimed/running/done/failed).
+- `fabric watch --homeserver URL --token TOKEN --room ROOM_ID --task-uuid UUID`
+  Tails heartbeat messages live to stdout.
+
+Config file support: `~/.config/mxdx-fabric/config.toml` for homeserver/token defaults.
+
+Build and install to `/home/openclaw/.local/bin/fabric`.
+
+Commit: `feat(fabric-cli): fabric CLI binary`
+
+---
+
+### Task 5.2 — jcode skill
+
+Create `~/.jcode/skills/mxdx-fabric/SKILL.md` teaching jcode when and how to delegate subtasks via fabric:
 
 ```markdown
 # mxdx-fabric skill
 
-Use to delegate coding tasks to fabric workers via Matrix.
+When to use: for long-running subtasks that can run in parallel or need specialized capabilities
+(e.g. cargo build, running tests, WASM compilation, security scans).
 
-## Post a task
+How to delegate:
+  fabric post --capabilities rust,linux --prompt "cargo test -p mxdx-fabric" --timeout 300
 
-Post a task and wait for result:
-1. Build a TaskEvent JSON
-2. Connect to coordinator room: !coordinator-room-id:belthanior  
-3. Use the fabric Python helper: /home/openclaw/.openclaw/workspace/mxdx/scripts/fabric_client.py
-
-## fabric_client.py usage
-
-python3 fabric_client.py post \
-  --homeserver https://matrix.belthanior.local \
-  --token TOKEN \
-  --coordinator-room ROOM_ID \
-  --capabilities rust,linux \
-  --prompt "Your jcode prompt here" \
-  --timeout 1800
-
-Prints task UUID, then waits and prints result when done.
+The fabric CLI posts the task to available workers and returns the result.
+Use this instead of running long commands directly.
 ```
 
-Create `crates/mxdx-fabric/scripts/fabric_client.py`:
-- Uses matrix-nio (Python Matrix client) or plain aiohttp for Matrix REST
-- `post` subcommand: builds TaskEvent, posts to coordinator room, polls for result
-- `status` subcommand: check status of a task by UUID
-- Prints result JSON on completion
+Commit: `feat(fabric-cli): jcode skill for fabric delegation`
 
-E2E test: run `fabric_client.py post` against a live TuwunelInstance in a subprocess test.
+---
 
-Commit: `feat(fabric): OpenClaw skill + fabric_client.py`
+### Task 5.3 — OpenClaw skill
+
+Create `/home/openclaw/openclaw/skills/mxdx-fabric/SKILL.md` teaching Bel to delegate tasks via fabric:
+
+```markdown
+# mxdx-fabric skill
+
+Use to delegate coding/build tasks to fabric workers instead of spawning jcode subagents directly.
+
+## Usage
+
+fabric post \
+  --capabilities rust,linux \
+  --prompt "Your task here" \
+  --timeout 1800
+
+Blocks until result. Result JSON printed to stdout.
+```
+
+Commit: `feat(fabric-cli): OpenClaw skill for fabric delegation`
+
+---
+
+### E2E test
+
+Add `test_fabric_cli_post` to e2e_fabric.rs:
+- Start TuwunelInstance, register coordinator + worker
+- Start coordinator in background task
+- Run `fabric post ...` as a subprocess with `--homeserver` pointing to TuwunelInstance URL
+- Worker claims and completes task (using JcodeWorker with mock jcode_bin)
+- Assert: fabric CLI subprocess exits 0, stdout contains valid result JSON
