@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TaskEvent {
     pub uuid: String,
+    pub sender_id: String,
     pub required_capabilities: Vec<String>,
     pub estimated_cycles: Option<u64>,
     pub timeout_seconds: u64,
@@ -83,6 +84,7 @@ mod tests {
     fn task_event_round_trips_json() {
         let evt = TaskEvent {
             uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
+            sender_id: "@alice:example.com".into(),
             required_capabilities: vec!["rust".into(), "linux".into()],
             estimated_cycles: Some(1000),
             timeout_seconds: 3600,
@@ -97,6 +99,7 @@ mod tests {
         let json = serde_json::to_string(&evt).unwrap();
         let parsed: TaskEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.uuid, evt.uuid);
+        assert_eq!(parsed.sender_id, "@alice:example.com");
         assert_eq!(parsed.required_capabilities, evt.required_capabilities);
         assert_eq!(parsed.estimated_cycles, Some(1000));
         assert_eq!(parsed.timeout_seconds, 3600);
@@ -115,6 +118,7 @@ mod tests {
     fn task_event_optional_fields_null() {
         let evt = TaskEvent {
             uuid: "task-2".into(),
+            sender_id: "@bob:example.com".into(),
             required_capabilities: vec![],
             estimated_cycles: None,
             timeout_seconds: 60,
