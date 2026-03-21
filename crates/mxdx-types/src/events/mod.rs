@@ -1,4 +1,5 @@
 pub mod command;
+pub mod fabric;
 pub mod launcher;
 pub mod output;
 pub mod result;
