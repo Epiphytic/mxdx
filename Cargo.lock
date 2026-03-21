@@ -2454,7 +2454,7 @@ dependencies = [
 
 [[package]]
 name = "mxdx-core-wasm"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "console_error_panic_hook",
  "getrandom 0.3.4",
@@ -2474,8 +2474,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxdx-fabric"
+version = "1.1.0"
+dependencies = [
+ "anyhow",
+ "mxdx-matrix",
+ "mxdx-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "mxdx-launcher"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "age",
  "anyhow",
@@ -2499,7 +2513,7 @@ dependencies = [
 
 [[package]]
 name = "mxdx-matrix"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "matrix-sdk",
@@ -2517,7 +2531,7 @@ dependencies = [
 
 [[package]]
 name = "mxdx-policy"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "lru",
@@ -2535,7 +2549,7 @@ dependencies = [
 
 [[package]]
 name = "mxdx-secrets"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "age",
  "anyhow",
@@ -2564,7 +2578,7 @@ dependencies = [
 
 [[package]]
 name = "mxdx-types"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2573,7 +2587,7 @@ dependencies = [
 
 [[package]]
 name = "mxdx-web"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "axum",
  "http",

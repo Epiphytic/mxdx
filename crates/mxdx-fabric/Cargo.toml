@@ -1,0 +1,23 @@
+[package]
+name = "mxdx-fabric"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Task fabric for mxdx: capability-based routing, claim races, and coordinator logic"
+
+[dependencies]
+mxdx-types = { path = "../mxdx-types", version = "1.1.0" }
+mxdx-matrix = { path = "../mxdx-matrix", version = "1.1.0" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros"] }
