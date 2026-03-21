@@ -1,5 +1,7 @@
 use serde_json::Value;
 
+use crate::error::Result;
+use crate::MatrixClient;
 use matrix_sdk::ruma::{
     api::client::room::create_room::v3::{CreationContent, Request as CreateRoomRequest},
     events::{
@@ -13,8 +15,6 @@ use matrix_sdk::ruma::{
     room::RoomType,
     OwnedRoomId, RoomId, UserId,
 };
-use crate::error::Result;
-use crate::MatrixClient;
 
 /// Room IDs for a launcher space and its child rooms.
 #[derive(Debug, Clone)]
@@ -30,10 +30,7 @@ impl MatrixClient {
     /// The space is a Matrix Space (m.space), exec is encrypted, status and logs are unencrypted.
     /// All rooms are named and tagged with topics for discoverability.
     pub async fn create_launcher_space(&self, launcher_id: &str) -> Result<LauncherTopology> {
-        let server_name = self
-            .user_id()
-            .server_name()
-            .to_string();
+        let server_name = self.user_id().server_name().to_string();
 
         // Create the space room
         let mut creation_content = CreationContent::new();
@@ -46,8 +43,10 @@ impl MatrixClient {
 
         let mut space_request = CreateRoomRequest::new();
         space_request.name = Some(format!("mxdx: {launcher_id}"));
-        space_request.creation_content =
-            Some(matrix_sdk::ruma::serde::Raw::new(&creation_content).expect("serialize creation_content"));
+        space_request.creation_content = Some(
+            matrix_sdk::ruma::serde::Raw::new(&creation_content)
+                .expect("serialize creation_content"),
+        );
         space_request.initial_state = vec![space_topic.to_raw_any()];
 
         let space_response = self.create_room_with_timeout(space_request).await?;
@@ -56,25 +55,31 @@ impl MatrixClient {
         // Create child rooms (with optional delay for rate-limited servers)
         let delay = self.room_creation_delay();
 
-        let exec_room_id = self.create_named_encrypted_room(
-            &format!("mxdx: {launcher_id} — exec"),
-            &format!("org.mxdx.launcher.exec:{launcher_id}"),
-            &[],
-        ).await?;
+        let exec_room_id = self
+            .create_named_encrypted_room(
+                &format!("mxdx: {launcher_id} — exec"),
+                &format!("org.mxdx.launcher.exec:{launcher_id}"),
+                &[],
+            )
+            .await?;
         if let Some(d) = delay {
             tokio::time::sleep(d).await;
         }
-        let status_room_id = self.create_named_unencrypted_room(
-            &format!("mxdx: {launcher_id} — status"),
-            &format!("org.mxdx.launcher.status:{launcher_id}"),
-        ).await?;
+        let status_room_id = self
+            .create_named_unencrypted_room(
+                &format!("mxdx: {launcher_id} — status"),
+                &format!("org.mxdx.launcher.status:{launcher_id}"),
+            )
+            .await?;
         if let Some(d) = delay {
             tokio::time::sleep(d).await;
         }
-        let logs_room_id = self.create_named_unencrypted_room(
-            &format!("mxdx: {launcher_id} — logs"),
-            &format!("org.mxdx.launcher.logs:{launcher_id}"),
-        ).await?;
+        let logs_room_id = self
+            .create_named_unencrypted_room(
+                &format!("mxdx: {launcher_id} — logs"),
+                &format!("org.mxdx.launcher.logs:{launcher_id}"),
+            )
+            .await?;
 
         // Link child rooms to space via m.space.child state events
         let via = serde_json::json!({ "via": [server_name] });
@@ -134,7 +139,10 @@ impl MatrixClient {
     }
 
     /// Find an existing launcher space or create a new one.
-    pub async fn get_or_create_launcher_space(&self, launcher_id: &str) -> Result<LauncherTopology> {
+    pub async fn get_or_create_launcher_space(
+        &self,
+        launcher_id: &str,
+    ) -> Result<LauncherTopology> {
         if let Some(topology) = self.find_launcher_space(launcher_id).await? {
             return Ok(topology);
         }
@@ -155,7 +163,10 @@ impl MatrixClient {
 
         let topic_event = InitialStateEvent::new(
             EmptyStateKey,
-            RoomTopicEventContent::new(format!("org.mxdx.terminal.session:{}", user_id.localpart())),
+            RoomTopicEventContent::new(format!(
+                "org.mxdx.terminal.session:{}",
+                user_id.localpart()
+            )),
         );
 
         let mut request = CreateRoomRequest::new();
@@ -187,11 +198,7 @@ impl MatrixClient {
     }
 
     /// Fetch a specific state event from a room via the REST API.
-    pub async fn get_room_state(
-        &self,
-        room_id: &RoomId,
-        event_type: &str,
-    ) -> Result<Value> {
+    pub async fn get_room_state(&self, room_id: &RoomId, event_type: &str) -> Result<Value> {
         let homeserver = self.inner().homeserver();
         let access_token = self
             .inner()
@@ -200,9 +207,7 @@ impl MatrixClient {
 
         let url = format!(
             "{}_matrix/client/v3/rooms/{}/state/{}",
-            homeserver,
-            room_id,
-            event_type,
+            homeserver, room_id, event_type,
         );
 
         let http_client = reqwest::Client::new();
@@ -228,8 +233,10 @@ impl MatrixClient {
         topic: &str,
         invite: &[matrix_sdk::ruma::OwnedUserId],
     ) -> Result<OwnedRoomId> {
-        let encryption_event =
-            InitialStateEvent::new(EmptyStateKey, RoomEncryptionEventContent::with_recommended_defaults());
+        let encryption_event = InitialStateEvent::new(
+            EmptyStateKey,
+            RoomEncryptionEventContent::with_recommended_defaults(),
+        );
         let topic_event =
             InitialStateEvent::new(EmptyStateKey, RoomTopicEventContent::new(topic.to_string()));
 
@@ -243,7 +250,11 @@ impl MatrixClient {
     }
 
     /// Create a named unencrypted room with a topic for discoverability.
-    async fn create_named_unencrypted_room(&self, name: &str, topic: &str) -> Result<OwnedRoomId> {
+    pub async fn create_named_unencrypted_room(
+        &self,
+        name: &str,
+        topic: &str,
+    ) -> Result<OwnedRoomId> {
         let topic_event =
             InitialStateEvent::new(EmptyStateKey, RoomTopicEventContent::new(topic.to_string()));
 

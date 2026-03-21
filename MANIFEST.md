@@ -64,6 +64,26 @@
 | `WasmMatrixClient::find_room_events` | method | `crates/mxdx-core-wasm/src/lib.rs` |
 | `WasmMatrixClient::on_room_event` | method | `crates/mxdx-core-wasm/src/lib.rs` |
 
+### mxdx-fabric
+
+| Symbol | Kind | File |
+|:---|:---|:---|
+| `CapabilityIndex` | struct | `crates/mxdx-fabric/src/capability_index.rs` |
+| `CapabilityIndex::new` | method | `crates/mxdx-fabric/src/capability_index.rs` |
+| `CapabilityIndex::capability_room_name` | method | `crates/mxdx-fabric/src/capability_index.rs` |
+| `CapabilityIndex::find_room` | method | `crates/mxdx-fabric/src/capability_index.rs` |
+| `CapabilityIndex::get_or_create_room` | method | `crates/mxdx-fabric/src/capability_index.rs` |
+| `CapabilityIndex::populate_from_server` | method | `crates/mxdx-fabric/src/capability_index.rs` |
+| `ClaimRace` | struct | `crates/mxdx-fabric/src/claim.rs` |
+| `ClaimRace::new` | method | `crates/mxdx-fabric/src/claim.rs` |
+| `CoordinatorBot` | struct | `crates/mxdx-fabric/src/coordinator.rs` |
+| `CoordinatorBot::new` | method | `crates/mxdx-fabric/src/coordinator.rs` |
+| `CoordinatorBot::run` | method | `crates/mxdx-fabric/src/coordinator.rs` |
+| `SenderClient` | struct | `crates/mxdx-fabric/src/sender.rs` |
+| `SenderClient::new` | method | `crates/mxdx-fabric/src/sender.rs` |
+| `WorkerClient` | struct | `crates/mxdx-fabric/src/worker.rs` |
+| `WorkerClient::new` | method | `crates/mxdx-fabric/src/worker.rs` |
+
 ### mxdx-launcher
 
 | Symbol | Kind | File |
@@ -159,6 +179,7 @@
 | `MatrixClient::create_terminal_session_dm` | method | `crates/mxdx-matrix/src/rooms.rs` |
 | `MatrixClient::tombstone_room` | method | `crates/mxdx-matrix/src/rooms.rs` |
 | `MatrixClient::get_room_state` | method | `crates/mxdx-matrix/src/rooms.rs` |
+| `MatrixClient::create_named_unencrypted_room` | method | `crates/mxdx-matrix/src/rooms.rs` |
 
 ### mxdx-policy
 
@@ -210,6 +231,14 @@
 |:---|:---|:---|
 | `CommandEvent` | struct | `crates/mxdx-types/src/events/command.rs` |
 | `CommandAction` | enum | `crates/mxdx-types/src/events/command.rs` |
+| `TaskEvent` | struct | `crates/mxdx-types/src/events/fabric.rs` |
+| `CapabilityEvent` | struct | `crates/mxdx-types/src/events/fabric.rs` |
+| `ClaimEvent` | struct | `crates/mxdx-types/src/events/fabric.rs` |
+| `HeartbeatEvent` | struct | `crates/mxdx-types/src/events/fabric.rs` |
+| `TaskResultEvent` | struct | `crates/mxdx-types/src/events/fabric.rs` |
+| `FailurePolicy` | enum | `crates/mxdx-types/src/events/fabric.rs` |
+| `RoutingMode` | enum | `crates/mxdx-types/src/events/fabric.rs` |
+| `TaskStatus` | enum | `crates/mxdx-types/src/events/fabric.rs` |
 | `LauncherIdentityEvent` | struct | `crates/mxdx-types/src/events/launcher.rs` |
 | `OutputEvent` | struct | `crates/mxdx-types/src/events/output.rs` |
 | `OutputStream` | enum | `crates/mxdx-types/src/events/output.rs` |
