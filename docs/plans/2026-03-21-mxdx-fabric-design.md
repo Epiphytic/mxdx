@@ -357,17 +357,23 @@ The `OutputBatcher` already exists in `mxdx-launcher/terminal/batcher.rs` — re
 
 ---
 
-## Open Questions
+## Decisions
 
-1. **Coordinator identity** — should the coordinator be a dedicated Matrix account (`@coordinator:belthanior`) or a capability of the launcher itself? Dedicated account is cleaner isolation; embedded is simpler ops.
+### Coordinator identity
+Dedicated Matrix account (`@coordinator:belthanior`). It holds extended privileges across all agent rooms — embedding this in the launcher would conflate roles and complicate permission management.
 
-2. **Room creation** — who creates capability rooms? Coordinator on first worker registration, or pre-provisioned? Pre-provisioned is simpler; dynamic creation supports ad-hoc capability namespaces.
+### Room creation
+Coordinator creates capability rooms on demand when a new capability combination is first needed. No pre-provisioning. Coordinator maintains the capability index and owns the room lifecycle.
 
-3. **Gas accounting** — is per-task `estimated_cycles` worth the complexity? Could start with just `max_concurrent_tasks` on workers and add gas later.
+### Gas accounting
+Deferred to v2. Workers self-manage: they advertise availability and simply don't claim tasks when they're at capacity. No central accounting needed. `estimated_cycles` remains in `TaskEvent` as a hint for future use but is not acted on in v1.
 
-4. **Sender client** — does Bel (OpenClaw) need a native `mxdx-fabric` client, or does it talk to the coordinator via the existing mxdx `CommandEvent` mechanism? The latter is less coupling.
+### Sender clients
+- **OpenClaw/Bel**: integration built on the existing `mxdx-core-wasm` client. OpenClaw gains a skill/plugin that wraps task posting and result waiting.
+- **jcode workers**: native Rust integration using `mxdx-matrix` directly. jcode adapter becomes a proper `mxdx-fabric` worker crate.
 
-5. **Cross-host** — the P2P path uses Unix sockets on localhost. For cross-host workers, this becomes WebRTC. Worth designing now or defer until needed?
+### Cross-host transport
+No new transport mechanisms. Cross-host P2P uses the existing mxdx P2P session infrastructure unchanged (WebRTC data channels, `m.call.*` signaling, TURN provisioning from the homeserver). The launcher's workflow is identical — it just joins more rooms. The fabric is a coordination layer, not a transport layer.
 
 ---
 
