@@ -248,6 +248,218 @@ async fn fabric_happy_path_e2e() {
 }
 
 #[tokio::test]
+async fn test_sender_client_post_and_wait() {
+    use mxdx_fabric::sender::SenderClient;
+
+    let mut hs = TuwunelInstance::start().await.unwrap();
+    let base_url = format!("http://127.0.0.1:{}", hs.port);
+
+    let sender_mc =
+        MatrixClient::register_and_connect(&base_url, "sender-p2", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
+    let worker_a_mc =
+        MatrixClient::register_and_connect(&base_url, "worker-a-p2", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
+
+    let shared_room_id = sender_mc
+        .create_named_unencrypted_room("sender-worker-room", "org.mxdx.fabric.task")
+        .await
+        .unwrap();
+
+    sender_mc
+        .invite_user(&shared_room_id, worker_a_mc.user_id())
+        .await
+        .unwrap();
+    worker_a_mc.sync_once().await.unwrap();
+    worker_a_mc.join_room(&shared_room_id).await.unwrap();
+
+    let power_levels = serde_json::json!({
+        "users": {
+            sender_mc.user_id().to_string(): 100,
+            worker_a_mc.user_id().to_string(): 50
+        },
+        "users_default": 0,
+        "events": {},
+        "events_default": 0,
+        "state_default": 0,
+        "ban": 50,
+        "kick": 50,
+        "invite": 50,
+        "redact": 50
+    });
+    sender_mc
+        .send_state_event(&shared_room_id, "m.room.power_levels", "", power_levels)
+        .await
+        .unwrap();
+
+    sender_mc.sync_once().await.unwrap();
+    worker_a_mc.sync_once().await.unwrap();
+
+    let sender_mc = Arc::new(sender_mc);
+    let worker_a_mc = Arc::new(worker_a_mc);
+
+    let sender_id = format!("@sender-p2:{}", hs.server_name);
+    let sender = SenderClient::new(sender_mc.clone(), sender_id.clone());
+
+    let task = make_task("sender-task-001", &sender_id);
+
+    let posted_uuid = sender
+        .post_task(task.clone(), &shared_room_id)
+        .await
+        .unwrap();
+    assert_eq!(posted_uuid, "sender-task-001");
+
+    worker_a_mc.sync_once().await.unwrap();
+    let events = worker_a_mc
+        .sync_and_collect_events(&shared_room_id, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    let found_task = events.iter().any(|e| {
+        e.get("content")
+            .and_then(|c| c.get("uuid"))
+            .and_then(|u| u.as_str())
+            == Some("sender-task-001")
+    });
+    assert!(
+        found_task,
+        "worker should see the posted task event, got: {:?}",
+        events
+    );
+
+    let worker = WorkerClient::new(
+        worker_a_mc.clone(),
+        format!("@worker-a-p2:{}", hs.server_name),
+        hs.server_name.clone(),
+    );
+
+    let claimed = worker.try_claim(&task, &shared_room_id).await.unwrap();
+    assert!(claimed, "worker-a should win the claim");
+
+    worker
+        .post_result(
+            "sender-task-001",
+            TaskStatus::Success,
+            Some(serde_json::json!({"output": "done"})),
+            None,
+            5,
+            &shared_room_id,
+        )
+        .await
+        .unwrap();
+
+    worker_a_mc.sync_once().await.unwrap();
+
+    let result = sender
+        .wait_for_result("sender-task-001", &shared_room_id, Duration::from_secs(30))
+        .await
+        .unwrap();
+
+    assert!(result.is_some(), "sender should receive the task result");
+    let result = result.unwrap();
+    assert_eq!(result.status, TaskStatus::Success);
+    assert_eq!(result.task_uuid, "sender-task-001");
+
+    hs.stop().await;
+}
+
+#[tokio::test]
+async fn test_jcode_worker_mock_task() {
+    let task = TaskEvent {
+        uuid: "jcode-mock-001".to_string(),
+        sender_id: "@sender:test.localhost".to_string(),
+        required_capabilities: vec![],
+        estimated_cycles: None,
+        timeout_seconds: 30,
+        heartbeat_interval_seconds: 10,
+        on_timeout: FailurePolicy::Escalate,
+        on_heartbeat_miss: FailurePolicy::Escalate,
+        routing_mode: RoutingMode::Direct,
+        p2p_stream: false,
+        payload: serde_json::json!({"prompt": "echo hello world"}),
+        plan: None,
+    };
+
+    let prompt = task
+        .payload
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .or(task.plan.as_deref())
+        .unwrap_or("no prompt provided");
+
+    assert_eq!(prompt, "echo hello world");
+
+    let task_with_plan = TaskEvent {
+        uuid: "jcode-mock-002".to_string(),
+        sender_id: "@sender:test.localhost".to_string(),
+        required_capabilities: vec![],
+        estimated_cycles: None,
+        timeout_seconds: 30,
+        heartbeat_interval_seconds: 10,
+        on_timeout: FailurePolicy::Escalate,
+        on_heartbeat_miss: FailurePolicy::Escalate,
+        routing_mode: RoutingMode::Direct,
+        p2p_stream: false,
+        payload: serde_json::json!({}),
+        plan: Some("fallback plan prompt".to_string()),
+    };
+
+    let prompt_from_plan = task_with_plan
+        .payload
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .or(task_with_plan.plan.as_deref())
+        .unwrap_or("no prompt provided");
+
+    assert_eq!(prompt_from_plan, "fallback plan prompt");
+
+    let empty_task = TaskEvent {
+        uuid: "jcode-mock-003".to_string(),
+        sender_id: "@sender:test.localhost".to_string(),
+        required_capabilities: vec![],
+        estimated_cycles: None,
+        timeout_seconds: 30,
+        heartbeat_interval_seconds: 10,
+        on_timeout: FailurePolicy::Escalate,
+        on_heartbeat_miss: FailurePolicy::Escalate,
+        routing_mode: RoutingMode::Direct,
+        p2p_stream: false,
+        payload: serde_json::json!({}),
+        plan: None,
+    };
+
+    let fallback_prompt = empty_task
+        .payload
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .or(empty_task.plan.as_deref())
+        .unwrap_or("no prompt provided");
+
+    assert_eq!(fallback_prompt, "no prompt provided");
+
+    let output = tokio::process::Command::new("echo")
+        .args(["--provider", "claude", "--ndjson", "run", "hello world"])
+        .output()
+        .await
+        .expect("echo binary should be available");
+
+    assert!(
+        output.status.success(),
+        "echo should exit 0, got: {:?}",
+        output.status
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("hello world"),
+        "stdout should contain the prompt text, got: {}",
+        stdout
+    );
+}
+
+#[tokio::test]
 async fn coordinator_routing_auto_brokered_for_long_timeout() {
     let task = make_task("task-routing-001", "@sender:test.localhost");
     assert_eq!(task.timeout_seconds, 60);
