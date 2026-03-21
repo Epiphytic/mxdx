@@ -564,3 +564,214 @@ async fn coordinator_watchlist_lifecycle() {
 
     hs.stop().await;
 }
+
+#[tokio::test]
+async fn test_failure_policy_escalate() {
+    let mut hs = TuwunelInstance::start().await.unwrap();
+    let base_url = format!("http://127.0.0.1:{}", hs.port);
+
+    let coordinator_mc =
+        MatrixClient::register_and_connect(&base_url, "coord-esc", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
+    let sender_mc =
+        MatrixClient::register_and_connect(&base_url, "sender-esc", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
+
+    let coord_room_id = coordinator_mc
+        .create_named_unencrypted_room("coordinator-room-esc", "org.mxdx.fabric.coordinator")
+        .await
+        .unwrap();
+
+    coordinator_mc
+        .invite_user(&coord_room_id, sender_mc.user_id())
+        .await
+        .unwrap();
+    sender_mc.sync_once().await.unwrap();
+    sender_mc.join_room(&coord_room_id).await.unwrap();
+    coordinator_mc.sync_once().await.unwrap();
+    sender_mc.sync_once().await.unwrap();
+
+    let task = TaskEvent {
+        uuid: "esc-task-001".to_string(),
+        sender_id: format!("@sender-esc:{}", hs.server_name),
+        required_capabilities: vec!["rust".to_string()],
+        estimated_cycles: None,
+        timeout_seconds: 5,
+        heartbeat_interval_seconds: 30,
+        on_timeout: FailurePolicy::Escalate,
+        on_heartbeat_miss: FailurePolicy::Escalate,
+        routing_mode: RoutingMode::Brokered,
+        p2p_stream: false,
+        payload: serde_json::json!({"cmd": "should timeout"}),
+        plan: Some("Test escalation plan".to_string()),
+    };
+
+    let task_payload = serde_json::json!({
+        "type": "org.mxdx.fabric.task",
+        "content": task,
+    });
+    sender_mc
+        .send_event(&coord_room_id, task_payload)
+        .await
+        .unwrap();
+    sender_mc.sync_once().await.unwrap();
+
+    let coordinator_mc = Arc::new(coordinator_mc);
+    let server_name = hs.server_name.clone();
+    let room_id = coord_room_id.clone();
+    let coord_client = coordinator_mc.clone();
+    let coord_handle = tokio::spawn(async move {
+        let mut bot = CoordinatorBot::new(coord_client, room_id, server_name);
+        let _ = bot.run().await;
+    });
+
+    let sender_mc = Arc::new(sender_mc);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(25);
+    let mut found_escalation = false;
+    let mut last_events = Vec::new();
+
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        sender_mc.sync_once().await.unwrap();
+        let events = sender_mc
+            .sync_and_collect_events(&coord_room_id, Duration::from_secs(2))
+            .await
+            .unwrap();
+        last_events = events.clone();
+        if events.iter().any(|e| {
+            let event_type = e.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            if event_type != "m.room.message" {
+                return false;
+            }
+            let body = e
+                .get("content")
+                .and_then(|c| c.get("body"))
+                .and_then(|b| b.as_str())
+                .unwrap_or("");
+            body.contains("esc-task-001") && body.contains("stalled")
+        }) {
+            found_escalation = true;
+            break;
+        }
+    }
+
+    coord_handle.abort();
+
+    assert!(
+        found_escalation,
+        "expected escalation message in coordinator room, got events: {:?}",
+        last_events
+    );
+
+    hs.stop().await;
+}
+
+#[tokio::test]
+async fn test_failure_policy_respawn() {
+    let mut hs = TuwunelInstance::start().await.unwrap();
+    let base_url = format!("http://127.0.0.1:{}", hs.port);
+
+    let coordinator_mc =
+        MatrixClient::register_and_connect(&base_url, "coord-rsp", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
+    let sender_mc =
+        MatrixClient::register_and_connect(&base_url, "sender-rsp", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
+
+    let coord_room_id = coordinator_mc
+        .create_named_unencrypted_room("coordinator-room-rsp", "org.mxdx.fabric.coordinator")
+        .await
+        .unwrap();
+
+    coordinator_mc
+        .invite_user(&coord_room_id, sender_mc.user_id())
+        .await
+        .unwrap();
+    sender_mc.sync_once().await.unwrap();
+    sender_mc.join_room(&coord_room_id).await.unwrap();
+    coordinator_mc.sync_once().await.unwrap();
+    sender_mc.sync_once().await.unwrap();
+
+    let task = TaskEvent {
+        uuid: "rsp-task-001".to_string(),
+        sender_id: format!("@sender-rsp:{}", hs.server_name),
+        required_capabilities: vec!["rust".to_string()],
+        estimated_cycles: None,
+        timeout_seconds: 5,
+        heartbeat_interval_seconds: 30,
+        on_timeout: FailurePolicy::Respawn { max_retries: 1 },
+        on_heartbeat_miss: FailurePolicy::Escalate,
+        routing_mode: RoutingMode::Brokered,
+        p2p_stream: false,
+        payload: serde_json::json!({"cmd": "should respawn"}),
+        plan: Some("Test respawn plan".to_string()),
+    };
+
+    let task_payload = serde_json::json!({
+        "type": "org.mxdx.fabric.task",
+        "content": task,
+    });
+    sender_mc
+        .send_event(&coord_room_id, task_payload)
+        .await
+        .unwrap();
+    sender_mc.sync_once().await.unwrap();
+
+    let coordinator_mc = Arc::new(coordinator_mc);
+    let server_name = hs.server_name.clone();
+    let room_id = coord_room_id.clone();
+    let coord_client = coordinator_mc.clone();
+    let coord_handle = tokio::spawn(async move {
+        let mut bot = CoordinatorBot::new(coord_client, room_id, server_name);
+        let _ = bot.run().await;
+    });
+
+    let sender_mc = Arc::new(sender_mc);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+    let mut found_escalation_retry = false;
+    let mut last_events = Vec::new();
+
+    while tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        sender_mc.sync_once().await.unwrap();
+        let events = sender_mc
+            .sync_and_collect_events(&coord_room_id, Duration::from_secs(2))
+            .await
+            .unwrap();
+        last_events = events.clone();
+
+        if !found_escalation_retry {
+            found_escalation_retry = events.iter().any(|e| {
+                let event_type = e.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if event_type != "m.room.message" {
+                    return false;
+                }
+                let body = e
+                    .get("content")
+                    .and_then(|c| c.get("body"))
+                    .and_then(|b| b.as_str())
+                    .unwrap_or("");
+                body.contains("rsp-task-001-retry-1") && body.contains("stalled")
+            });
+        }
+
+        if found_escalation_retry {
+            break;
+        }
+    }
+
+    coord_handle.abort();
+
+    assert!(
+        found_escalation_retry,
+        "expected escalation message for retry task (rsp-task-001-retry-1) in coordinator room, \
+         proving respawn happened then exhausted retries. Got events: {:?}",
+        last_events
+    );
+
+    hs.stop().await;
+}
