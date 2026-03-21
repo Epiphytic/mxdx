@@ -197,6 +197,40 @@ impl MatrixClient {
             .await
     }
 
+    /// Fetch a specific state event from a room via the REST API, with a state key.
+    pub async fn get_room_state_event(
+        &self,
+        room_id: &RoomId,
+        event_type: &str,
+        state_key: &str,
+    ) -> Result<Value> {
+        let homeserver = self.inner().homeserver();
+        let access_token = self
+            .inner()
+            .access_token()
+            .expect("Client is not logged in \u{2014} no access_token");
+
+        let url = format!(
+            "{}_matrix/client/v3/rooms/{}/state/{}/{}",
+            homeserver, room_id, event_type, state_key,
+        );
+
+        let http_client = reqwest::Client::new();
+        let resp = http_client
+            .get(&url)
+            .bearer_auth(&access_token)
+            .send()
+            .await
+            .map_err(|e| crate::error::MatrixClientError::Other(e.into()))?;
+
+        let body: Value = resp
+            .json()
+            .await
+            .map_err(|e| crate::error::MatrixClientError::Other(e.into()))?;
+
+        Ok(body)
+    }
+
     /// Fetch a specific state event from a room via the REST API.
     pub async fn get_room_state(&self, room_id: &RoomId, event_type: &str) -> Result<Value> {
         let homeserver = self.inner().homeserver();

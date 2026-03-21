@@ -1,13 +1,13 @@
-pub struct ClaimRace;
-
-impl ClaimRace {
-    pub fn new() -> Self {
-        Self
-    }
+pub struct ClaimRace {
+    worker_id: String,
 }
 
-impl Default for ClaimRace {
-    fn default() -> Self {
-        Self::new()
+impl ClaimRace {
+    pub fn new(worker_id: String) -> Self {
+        Self { worker_id }
+    }
+
+    pub fn worker_id(&self) -> &str {
+        &self.worker_id
     }
 }
