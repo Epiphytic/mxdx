@@ -2,6 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mxdx_fabric::coordinator::CoordinatorBot;
+use mxdx_fabric::jcode_worker::JcodeWorker;
+use mxdx_fabric::sender::SenderClient;
 use mxdx_fabric::worker::WorkerClient;
 use mxdx_fabric::{
     ClaimEvent, FailurePolicy, HeartbeatEvent, RoutingMode, TaskEvent, TaskResultEvent, TaskStatus,
@@ -772,6 +774,184 @@ async fn test_failure_policy_respawn() {
          proving respawn happened then exhausted retries. Got events: {:?}",
         last_events
     );
+
+    hs.stop().await;
+}
+
+#[tokio::test]
+async fn test_p2p_stream_unix_socket() {
+    use std::path::PathBuf;
+    use tokio::io::AsyncReadExt;
+
+    let mut hs = TuwunelInstance::start().await.unwrap();
+    let base_url = format!("http://127.0.0.1:{}", hs.port);
+
+    let helper_script = "/tmp/mxdx-test-p2p-helper.sh";
+    tokio::fs::write(helper_script, "#!/bin/sh\nseq 1 1000\n")
+        .await
+        .unwrap();
+    tokio::fs::set_permissions(
+        helper_script,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .await
+    .unwrap();
+
+    let sender_mc =
+        MatrixClient::register_and_connect(&base_url, "sender-p2p", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
+    let worker_a_mc =
+        MatrixClient::register_and_connect(&base_url, "worker-a-p2p", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
+
+    let shared_room_id = sender_mc
+        .create_named_unencrypted_room("p2p-stream-room", "org.mxdx.fabric.task")
+        .await
+        .unwrap();
+
+    sender_mc
+        .invite_user(&shared_room_id, worker_a_mc.user_id())
+        .await
+        .unwrap();
+    worker_a_mc.sync_once().await.unwrap();
+    worker_a_mc.join_room(&shared_room_id).await.unwrap();
+
+    let power_levels = serde_json::json!({
+        "users": {
+            sender_mc.user_id().to_string(): 100,
+            worker_a_mc.user_id().to_string(): 50
+        },
+        "users_default": 0,
+        "events": {},
+        "events_default": 0,
+        "state_default": 0,
+        "ban": 50,
+        "kick": 50,
+        "invite": 50,
+        "redact": 50
+    });
+    sender_mc
+        .send_state_event(&shared_room_id, "m.room.power_levels", "", power_levels)
+        .await
+        .unwrap();
+
+    sender_mc.sync_once().await.unwrap();
+    worker_a_mc.sync_once().await.unwrap();
+
+    let sender_mc = Arc::new(sender_mc);
+    let worker_a_mc = Arc::new(worker_a_mc);
+
+    let sender_id = format!("@sender-p2p:{}", hs.server_name);
+    let sender = SenderClient::new(sender_mc.clone(), sender_id.clone());
+
+    let task = TaskEvent {
+        uuid: "p2p-task-001".to_string(),
+        sender_id: sender_id.clone(),
+        required_capabilities: vec![],
+        estimated_cycles: None,
+        timeout_seconds: 60,
+        heartbeat_interval_seconds: 2,
+        on_timeout: FailurePolicy::Escalate,
+        on_heartbeat_miss: FailurePolicy::Escalate,
+        routing_mode: RoutingMode::Direct,
+        p2p_stream: true,
+        payload: serde_json::json!({"prompt": "seq 1 1000"}),
+        plan: None,
+    };
+
+    let posted_uuid = sender
+        .post_task(task.clone(), &shared_room_id)
+        .await
+        .unwrap();
+    assert_eq!(posted_uuid, "p2p-task-001");
+
+    worker_a_mc.sync_once().await.unwrap();
+    let _events = worker_a_mc
+        .sync_and_collect_events(&shared_room_id, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    let worker = WorkerClient::new(
+        worker_a_mc.clone(),
+        format!("@worker-a-p2p:{}", hs.server_name),
+        hs.server_name.clone(),
+    );
+
+    let jcode_worker = JcodeWorker::new(worker, Some(PathBuf::from(helper_script)));
+
+    let worker_room_id = shared_room_id.clone();
+    let worker_task = task.clone();
+    let worker_handle = tokio::spawn(async move {
+        jcode_worker
+            .run_task(worker_task, &worker_room_id)
+            .await
+            .unwrap();
+    });
+
+    let stream = sender
+        .connect_stream("p2p-task-001", &shared_room_id, Duration::from_secs(30))
+        .await
+        .unwrap();
+
+    assert!(
+        stream.is_some(),
+        "sender should connect to P2P stream socket"
+    );
+
+    let mut stream = stream.unwrap();
+    let mut all_bytes = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) => break,
+            Ok(n) => all_bytes.extend_from_slice(&buf[..n]),
+            Err(e) => {
+                panic!("error reading from P2P stream: {}", e);
+            }
+        }
+    }
+
+    let output = String::from_utf8_lossy(&all_bytes);
+    assert!(
+        output.contains("1000"),
+        "P2P stream should contain '1000' (last line of seq output), got: {}",
+        output
+    );
+
+    worker_handle.await.unwrap();
+
+    sender_mc.sync_once().await.unwrap();
+    let result_events = sender_mc
+        .sync_and_collect_events(&shared_room_id, Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    let found_result = result_events.iter().any(|e| {
+        e.get("content")
+            .and_then(|c| c.get("task_uuid"))
+            .and_then(|u| u.as_str())
+            == Some("p2p-task-001")
+            && e.get("content")
+                .and_then(|c| c.get("status"))
+                .and_then(|s| s.as_str())
+                == Some("success")
+    });
+
+    assert!(
+        found_result,
+        "TaskResultEvent with Success should be posted, got events: {:?}",
+        result_events
+    );
+
+    let socket_path = "/tmp/mxdx-fabric-p2p-task-001.sock";
+    assert!(
+        !std::path::Path::new(socket_path).exists(),
+        "socket file should be cleaned up after task completion"
+    );
+
+    let _ = tokio::fs::remove_file(helper_script).await;
 
     hs.stop().await;
 }

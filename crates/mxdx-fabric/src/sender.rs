@@ -4,9 +4,12 @@ use std::time::Duration;
 use anyhow::Result;
 use mxdx_matrix::{MatrixClient, RoomId};
 use mxdx_types::events::fabric::{TaskEvent, TaskResultEvent};
+use tokio::net::UnixStream;
 use tracing::{debug, info, warn};
 
 use crate::worker::{EVENT_RESULT, EVENT_TASK};
+
+const EVENT_STREAM_OFFER: &str = "org.mxdx.fabric.stream_offer";
 
 pub struct SenderClient {
     matrix_client: Arc<MatrixClient>,
@@ -21,11 +24,7 @@ impl SenderClient {
         }
     }
 
-    pub async fn post_task(
-        &self,
-        task: TaskEvent,
-        coordinator_room_id: &RoomId,
-    ) -> Result<String> {
+    pub async fn post_task(&self, task: TaskEvent, coordinator_room_id: &RoomId) -> Result<String> {
         info!(
             sender_id = %self.sender_id,
             task_uuid = %task.uuid,
@@ -127,5 +126,83 @@ impl SenderClient {
 
     pub fn sender_id(&self) -> &str {
         &self.sender_id
+    }
+
+    pub async fn connect_stream(
+        &self,
+        task_uuid: &str,
+        room_id: &RoomId,
+        timeout: Duration,
+    ) -> Result<Option<UnixStream>> {
+        info!(
+            sender_id = %self.sender_id,
+            task_uuid = %task_uuid,
+            timeout_secs = timeout.as_secs(),
+            "polling for stream offer"
+        );
+
+        let deadline = tokio::time::Instant::now() + timeout;
+        let state_key = format!("task/{}/stream", task_uuid);
+
+        while tokio::time::Instant::now() < deadline {
+            let remaining = deadline - tokio::time::Instant::now();
+            let poll_duration = remaining.min(Duration::from_secs(2));
+
+            let _events = self
+                .matrix_client
+                .sync_and_collect_events(room_id, poll_duration)
+                .await?;
+
+            let state = self
+                .matrix_client
+                .get_room_state_event(room_id, EVENT_STREAM_OFFER, &state_key)
+                .await;
+
+            match state {
+                Ok(offer) => {
+                    if let Some(socket_path) = offer.get("socket_path").and_then(|v| v.as_str()) {
+                        info!(
+                            task_uuid = %task_uuid,
+                            socket_path = %socket_path,
+                            "found stream offer, connecting"
+                        );
+
+                        match UnixStream::connect(socket_path).await {
+                            Ok(stream) => {
+                                info!(
+                                    task_uuid = %task_uuid,
+                                    "connected to P2P stream"
+                                );
+                                return Ok(Some(stream));
+                            }
+                            Err(e) => {
+                                warn!(
+                                    task_uuid = %task_uuid,
+                                    socket_path = %socket_path,
+                                    error = %e,
+                                    "failed to connect to stream socket"
+                                );
+                                return Ok(None);
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    debug!(
+                        task_uuid = %task_uuid,
+                        error = %e,
+                        "stream offer not found yet, retrying"
+                    );
+                }
+            }
+        }
+
+        warn!(
+            task_uuid = %task_uuid,
+            timeout_secs = timeout.as_secs(),
+            "timed out waiting for stream offer"
+        );
+
+        Ok(None)
     }
 }

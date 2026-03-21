@@ -233,6 +233,27 @@ impl WorkerClient {
         Ok(())
     }
 
+    pub async fn post_state_event(
+        &self,
+        event_type: &str,
+        state_key: &str,
+        content: serde_json::Value,
+        room_id: &RoomId,
+    ) -> Result<()> {
+        debug!(
+            event_type = %event_type,
+            state_key = %state_key,
+            worker_id = %self.worker_id,
+            "posting state event"
+        );
+
+        self.matrix_client
+            .send_state_event(room_id, event_type, state_key, content)
+            .await?;
+
+        Ok(())
+    }
+
     pub fn worker_id(&self) -> &str {
         &self.worker_id
     }
