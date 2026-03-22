@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use mxdx_fabric::{coordinator::CoordinatorBot, jcode_worker::JcodeWorker, worker::WorkerClient};
 use mxdx_matrix::MatrixClient;
+use mxdx_types::events::capability::CapabilityAdvertisement;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -63,6 +64,12 @@ enum Commands {
         /// Device ID for the coordinator access token
         #[arg(long, env = "FABRIC_COORDINATOR_DEVICE_ID")]
         coordinator_device_id: Option<String>,
+    },
+    /// Show capability advertisements from workers in the coordinator room.
+    Capabilities {
+        /// Optional worker ID to filter (exact match on state_key)
+        #[arg(value_name = "WORKER_ID")]
+        worker_id: Option<String>,
     },
     /// Run the worker daemon: claims and executes tasks via jcode.
     Worker {
@@ -180,6 +187,14 @@ async fn main() -> Result<()> {
             let device_id = coordinator_device_id.unwrap_or_else(|| "scfvjFQUVO".to_string());
             cmd_coordinator(&homeserver, &token, &coordinator_room, &user_id, &device_id).await
         }
+        Commands::Capabilities { worker_id } => {
+            let coordinator_room = resolve(
+                &cli.coordinator_room,
+                &config.coordinator_room,
+                "coordinator-room",
+            )?;
+            cmd_capabilities(&homeserver, &token, &coordinator_room, worker_id.as_deref()).await
+        }
         Commands::Worker {
             capabilities,
             worker_user_id,
@@ -204,6 +219,122 @@ async fn main() -> Result<()> {
             .await
         }
     }
+}
+
+async fn matrix_get_room_state(
+    http: &reqwest::Client,
+    homeserver: &str,
+    token: &str,
+    room_id: &str,
+) -> Result<Vec<serde_json::Value>> {
+    let url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state",
+        homeserver,
+        urlencoding::encode(room_id),
+    );
+
+    let resp = http
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .context("failed to GET room state")?;
+
+    if !resp.status().is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        bail!("Matrix GET room state failed: {body}");
+    }
+
+    let events: Vec<serde_json::Value> = resp.json().await.context("failed to parse room state")?;
+    Ok(events)
+}
+
+fn format_capabilities(advertisements: &[(String, CapabilityAdvertisement)]) {
+    for (state_key, ad) in advertisements {
+        println!("Worker: {} (host: {})", ad.worker_id, ad.host);
+        if state_key != &ad.worker_id {
+            println!("  state_key: {state_key}");
+        }
+        for tool in &ad.tools {
+            let version = tool.version.as_deref().unwrap_or("unknown");
+            let health = if tool.healthy { "healthy" } else { "unhealthy" };
+            println!("  Tool: {} v{} [{}]", tool.name, version, health);
+
+            let mut names: Vec<&String> = tool.input_schema.properties.keys().collect();
+            names.sort();
+
+            for name in names {
+                let prop = &tool.input_schema.properties[name];
+                let required = if tool.input_schema.required.contains(name) {
+                    "(required)"
+                } else {
+                    ""
+                };
+                println!(
+                    "    {:<16} {:<8} {:>10}  {}",
+                    name, prop.r#type, required, prop.description,
+                );
+            }
+        }
+    }
+}
+
+async fn cmd_capabilities(
+    homeserver: &str,
+    token: &str,
+    coordinator_room: &str,
+    worker_id_filter: Option<&str>,
+) -> Result<()> {
+    let http = reqwest::Client::new();
+
+    let all_state = matrix_get_room_state(&http, homeserver, token, coordinator_room).await?;
+
+    let mut advertisements: Vec<(String, CapabilityAdvertisement)> = Vec::new();
+
+    for event in &all_state {
+        let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if event_type != "org.mxdx.fabric.capability" {
+            continue;
+        }
+
+        let state_key = event
+            .get("state_key")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if let Some(filter) = worker_id_filter {
+            if state_key != filter {
+                continue;
+            }
+        }
+
+        let content = match event.get("content") {
+            Some(c) => c,
+            None => continue,
+        };
+
+        match serde_json::from_value::<CapabilityAdvertisement>(content.clone()) {
+            Ok(ad) => advertisements.push((state_key, ad)),
+            Err(_) => {
+                eprintln!("Warning: could not parse capability for state_key={state_key}");
+            }
+        }
+    }
+
+    if advertisements.is_empty() {
+        if let Some(filter) = worker_id_filter {
+            eprintln!("No capability advertisement found for worker: {filter}");
+        } else {
+            eprintln!("No capability advertisements found in room {coordinator_room}");
+        }
+        std::process::exit(1);
+    }
+
+    advertisements.sort_by(|a, b| a.0.cmp(&b.0));
+    format_capabilities(&advertisements);
+
+    Ok(())
 }
 
 async fn cmd_coordinator(
