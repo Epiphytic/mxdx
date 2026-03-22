@@ -76,13 +76,54 @@
 | `CapabilityIndex::populate_from_server` | method | `crates/mxdx-fabric/src/capability_index.rs` |
 | `ClaimRace` | struct | `crates/mxdx-fabric/src/claim.rs` |
 | `ClaimRace::new` | method | `crates/mxdx-fabric/src/claim.rs` |
+| `ClaimRace::worker_id` | method | `crates/mxdx-fabric/src/claim.rs` |
+| `WatchEntry` | struct | `crates/mxdx-fabric/src/coordinator.rs` |
 | `CoordinatorBot` | struct | `crates/mxdx-fabric/src/coordinator.rs` |
 | `CoordinatorBot::new` | method | `crates/mxdx-fabric/src/coordinator.rs` |
 | `CoordinatorBot::run` | method | `crates/mxdx-fabric/src/coordinator.rs` |
+| `CoordinatorBot::handle_task_event` | method | `crates/mxdx-fabric/src/coordinator.rs` |
+| `CoordinatorBot::watchlist_len` | method | `crates/mxdx-fabric/src/coordinator.rs` |
+| `CoordinatorBot::watchlist_contains` | method | `crates/mxdx-fabric/src/coordinator.rs` |
+| `CoordinatorBot::capability_index` | method | `crates/mxdx-fabric/src/coordinator.rs` |
+| `CoordinatorBot::handle_claim_event` | method | `crates/mxdx-fabric/src/coordinator.rs` |
+| `CoordinatorBot::handle_heartbeat_event` | method | `crates/mxdx-fabric/src/coordinator.rs` |
+| `CoordinatorBot::handle_result_event` | method | `crates/mxdx-fabric/src/coordinator.rs` |
+| `FailureContext` | struct | `crates/mxdx-fabric/src/failure.rs` |
+| `apply_policy` | fn | `crates/mxdx-fabric/src/failure.rs` |
+| `OutputFormat` | enum | `crates/mxdx-fabric/src/jcode_worker.rs` |
+| `JcodeOptions` | struct | `crates/mxdx-fabric/src/jcode_worker.rs` |
+| `JcodeOptions::from_payload` | method | `crates/mxdx-fabric/src/jcode_worker.rs` |
+| `JcodeOptions::build_args` | method | `crates/mxdx-fabric/src/jcode_worker.rs` |
+| `JcodeWorker` | struct | `crates/mxdx-fabric/src/jcode_worker.rs` |
+| `JcodeWorker::new` | method | `crates/mxdx-fabric/src/jcode_worker.rs` |
+| `JcodeWorker::worker_client` | method | `crates/mxdx-fabric/src/jcode_worker.rs` |
+| `JcodeWorker::run_task` | method | `crates/mxdx-fabric/src/jcode_worker.rs` |
 | `SenderClient` | struct | `crates/mxdx-fabric/src/sender.rs` |
 | `SenderClient::new` | method | `crates/mxdx-fabric/src/sender.rs` |
+| `SenderClient::post_task` | method | `crates/mxdx-fabric/src/sender.rs` |
+| `SenderClient::wait_for_result` | method | `crates/mxdx-fabric/src/sender.rs` |
+| `SenderClient::submit_and_wait` | method | `crates/mxdx-fabric/src/sender.rs` |
+| `SenderClient::sender_id` | method | `crates/mxdx-fabric/src/sender.rs` |
+| `SenderClient::connect_stream` | method | `crates/mxdx-fabric/src/sender.rs` |
+| `EVENT_TASK` | const | `crates/mxdx-fabric/src/worker.rs` |
+| `EVENT_CLAIM` | const | `crates/mxdx-fabric/src/worker.rs` |
+| `EVENT_HEARTBEAT` | const | `crates/mxdx-fabric/src/worker.rs` |
+| `EVENT_RESULT` | const | `crates/mxdx-fabric/src/worker.rs` |
+| `EVENT_CAPABILITY` | const | `crates/mxdx-fabric/src/worker.rs` |
 | `WorkerClient` | struct | `crates/mxdx-fabric/src/worker.rs` |
 | `WorkerClient::new` | method | `crates/mxdx-fabric/src/worker.rs` |
+| `WorkerClient::advertise_capabilities` | method | `crates/mxdx-fabric/src/worker.rs` |
+| `WorkerClient::watch_and_claim` | method | `crates/mxdx-fabric/src/worker.rs` |
+| `WorkerClient::try_claim` | method | `crates/mxdx-fabric/src/worker.rs` |
+| `WorkerClient::post_heartbeat` | method | `crates/mxdx-fabric/src/worker.rs` |
+| `WorkerClient::post_result` | method | `crates/mxdx-fabric/src/worker.rs` |
+| `WorkerClient::post_state_event` | method | `crates/mxdx-fabric/src/worker.rs` |
+| `WorkerClient::worker_id` | method | `crates/mxdx-fabric/src/worker.rs` |
+| `WorkerClient::homeserver` | method | `crates/mxdx-fabric/src/worker.rs` |
+
+### mxdx-fabric-cli
+
+_No public symbols._
 
 ### mxdx-launcher
 
@@ -154,6 +195,7 @@
 |:---|:---|:---|
 | `MatrixClient` | struct | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::login_and_connect` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::connect_with_token` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::register_and_connect` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::is_logged_in` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::crypto_enabled` | method | `crates/mxdx-matrix/src/client.rs` |
@@ -161,6 +203,7 @@
 | `MatrixClient::create_encrypted_room` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::create_dm` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::join_room` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::invite_user` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::send_event` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::send_state_event` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::sync_once` | method | `crates/mxdx-matrix/src/client.rs` |
@@ -178,6 +221,7 @@
 | `MatrixClient::get_or_create_launcher_space` | method | `crates/mxdx-matrix/src/rooms.rs` |
 | `MatrixClient::create_terminal_session_dm` | method | `crates/mxdx-matrix/src/rooms.rs` |
 | `MatrixClient::tombstone_room` | method | `crates/mxdx-matrix/src/rooms.rs` |
+| `MatrixClient::get_room_state_event` | method | `crates/mxdx-matrix/src/rooms.rs` |
 | `MatrixClient::get_room_state` | method | `crates/mxdx-matrix/src/rooms.rs` |
 | `MatrixClient::create_named_unencrypted_room` | method | `crates/mxdx-matrix/src/rooms.rs` |
 
