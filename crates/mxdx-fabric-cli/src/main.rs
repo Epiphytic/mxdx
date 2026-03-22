@@ -1,8 +1,15 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
+use mxdx_fabric::{
+    coordinator::CoordinatorBot,
+    jcode_worker::JcodeWorker,
+    worker::WorkerClient,
+};
+use mxdx_matrix::MatrixClient;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -50,6 +57,30 @@ enum Commands {
 
         #[arg(long)]
         room: Option<String>,
+    },
+    /// Run the coordinator daemon: routes tasks from the coordinator room to worker rooms.
+    Coordinator {
+        /// User ID for the coordinator account (e.g. @bel-coordinator:example.com)
+        #[arg(long, env = "FABRIC_COORDINATOR_USER_ID")]
+        coordinator_user_id: Option<String>,
+
+        /// Device ID for the coordinator access token
+        #[arg(long, env = "FABRIC_COORDINATOR_DEVICE_ID")]
+        coordinator_device_id: Option<String>,
+    },
+    /// Run the worker daemon: claims and executes tasks via jcode.
+    Worker {
+        /// Capabilities this worker advertises (CSV)
+        #[arg(long, default_value = "rust,linux,bash")]
+        capabilities: String,
+
+        /// Worker user ID (e.g. @bel-worker:example.com)
+        #[arg(long, env = "FABRIC_WORKER_USER_ID")]
+        worker_user_id: Option<String>,
+
+        /// Device ID for the worker access token
+        #[arg(long, env = "FABRIC_WORKER_DEVICE_ID")]
+        worker_device_id: Option<String>,
     },
 }
 
@@ -138,6 +169,127 @@ async fn main() -> Result<()> {
             let room_id = resolve(&room, &cli.coordinator_room, "room")
                 .or_else(|_| resolve(&None, &config.coordinator_room, "room"))?;
             cmd_watch(&homeserver, &token, &room_id, &task_uuid).await
+        }
+        Commands::Coordinator {
+            coordinator_user_id,
+            coordinator_device_id,
+        } => {
+            let coordinator_room = resolve(
+                &cli.coordinator_room,
+                &config.coordinator_room,
+                "coordinator-room",
+            )?;
+            let user_id = coordinator_user_id
+                .unwrap_or_else(|| "@bel-coordinator:ca1-beta.mxdx.dev".to_string());
+            let device_id = coordinator_device_id
+                .unwrap_or_else(|| "scfvjFQUVO".to_string());
+            cmd_coordinator(&homeserver, &token, &coordinator_room, &user_id, &device_id).await
+        }
+        Commands::Worker {
+            capabilities,
+            worker_user_id,
+            worker_device_id,
+        } => {
+            let coordinator_room = resolve(
+                &cli.coordinator_room,
+                &config.coordinator_room,
+                "coordinator-room",
+            )?;
+            let user_id = worker_user_id
+                .unwrap_or_else(|| "@bel-worker:ca1-beta.mxdx.dev".to_string());
+            let device_id = worker_device_id
+                .unwrap_or_else(|| "vDLnPCG2CQ".to_string());
+            cmd_worker(&homeserver, &token, &coordinator_room, &capabilities, &user_id, &device_id).await
+        }
+    }
+}
+
+async fn cmd_coordinator(
+    homeserver: &str,
+    token: &str,
+    coordinator_room: &str,
+    user_id: &str,
+    device_id: &str,
+) -> Result<()> {
+    println!("Coordinator running on {homeserver}, room {coordinator_room}");
+
+    let matrix_client = MatrixClient::connect_with_token(homeserver, token, user_id, device_id)
+        .await
+        .context("failed to connect to Matrix with token")?;
+
+    let room_id: mxdx_matrix::OwnedRoomId = coordinator_room
+        .try_into()
+        .context("invalid coordinator room ID")?;
+
+    let mut bot = CoordinatorBot::new(Arc::new(matrix_client), room_id, homeserver.to_string());
+
+    loop {
+        if let Err(e) = bot.run().await {
+            eprintln!("Coordinator error (restarting in 5s): {e:#}");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    }
+}
+
+async fn cmd_worker(
+    homeserver: &str,
+    token: &str,
+    coordinator_room: &str,
+    capabilities_csv: &str,
+    user_id: &str,
+    device_id: &str,
+) -> Result<()> {
+    let caps: Vec<String> = capabilities_csv
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .collect();
+
+    println!(
+        "Worker running on {homeserver}, room {coordinator_room}, capabilities: {:?}",
+        caps
+    );
+
+    let matrix_client = MatrixClient::connect_with_token(homeserver, token, user_id, device_id)
+        .await
+        .context("failed to connect to Matrix with token")?;
+
+    let matrix_client = Arc::new(matrix_client);
+
+    let room_id: mxdx_matrix::OwnedRoomId = coordinator_room
+        .try_into()
+        .context("invalid coordinator room ID")?;
+
+    let worker_client = WorkerClient::new(
+        matrix_client,
+        user_id.to_string(),
+        homeserver.to_string(),
+    );
+
+    // Advertise capabilities
+    worker_client
+        .advertise_capabilities(&caps, &room_id)
+        .await
+        .context("failed to advertise capabilities")?;
+
+    let jcode_worker = JcodeWorker::new(worker_client, None);
+
+    // Watch coordinator room for tasks
+    loop {
+        match jcode_worker.worker_client().watch_and_claim(&room_id, &caps).await {
+            Ok(Some(task)) => {
+                println!("Claimed task {}", task.uuid);
+                if let Err(e) = jcode_worker.run_task(task, &room_id).await {
+                    eprintln!("Task error: {e:#}");
+                }
+            }
+            Ok(None) => {
+                // No task available, short sleep before polling again
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
+            Err(e) => {
+                eprintln!("Worker watch error (retrying in 5s): {e:#}");
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
         }
     }
 }

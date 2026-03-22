@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use matrix_sdk::{
+    authentication::{matrix::MatrixSession, SessionTokens},
     config::SyncSettings,
     room::MessagesOptions,
     ruma::{
@@ -8,7 +9,7 @@ use matrix_sdk::{
         events::{room::encryption::RoomEncryptionEventContent, EmptyStateKey, InitialStateEvent},
         OwnedRoomId, OwnedUserId, RoomId, UserId,
     },
-    Client,
+    Client, SessionMeta,
 };
 use serde_json::Value;
 
@@ -55,6 +56,53 @@ impl MatrixClient {
 
         // Initial sync to upload device keys — required before creating encrypted rooms.
         // Without this, room creation hangs on rate-limited servers (e.g., matrix.org).
+        client
+            .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
+            .await?;
+
+        Ok(MatrixClient {
+            client,
+            _store_dir: store_dir,
+            room_creation_delay: None,
+            room_creation_timeout: Duration::from_secs(30),
+        })
+    }
+
+    /// Connect to a homeserver by restoring a session from an existing access token.
+    /// Requires `user_id` (e.g. `@worker:example.com`) and `device_id` (e.g. `FABRICBOT`).
+    /// The device_id must match the one that generated the access_token on the server.
+    pub async fn connect_with_token(
+        homeserver_url: &str,
+        access_token: &str,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<Self> {
+        let store_dir = tempfile::TempDir::new().map_err(|e| MatrixClientError::Other(e.into()))?;
+
+        let client = Client::builder()
+            .homeserver_url(homeserver_url)
+            .sqlite_store(store_dir.path(), None)
+            .build()
+            .await?;
+
+        let session = MatrixSession {
+            meta: SessionMeta {
+                user_id: user_id
+                    .try_into()
+                    .map_err(|e: matrix_sdk::IdParseError| MatrixClientError::Other(e.into()))?,
+                device_id: device_id.into(),
+            },
+            tokens: SessionTokens {
+                access_token: access_token.to_string(),
+                refresh_token: None,
+            },
+        };
+
+        client
+            .restore_session(session)
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+
         client
             .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
             .await?;

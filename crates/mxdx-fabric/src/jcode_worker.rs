@@ -32,6 +32,10 @@ impl JcodeWorker {
         }
     }
 
+    pub fn worker_client(&self) -> &WorkerClient {
+        &self.worker_client
+    }
+
     pub async fn run_task(&self, task: TaskEvent, room_id: &RoomId) -> Result<()> {
         if !self.worker_client.try_claim(&task, room_id).await? {
             debug!(
