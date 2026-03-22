@@ -248,7 +248,8 @@ impl MatrixClient {
     }
 
     /// Send a custom event to a room. The payload should have "type" and "content" fields.
-    pub async fn send_event(&self, room_id: &RoomId, payload: Value) -> Result<()> {
+    /// Returns the Matrix event ID of the sent event.
+    pub async fn send_event(&self, room_id: &RoomId, payload: Value) -> Result<String> {
         let room = self
             .client
             .get_room(room_id)
@@ -260,8 +261,40 @@ impl MatrixClient {
             .to_string();
         let content = payload["content"].clone();
 
-        room.send_raw(&event_type, content).await?;
-        Ok(())
+        let response = room.send_raw(&event_type, content).await?;
+        Ok(response.event_id.to_string())
+    }
+
+    /// Send a custom event as a thread reply to an existing event.
+    /// Adds `m.relates_to` with `rel_type: "m.thread"` to the content.
+    /// Returns the Matrix event ID of the sent event.
+    pub async fn send_threaded_event(
+        &self,
+        room_id: &RoomId,
+        event_type: &str,
+        in_reply_to_event_id: &str,
+        content: Value,
+    ) -> Result<String> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| MatrixClientError::RoomNotFound(room_id.to_string()))?;
+
+        let mut body = match content {
+            Value::Object(map) => map,
+            _ => serde_json::Map::new(),
+        };
+
+        body.insert(
+            "m.relates_to".to_string(),
+            serde_json::json!({
+                "rel_type": "m.thread",
+                "event_id": in_reply_to_event_id
+            }),
+        );
+
+        let response = room.send_raw(event_type, Value::Object(body)).await?;
+        Ok(response.event_id.to_string())
     }
 
     /// Send a state event to a room.

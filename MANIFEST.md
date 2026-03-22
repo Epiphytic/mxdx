@@ -98,6 +98,11 @@
 | `JcodeWorker::new` | method | `crates/mxdx-fabric/src/jcode_worker.rs` |
 | `JcodeWorker::worker_client` | method | `crates/mxdx-fabric/src/jcode_worker.rs` |
 | `JcodeWorker::run_task` | method | `crates/mxdx-fabric/src/jcode_worker.rs` |
+| `JcodeWorker::probe_jcode_version` | method | `crates/mxdx-fabric/src/jcode_worker.rs` |
+| `JcodeWorker::probe_jcode_auth_healthy` | method | `crates/mxdx-fabric/src/jcode_worker.rs` |
+| `JcodeWorker::build_jcode_input_schema` | method | `crates/mxdx-fabric/src/jcode_worker.rs` |
+| `JcodeWorker::build_capability_advertisement` | method | `crates/mxdx-fabric/src/jcode_worker.rs` |
+| `JcodeWorker::publish_capability_advertisement` | method | `crates/mxdx-fabric/src/jcode_worker.rs` |
 | `SenderClient` | struct | `crates/mxdx-fabric/src/sender.rs` |
 | `SenderClient::new` | method | `crates/mxdx-fabric/src/sender.rs` |
 | `SenderClient::post_task` | method | `crates/mxdx-fabric/src/sender.rs` |
@@ -113,6 +118,7 @@
 | `WorkerClient` | struct | `crates/mxdx-fabric/src/worker.rs` |
 | `WorkerClient::new` | method | `crates/mxdx-fabric/src/worker.rs` |
 | `WorkerClient::advertise_capabilities` | method | `crates/mxdx-fabric/src/worker.rs` |
+| `WorkerClient::publish_capability_advertisement` | method | `crates/mxdx-fabric/src/worker.rs` |
 | `WorkerClient::watch_and_claim` | method | `crates/mxdx-fabric/src/worker.rs` |
 | `WorkerClient::try_claim` | method | `crates/mxdx-fabric/src/worker.rs` |
 | `WorkerClient::post_heartbeat` | method | `crates/mxdx-fabric/src/worker.rs` |
@@ -120,6 +126,7 @@
 | `WorkerClient::post_state_event` | method | `crates/mxdx-fabric/src/worker.rs` |
 | `WorkerClient::worker_id` | method | `crates/mxdx-fabric/src/worker.rs` |
 | `WorkerClient::homeserver` | method | `crates/mxdx-fabric/src/worker.rs` |
+| `WorkerClient::matrix_client_arc` | method | `crates/mxdx-fabric/src/worker.rs` |
 
 ### mxdx-fabric-cli
 
@@ -205,6 +212,7 @@ _No public symbols._
 | `MatrixClient::join_room` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::invite_user` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::send_event` | method | `crates/mxdx-matrix/src/client.rs` |
+| `MatrixClient::send_threaded_event` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::send_state_event` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::sync_once` | method | `crates/mxdx-matrix/src/client.rs` |
 | `MatrixClient::sync_and_collect_events` | method | `crates/mxdx-matrix/src/client.rs` |
@@ -273,6 +281,10 @@ _No public symbols._
 
 | Symbol | Kind | File |
 |:---|:---|:---|
+| `SchemaProperty` | struct | `crates/mxdx-types/src/events/capability.rs` |
+| `InputSchema` | struct | `crates/mxdx-types/src/events/capability.rs` |
+| `WorkerTool` | struct | `crates/mxdx-types/src/events/capability.rs` |
+| `CapabilityAdvertisement` | struct | `crates/mxdx-types/src/events/capability.rs` |
 | `CommandEvent` | struct | `crates/mxdx-types/src/events/command.rs` |
 | `CommandAction` | enum | `crates/mxdx-types/src/events/command.rs` |
 | `TaskEvent` | struct | `crates/mxdx-types/src/events/fabric.rs` |
