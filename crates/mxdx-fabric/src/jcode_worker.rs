@@ -366,6 +366,7 @@ impl JcodeWorker {
                 error_msg,
                 duration,
                 room_id,
+                task.callback.clone(),
             )
             .await?;
 
@@ -518,6 +519,7 @@ impl JcodeWorker {
                 error_msg,
                 duration,
                 room_id,
+                task.callback.clone(),
             )
             .await?;
 

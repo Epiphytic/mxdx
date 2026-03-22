@@ -40,6 +40,9 @@ enum Commands {
 
         #[arg(long, default_value = "false")]
         p2p_stream: bool,
+
+        #[arg(long)]
+        task_uuid: Option<String>,
     },
     Status {
         #[arg(long)]
@@ -146,6 +149,7 @@ async fn main() -> Result<()> {
             prompt,
             timeout,
             p2p_stream,
+            task_uuid,
         } => {
             let coordinator_room = resolve(
                 &cli.coordinator_room,
@@ -160,6 +164,7 @@ async fn main() -> Result<()> {
                 &prompt,
                 timeout,
                 p2p_stream,
+                task_uuid,
             )
             .await
         }
@@ -638,6 +643,7 @@ fn find_task_status(events: &[serde_json::Value], task_uuid: &str) -> Option<Str
     None
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn cmd_post(
     homeserver: &str,
     token: &str,
@@ -646,10 +652,11 @@ async fn cmd_post(
     prompt: &str,
     timeout: u64,
     p2p_stream: bool,
+    task_uuid_override: Option<String>,
 ) -> Result<()> {
     let http = reqwest::Client::new();
 
-    let task_uuid = Uuid::new_v4().to_string();
+    let task_uuid = task_uuid_override.unwrap_or_else(|| Uuid::new_v4().to_string());
     let caps: Vec<String> = capabilities
         .split(',')
         .map(|s| s.trim().to_string())
@@ -668,6 +675,7 @@ async fn cmd_post(
         p2p_stream,
         payload: serde_json::json!({"prompt": prompt}),
         plan: Some(prompt.to_string()),
+        callback: None,
     };
 
     let task_json = serde_json::to_value(&task)?;

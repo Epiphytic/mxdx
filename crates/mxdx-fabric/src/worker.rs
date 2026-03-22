@@ -227,6 +227,7 @@ impl WorkerClient {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn post_result(
         &self,
         task_uuid: &str,
@@ -235,6 +236,7 @@ impl WorkerClient {
         error: Option<String>,
         duration_seconds: u64,
         room_id: &RoomId,
+        callback: Option<serde_json::Value>,
     ) -> Result<()> {
         let result = TaskResultEvent {
             task_uuid: task_uuid.to_string(),
@@ -243,6 +245,7 @@ impl WorkerClient {
             output,
             error,
             duration_seconds,
+            callback,
         };
 
         let payload = serde_json::json!({

@@ -14,6 +14,8 @@ pub struct TaskEvent {
     pub p2p_stream: bool,
     pub payload: serde_json::Value,
     pub plan: Option<String>,
+    #[serde(rename = "_callback", default, skip_serializing_if = "Option::is_none")]
+    pub callback: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -47,6 +49,8 @@ pub struct TaskResultEvent {
     pub output: Option<serde_json::Value>,
     pub error: Option<String>,
     pub duration_seconds: u64,
+    #[serde(rename = "_callback", default, skip_serializing_if = "Option::is_none")]
+    pub callback: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -95,6 +99,7 @@ mod tests {
             p2p_stream: false,
             payload: serde_json::json!({"cmd": "cargo build"}),
             plan: Some("Build the workspace".into()),
+            callback: None,
         };
         let json = serde_json::to_string(&evt).unwrap();
         let parsed: TaskEvent = serde_json::from_str(&json).unwrap();
@@ -129,6 +134,7 @@ mod tests {
             p2p_stream: true,
             payload: serde_json::Value::Null,
             plan: None,
+            callback: None,
         };
         let json = serde_json::to_string(&evt).unwrap();
         let parsed: TaskEvent = serde_json::from_str(&json).unwrap();
@@ -205,6 +211,7 @@ mod tests {
             output: Some(serde_json::json!({"artifacts": ["build/output.wasm"]})),
             error: None,
             duration_seconds: 120,
+            callback: None,
         };
         let json = serde_json::to_string(&evt).unwrap();
         let parsed: TaskResultEvent = serde_json::from_str(&json).unwrap();
@@ -225,6 +232,7 @@ mod tests {
             output: None,
             error: Some("compilation error: missing crate".into()),
             duration_seconds: 5,
+            callback: None,
         };
         let json = serde_json::to_string(&evt).unwrap();
         let parsed: TaskResultEvent = serde_json::from_str(&json).unwrap();
@@ -300,5 +308,96 @@ mod tests {
         let json = r#""exploded""#;
         let result: Result<TaskStatus, _> = serde_json::from_str(json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn task_event_callback_serializes_as_underscore_prefix() {
+        let cb = serde_json::json!({
+            "channel": "discord",
+            "thread_id": "1485151340614254673"
+        });
+        let evt = TaskEvent {
+            uuid: "task-cb".into(),
+            sender_id: "@alice:example.com".into(),
+            required_capabilities: vec![],
+            estimated_cycles: None,
+            timeout_seconds: 60,
+            heartbeat_interval_seconds: 10,
+            on_timeout: FailurePolicy::Escalate,
+            on_heartbeat_miss: FailurePolicy::Escalate,
+            routing_mode: RoutingMode::Auto,
+            p2p_stream: false,
+            payload: serde_json::Value::Null,
+            plan: None,
+            callback: Some(cb.clone()),
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert!(json.contains("\"_callback\""));
+        assert!(!json.contains("\"callback\"") || json.contains("\"_callback\""));
+
+        let parsed: TaskEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.callback, Some(cb));
+    }
+
+    #[test]
+    fn task_event_callback_absent_omitted_from_json() {
+        let evt = TaskEvent {
+            uuid: "task-no-cb".into(),
+            sender_id: "@bob:example.com".into(),
+            required_capabilities: vec![],
+            estimated_cycles: None,
+            timeout_seconds: 60,
+            heartbeat_interval_seconds: 10,
+            on_timeout: FailurePolicy::Escalate,
+            on_heartbeat_miss: FailurePolicy::Escalate,
+            routing_mode: RoutingMode::Auto,
+            p2p_stream: false,
+            payload: serde_json::Value::Null,
+            plan: None,
+            callback: None,
+        };
+        let json = serde_json::to_string(&evt).unwrap();
+        assert!(!json.contains("_callback"));
+
+        let parsed: TaskEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.callback, None);
+    }
+
+    #[test]
+    fn task_result_event_echoes_callback() {
+        let cb = serde_json::json!({
+            "channel": "discord",
+            "thread_id": "148515134",
+            "session_key": "abc123"
+        });
+        let result = TaskResultEvent {
+            task_uuid: "task-cb".into(),
+            worker_id: "@worker:example.com".into(),
+            status: TaskStatus::Success,
+            output: None,
+            error: None,
+            duration_seconds: 10,
+            callback: Some(cb.clone()),
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("\"_callback\""));
+
+        let parsed: TaskResultEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.callback, Some(cb));
+    }
+
+    #[test]
+    fn task_result_event_no_callback_omitted() {
+        let result = TaskResultEvent {
+            task_uuid: "task-no-cb".into(),
+            worker_id: "@worker:example.com".into(),
+            status: TaskStatus::Failed,
+            output: None,
+            error: Some("oops".into()),
+            duration_seconds: 1,
+            callback: None,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("_callback"));
     }
 }
