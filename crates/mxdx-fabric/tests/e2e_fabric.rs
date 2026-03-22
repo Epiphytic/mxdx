@@ -30,7 +30,6 @@ fn make_task(uuid: &str, sender_id: &str) -> TaskEvent {
         p2p_stream: false,
         payload: serde_json::json!({"cmd": "cargo build"}),
         plan: None,
-        callback: None,
     }
 }
 
@@ -176,7 +175,7 @@ async fn fabric_happy_path_e2e() {
     );
 
     worker
-        .post_heartbeat("test-task-001", Some("50%".into()), &worker_room_id)
+        .post_heartbeat("test-task-001", Some("50%".into()), &worker_room_id, None)
         .await
         .unwrap();
 
@@ -389,7 +388,6 @@ async fn test_jcode_worker_mock_task() {
         p2p_stream: false,
         payload: serde_json::json!({"prompt": "echo hello world"}),
         plan: None,
-        callback: None,
     };
 
     let prompt = task
@@ -414,7 +412,6 @@ async fn test_jcode_worker_mock_task() {
         p2p_stream: false,
         payload: serde_json::json!({}),
         plan: Some("fallback plan prompt".to_string()),
-        callback: None,
     };
 
     let prompt_from_plan = task_with_plan
@@ -439,7 +436,6 @@ async fn test_jcode_worker_mock_task() {
         p2p_stream: false,
         payload: serde_json::json!({}),
         plan: None,
-        callback: None,
     };
 
     let fallback_prompt = empty_task
@@ -566,7 +562,6 @@ async fn coordinator_watchlist_lifecycle() {
         output: None,
         error: None,
         duration_seconds: 10,
-        callback: None,
     };
     bot.handle_result_event(&result);
     assert_eq!(
@@ -619,7 +614,6 @@ async fn test_failure_policy_escalate() {
         p2p_stream: false,
         payload: serde_json::json!({"cmd": "should timeout"}),
         plan: Some("Test escalation plan".to_string()),
-        callback: None,
     };
 
     let task_payload = serde_json::json!({
@@ -723,7 +717,6 @@ async fn test_failure_policy_respawn() {
         p2p_stream: false,
         payload: serde_json::json!({"cmd": "should respawn"}),
         plan: Some("Test respawn plan".to_string()),
-        callback: None,
     };
 
     let task_payload = serde_json::json!({
@@ -872,7 +865,6 @@ async fn test_p2p_stream_unix_socket() {
         p2p_stream: true,
         payload: serde_json::json!({"prompt": "seq 1 1000"}),
         plan: None,
-        callback: None,
     };
 
     let posted_uuid = sender
@@ -899,7 +891,7 @@ async fn test_p2p_stream_unix_socket() {
     let worker_task = task.clone();
     let worker_handle = tokio::spawn(async move {
         jcode_worker
-            .run_task(worker_task, &worker_room_id)
+            .run_task(worker_task, &worker_room_id, String::new())
             .await
             .unwrap();
     });

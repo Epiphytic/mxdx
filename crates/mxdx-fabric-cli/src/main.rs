@@ -43,6 +43,13 @@ enum Commands {
 
         #[arg(long)]
         task_uuid: Option<String>,
+
+        #[arg(
+            long,
+            value_name = "JSON",
+            help = "Arbitrary JSON object merged into task payload"
+        )]
+        payload_json: Option<String>,
     },
     Status {
         #[arg(long)]
@@ -150,6 +157,7 @@ async fn main() -> Result<()> {
             timeout,
             p2p_stream,
             task_uuid,
+            payload_json,
         } => {
             let coordinator_room = resolve(
                 &cli.coordinator_room,
@@ -165,6 +173,7 @@ async fn main() -> Result<()> {
                 timeout,
                 p2p_stream,
                 task_uuid,
+                payload_json,
             )
             .await
         }
@@ -444,9 +453,9 @@ async fn cmd_worker(
             .watch_and_claim(&room_id, &caps)
             .await
         {
-            Ok(Some(task)) => {
+            Ok(Some((task, task_event_id))) => {
                 println!("Claimed task {}", task.uuid);
-                if let Err(e) = jcode_worker.run_task(task, &room_id).await {
+                if let Err(e) = jcode_worker.run_task(task, &room_id, task_event_id).await {
                     eprintln!("Task error: {e:#}");
                 }
             }
@@ -469,7 +478,7 @@ async fn matrix_send_event(
     room_id: &str,
     event_type: &str,
     content: &serde_json::Value,
-) -> Result<()> {
+) -> Result<String> {
     let txn_id = Uuid::new_v4().to_string();
     let url = format!(
         "{}/_matrix/client/v3/rooms/{}/send/{}/{}",
@@ -492,7 +501,14 @@ async fn matrix_send_event(
         bail!("Matrix PUT failed: {body}");
     }
 
-    Ok(())
+    let body: serde_json::Value = resp.json().await.context("failed to parse send response")?;
+    let event_id = body
+        .get("event_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    Ok(event_id)
 }
 
 async fn matrix_get_messages(
@@ -644,6 +660,46 @@ fn find_task_status(events: &[serde_json::Value], task_uuid: &str) -> Option<Str
 }
 
 #[allow(clippy::too_many_arguments)]
+fn merge_payload(base: serde_json::Value, extra_json: Option<&str>) -> Result<serde_json::Value> {
+    let extra = match extra_json {
+        Some(s) => {
+            let parsed: serde_json::Value =
+                serde_json::from_str(s).context("--payload-json is not valid JSON")?;
+            match parsed {
+                serde_json::Value::Object(map) => map,
+                _ => bail!("--payload-json must be a JSON object"),
+            }
+        }
+        None => return Ok(base),
+    };
+
+    let mut merged = match base {
+        serde_json::Value::Object(map) => map,
+        other => {
+            let mut map = serde_json::Map::new();
+            if !other.is_null() {
+                map.insert("_base".to_string(), other);
+            }
+            map
+        }
+    };
+
+    let explicit_keys: std::collections::HashSet<String> = merged.keys().cloned().collect();
+
+    for (key, value) in extra {
+        if !explicit_keys.contains(&key) {
+            merged.insert(key, value);
+        }
+    }
+
+    Ok(serde_json::Value::Object(merged))
+}
+
+fn format_post_output(task_uuid: &str, event_id: &str) -> String {
+    format!("task_uuid: {task_uuid}\nevent_id: {event_id}")
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn cmd_post(
     homeserver: &str,
     token: &str,
@@ -653,6 +709,7 @@ async fn cmd_post(
     timeout: u64,
     p2p_stream: bool,
     task_uuid_override: Option<String>,
+    payload_json: Option<String>,
 ) -> Result<()> {
     let http = reqwest::Client::new();
 
@@ -661,6 +718,9 @@ async fn cmd_post(
         .split(',')
         .map(|s| s.trim().to_string())
         .collect();
+
+    let base_payload = serde_json::json!({"prompt": prompt});
+    let payload = merge_payload(base_payload, payload_json.as_deref())?;
 
     let task = mxdx_types::events::fabric::TaskEvent {
         uuid: task_uuid.clone(),
@@ -673,15 +733,14 @@ async fn cmd_post(
         on_heartbeat_miss: mxdx_types::events::fabric::FailurePolicy::Escalate,
         routing_mode: mxdx_types::events::fabric::RoutingMode::Auto,
         p2p_stream,
-        payload: serde_json::json!({"prompt": prompt}),
+        payload,
         plan: Some(prompt.to_string()),
-        callback: None,
     };
 
     let task_json = serde_json::to_value(&task)?;
 
     eprintln!("Posting task {} to {}", task_uuid, coordinator_room);
-    matrix_send_event(
+    let event_id = matrix_send_event(
         &http,
         homeserver,
         token,
@@ -690,6 +749,8 @@ async fn cmd_post(
         &task_json,
     )
     .await?;
+
+    println!("{}", format_post_output(&task_uuid, &event_id));
     eprintln!("Task posted, waiting for result (timeout: {}s)...", timeout);
 
     let (_sync_body, mut sync_token) = matrix_sync(&http, homeserver, token, None, 1000).await?;
@@ -788,5 +849,81 @@ async fn cmd_watch(homeserver: &str, token: &str, room_id: &str, task_uuid: &str
                 eprintln!("HEARTBEAT: {progress}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn merge_payload_without_extra_returns_base() {
+        let base = serde_json::json!({"prompt": "do stuff"});
+        let result = merge_payload(base.clone(), None).unwrap();
+        assert_eq!(result, base);
+    }
+
+    #[test]
+    fn merge_payload_adds_extra_fields() {
+        let base = serde_json::json!({"prompt": "do stuff"});
+        let extra = r#"{"cwd": "/tmp", "model": "gpt-4"}"#;
+        let result = merge_payload(base, Some(extra)).unwrap();
+        assert_eq!(result["prompt"], "do stuff");
+        assert_eq!(result["cwd"], "/tmp");
+        assert_eq!(result["model"], "gpt-4");
+    }
+
+    #[test]
+    fn merge_payload_named_flag_wins_on_conflict() {
+        let base = serde_json::json!({"prompt": "explicit-prompt", "cwd": "/explicit"});
+        let extra = r#"{"prompt": "overridden", "cwd": "/overridden", "model": "gpt-4"}"#;
+        let result = merge_payload(base, Some(extra)).unwrap();
+        assert_eq!(result["prompt"], "explicit-prompt");
+        assert_eq!(result["cwd"], "/explicit");
+        assert_eq!(result["model"], "gpt-4");
+    }
+
+    #[test]
+    fn merge_payload_rejects_non_object_json() {
+        let base = serde_json::json!({"prompt": "do stuff"});
+        let extra = r#""just a string""#;
+        let result = merge_payload(base, Some(extra));
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("must be a JSON object"));
+    }
+
+    #[test]
+    fn merge_payload_rejects_invalid_json() {
+        let base = serde_json::json!({"prompt": "do stuff"});
+        let extra = r#"not valid json at all"#;
+        let result = merge_payload(base, Some(extra));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn merge_payload_empty_object() {
+        let base = serde_json::json!({"prompt": "do stuff"});
+        let extra = r#"{}"#;
+        let result = merge_payload(base, Some(extra)).unwrap();
+        assert_eq!(result["prompt"], "do stuff");
+        assert_eq!(result.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn format_post_output_contains_both_ids() {
+        let output = format_post_output(
+            "550e8400-e29b-41d4-a716-446655440000",
+            "$abc123:ca1-beta.mxdx.dev",
+        );
+        assert!(output.contains("task_uuid: 550e8400-e29b-41d4-a716-446655440000"));
+        assert!(output.contains("event_id: $abc123:ca1-beta.mxdx.dev"));
+
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].starts_with("task_uuid: "));
+        assert!(lines[1].starts_with("event_id: "));
     }
 }

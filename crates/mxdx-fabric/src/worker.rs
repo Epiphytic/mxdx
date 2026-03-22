@@ -90,7 +90,7 @@ impl WorkerClient {
         &self,
         room_id: &RoomId,
         my_caps: &[String],
-    ) -> Result<Option<TaskEvent>> {
+    ) -> Result<Option<(TaskEvent, String)>> {
         self.matrix_client.sync_once().await?;
 
         let events = self
@@ -114,6 +114,12 @@ impl WorkerClient {
                 Err(_) => continue,
             };
 
+            let task_event_id = event
+                .get("event_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
             let has_caps = task
                 .required_capabilities
                 .iter()
@@ -130,7 +136,7 @@ impl WorkerClient {
             }
 
             if self.try_claim(&task, room_id).await? {
-                return Ok(Some(task));
+                return Ok(Some((task, task_event_id)));
             }
         }
 
@@ -198,6 +204,7 @@ impl WorkerClient {
         task_uuid: &str,
         progress: Option<String>,
         room_id: &RoomId,
+        task_event_id: Option<&str>,
     ) -> Result<()> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -211,18 +218,29 @@ impl WorkerClient {
             timestamp: now,
         };
 
-        let payload = serde_json::json!({
-            "type": EVENT_HEARTBEAT,
-            "content": heartbeat,
-        });
+        let content = serde_json::to_value(&heartbeat)?;
 
         debug!(
             uuid = %task_uuid,
             worker_id = %self.worker_id,
+            threaded = task_event_id.is_some(),
             "posting heartbeat"
         );
 
-        self.matrix_client.send_event(room_id, payload).await?;
+        match task_event_id {
+            Some(eid) if !eid.is_empty() => {
+                self.matrix_client
+                    .send_threaded_event(room_id, EVENT_HEARTBEAT, eid, content)
+                    .await?;
+            }
+            _ => {
+                let payload = serde_json::json!({
+                    "type": EVENT_HEARTBEAT,
+                    "content": heartbeat,
+                });
+                self.matrix_client.send_event(room_id, payload).await?;
+            }
+        }
 
         Ok(())
     }
@@ -236,7 +254,7 @@ impl WorkerClient {
         error: Option<String>,
         duration_seconds: u64,
         room_id: &RoomId,
-        callback: Option<serde_json::Value>,
+        task_event_id: Option<&str>,
     ) -> Result<()> {
         let result = TaskResultEvent {
             task_uuid: task_uuid.to_string(),
@@ -245,21 +263,31 @@ impl WorkerClient {
             output,
             error,
             duration_seconds,
-            callback,
         };
 
-        let payload = serde_json::json!({
-            "type": EVENT_RESULT,
-            "content": result,
-        });
+        let content = serde_json::to_value(&result)?;
 
         info!(
             uuid = %task_uuid,
             worker_id = %self.worker_id,
+            threaded = task_event_id.is_some(),
             "posting result"
         );
 
-        self.matrix_client.send_event(room_id, payload).await?;
+        match task_event_id {
+            Some(eid) if !eid.is_empty() => {
+                self.matrix_client
+                    .send_threaded_event(room_id, EVENT_RESULT, eid, content)
+                    .await?;
+            }
+            _ => {
+                let payload = serde_json::json!({
+                    "type": EVENT_RESULT,
+                    "content": result,
+                });
+                self.matrix_client.send_event(room_id, payload).await?;
+            }
+        }
 
         Ok(())
     }

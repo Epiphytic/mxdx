@@ -253,7 +253,12 @@ impl JcodeWorker {
         &self.worker_client
     }
 
-    pub async fn run_task(&self, task: TaskEvent, room_id: &RoomId) -> Result<()> {
+    pub async fn run_task(
+        &self,
+        task: TaskEvent,
+        room_id: &RoomId,
+        task_event_id: String,
+    ) -> Result<()> {
         if !self.worker_client.try_claim(&task, room_id).await? {
             debug!(
                 uuid = %task.uuid,
@@ -270,13 +275,18 @@ impl JcodeWorker {
         let use_p2p = task.p2p_stream && task.heartbeat_interval_seconds < 5;
 
         if use_p2p {
-            self.run_task_p2p(&task, room_id).await
+            self.run_task_p2p(&task, room_id, &task_event_id).await
         } else {
-            self.run_task_matrix(&task, room_id).await
+            self.run_task_matrix(&task, room_id, &task_event_id).await
         }
     }
 
-    async fn run_task_matrix(&self, task: &TaskEvent, room_id: &RoomId) -> Result<()> {
+    async fn run_task_matrix(
+        &self,
+        task: &TaskEvent,
+        room_id: &RoomId,
+        task_event_id: &str,
+    ) -> Result<()> {
         let prompt = task
             .payload
             .get("prompt")
@@ -316,7 +326,8 @@ impl JcodeWorker {
 
                     if batch_buf.len() >= BATCH_MAX_BYTES || batch_timer.elapsed() >= BATCH_INTERVAL
                     {
-                        self.flush_heartbeat(&task.uuid, &batch_buf, room_id).await;
+                        self.flush_heartbeat(&task.uuid, &batch_buf, room_id, task_event_id)
+                            .await;
                         batch_buf.clear();
                         batch_timer = Instant::now();
                     }
@@ -330,7 +341,8 @@ impl JcodeWorker {
         }
 
         if !batch_buf.is_empty() {
-            self.flush_heartbeat(&task.uuid, &batch_buf, room_id).await;
+            self.flush_heartbeat(&task.uuid, &batch_buf, room_id, task_event_id)
+                .await;
         }
 
         let status = child.wait().await?;
@@ -358,6 +370,12 @@ impl JcodeWorker {
             "jcode process completed"
         );
 
+        let thread_id = if task_event_id.is_empty() {
+            None
+        } else {
+            Some(task_event_id)
+        };
+
         self.worker_client
             .post_result(
                 &task.uuid,
@@ -366,14 +384,19 @@ impl JcodeWorker {
                 error_msg,
                 duration,
                 room_id,
-                task.callback.clone(),
+                thread_id,
             )
             .await?;
 
         Ok(())
     }
 
-    async fn run_task_p2p(&self, task: &TaskEvent, room_id: &RoomId) -> Result<()> {
+    async fn run_task_p2p(
+        &self,
+        task: &TaskEvent,
+        room_id: &RoomId,
+        task_event_id: &str,
+    ) -> Result<()> {
         let socket_path = format!("/tmp/mxdx-fabric-{}.sock", task.uuid);
 
         let _ = tokio::fs::remove_file(&socket_path).await;
@@ -465,7 +488,8 @@ impl JcodeWorker {
 
                     if batch_buf.len() >= BATCH_MAX_BYTES || batch_timer.elapsed() >= BATCH_INTERVAL
                     {
-                        self.flush_heartbeat(&task.uuid, &batch_buf, room_id).await;
+                        self.flush_heartbeat(&task.uuid, &batch_buf, room_id, task_event_id)
+                            .await;
                         batch_buf.clear();
                         batch_timer = Instant::now();
                     }
@@ -479,7 +503,8 @@ impl JcodeWorker {
         }
 
         if !batch_buf.is_empty() {
-            self.flush_heartbeat(&task.uuid, &batch_buf, room_id).await;
+            self.flush_heartbeat(&task.uuid, &batch_buf, room_id, task_event_id)
+                .await;
         }
 
         if let Some(mut stream) = unix_stream {
@@ -511,6 +536,12 @@ impl JcodeWorker {
             "jcode process completed (P2P mode)"
         );
 
+        let thread_id = if task_event_id.is_empty() {
+            None
+        } else {
+            Some(task_event_id)
+        };
+
         self.worker_client
             .post_result(
                 &task.uuid,
@@ -519,7 +550,7 @@ impl JcodeWorker {
                 error_msg,
                 duration,
                 room_id,
-                task.callback.clone(),
+                thread_id,
             )
             .await?;
 
@@ -681,10 +712,21 @@ impl JcodeWorker {
             .join("\n")
     }
 
-    async fn flush_heartbeat(&self, task_uuid: &str, batch: &str, room_id: &RoomId) {
+    async fn flush_heartbeat(
+        &self,
+        task_uuid: &str,
+        batch: &str,
+        room_id: &RoomId,
+        task_event_id: &str,
+    ) {
+        let thread_id = if task_event_id.is_empty() {
+            None
+        } else {
+            Some(task_event_id)
+        };
         if let Err(e) = self
             .worker_client
-            .post_heartbeat(task_uuid, Some(batch.to_string()), room_id)
+            .post_heartbeat(task_uuid, Some(batch.to_string()), room_id, thread_id)
             .await
         {
             warn!(
