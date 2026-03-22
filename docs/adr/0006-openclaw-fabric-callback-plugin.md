@@ -28,11 +28,11 @@ Workers receive the task event ID when they claim a task (it's the Matrix event 
 
 ### Part 2: Trust Model for Callbacks
 
-OpenClaw embeds `_callback` in the `org.mxdx.fabric.task` event at post time. This event is authored by OpenClaw's sender identity and is immutable in Matrix once posted.
+Callback routing lives **exclusively in the client's private outbox room**. It is never embedded in the `org.mxdx.fabric.task` event, never transmitted to the coordinator, and never visible to workers.
 
-On result, the plugin correlates `task_uuid` → `coordinator_event_id` from its own outbox, fetches the original task event, and reads `_callback` from it. The worker's output is trusted only for content — never for routing.
+The outbox entry maps `task_uuid → { coordinator_event_id, callback, posted_at, timeout_secs }`. On result, the plugin looks up the task UUID in its own outbox to get both the Matrix thread anchor (`coordinator_event_id`) and the routing destination (`callback`). No fetch of the original task event is needed.
 
-Workers MUST ignore unknown payload fields. Workers MUST NOT copy, modify, or echo `_callback` into any output event.
+This means: callbacks only exist if the client put them there. A worker that has never seen `_callback` cannot forge, redirect, or interfere with routing in any way.
 
 ### Part 3: Outbox State Event
 
@@ -113,16 +113,17 @@ That is: 7 days or 5× the task timeout, whichever is longer. Also remove any en
 On thread activity on a known task event ID:
 
 1. Check if the new threaded event is `org.mxdx.fabric.result` (final result marker)
-2. If so: fetch original `org.mxdx.fabric.task` event by `coordinator_event_id`
-3. Read `_callback` from the original task event
-4. Route result to the specified channel/thread via OpenClaw's message API
-5. Remove entry from outbox, rewrite state to all identity rooms
+2. Look up `task_uuid` in the in-memory outbox — get `callback` and `coordinator_event_id` directly
+3. Route result to the specified channel/thread via OpenClaw's message API
+4. Remove entry from outbox, rewrite state to all identity rooms
+
+No fetch of the original task event is required. The outbox is the sole source of routing truth.
 
 Intermediate heartbeat/progress thread events may optionally be relayed to the callback channel as live updates (future feature; not required for initial implementation).
 
 ### Part 10: Arbitrary Payload Fields
 
-`fabric post` gains a `--payload-json` flag accepting arbitrary JSON merged into the task payload. The `_callback` field is one such field. Workers treat unknown payload fields as opaque and ignore them.
+`fabric post` gains a `--payload-json` flag accepting arbitrary JSON merged into the task payload for general extensibility (e.g. worker options, cwd, model). Callback routing is not a payload field and is never transmitted to workers.
 
 ## Implementation Checklist
 
@@ -130,6 +131,7 @@ Intermediate heartbeat/progress thread events may optionally be relayed to the c
 - [ ] `mxdx-fabric/worker`: use `send_threaded_event` for heartbeats and result (pass task event ID through from claim)
 - [ ] `mxdx-fabric/worker`: remove plain-room heartbeat fallback once threading is in
 - [ ] `mxdx-types`: ensure `TaskEvent` carries the Matrix event ID through to the worker (currently available via sync envelope — may need explicit plumbing)
+- [ ] `mxdx-types`: remove `_callback` field from `TaskEvent` and `TaskResultEvent` (routing never goes on the wire)
 - [ ] `mxdx-fabric/cli`: add `--payload-json` flag to `fabric post`
 - [ ] OpenClaw plugin: outbox room create/join on startup
 - [ ] OpenClaw plugin: state event read/write with conflict resolution
@@ -151,7 +153,6 @@ Intermediate heartbeat/progress thread events may optionally be relayed to the c
 **Negative:**
 - `mxdx-matrix` needs threading support before workers can use it (currently only has plain `send_event`)
 - Workers need the task event ID plumbed through from claim to execution (currently available in the sync envelope but not explicitly carried)
-- Fetching the original task event on each result adds one Matrix API call per completion
 - If all identity outbox rooms are lost, pending callbacks are unrecoverable (acceptable: tasks are time-bounded)
 
 ## Out of Scope
