@@ -1,7 +1,7 @@
 # ADR 0006: OpenClaw Fabric Callback Plugin
 
 **Date:** 2026-03-22
-**Status:** Accepted
+**Status:** Superseded by ADR-0007
 
 ## Context
 
