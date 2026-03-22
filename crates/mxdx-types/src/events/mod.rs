@@ -1,3 +1,4 @@
+pub mod capability;
 pub mod command;
 pub mod fabric;
 pub mod launcher;
