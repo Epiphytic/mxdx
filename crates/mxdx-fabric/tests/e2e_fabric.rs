@@ -1,16 +1,20 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use mxdx_fabric::coordinator::CoordinatorBot;
 use mxdx_fabric::jcode_worker::JcodeWorker;
 use mxdx_fabric::sender::SenderClient;
-use mxdx_fabric::worker::WorkerClient;
+use mxdx_fabric::worker::{WorkerClient, EVENT_CAPABILITY};
 use mxdx_fabric::{
     ClaimEvent, FailurePolicy, HeartbeatEvent, RoutingMode, TaskEvent, TaskResultEvent, TaskStatus,
     EVENT_CLAIM,
 };
 use mxdx_matrix::MatrixClient;
 use mxdx_test_helpers::tuwunel::TuwunelInstance;
+use mxdx_types::events::capability::{
+    CapabilityAdvertisement, InputSchema, SchemaProperty, WorkerTool,
+};
 
 fn make_task(uuid: &str, sender_id: &str) -> TaskEvent {
     TaskEvent {
@@ -1113,5 +1117,129 @@ async fn test_fabric_cli_post() {
     );
 
     worker_handle.await.unwrap();
+    hs.stop().await;
+}
+
+#[tokio::test]
+async fn capability_advertisement_publish_and_read_back() {
+    let mut hs = TuwunelInstance::start().await.unwrap();
+    let base_url = format!("http://127.0.0.1:{}", hs.port);
+
+    let coordinator_mc =
+        MatrixClient::register_and_connect(&base_url, "coord-cap", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
+    let worker_mc =
+        MatrixClient::register_and_connect(&base_url, "worker-cap", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
+
+    let room_id = coordinator_mc
+        .create_named_unencrypted_room("cap-advert-room", "org.mxdx.fabric.coordinator")
+        .await
+        .unwrap();
+
+    coordinator_mc
+        .invite_user(&room_id, worker_mc.user_id())
+        .await
+        .unwrap();
+    worker_mc.sync_once().await.unwrap();
+    worker_mc.join_room(&room_id).await.unwrap();
+
+    let power_levels = serde_json::json!({
+        "users": {
+            coordinator_mc.user_id().to_string(): 100,
+            worker_mc.user_id().to_string(): 50
+        },
+        "users_default": 0,
+        "events": {},
+        "events_default": 0,
+        "state_default": 0,
+        "ban": 50,
+        "kick": 50,
+        "invite": 50,
+        "redact": 50
+    });
+    coordinator_mc
+        .send_state_event(&room_id, "m.room.power_levels", "", power_levels)
+        .await
+        .unwrap();
+
+    coordinator_mc.sync_once().await.unwrap();
+    worker_mc.sync_once().await.unwrap();
+
+    let worker_mc = Arc::new(worker_mc);
+    let worker_id = format!("@worker-cap:{}", hs.server_name);
+
+    let worker_client =
+        WorkerClient::new(worker_mc.clone(), worker_id.clone(), hs.server_name.clone());
+
+    let advertisement = CapabilityAdvertisement {
+        worker_id: worker_id.clone(),
+        host: "test-host".into(),
+        tools: vec![WorkerTool {
+            name: "jcode".into(),
+            version: Some("0.8.0".into()),
+            description: "Rust coding agent".into(),
+            healthy: true,
+            input_schema: InputSchema {
+                r#type: "object".into(),
+                properties: HashMap::from([
+                    (
+                        "prompt".into(),
+                        SchemaProperty {
+                            r#type: "string".into(),
+                            description: "Task prompt".into(),
+                        },
+                    ),
+                    (
+                        "cwd".into(),
+                        SchemaProperty {
+                            r#type: "string".into(),
+                            description: "Working directory".into(),
+                        },
+                    ),
+                ]),
+                required: vec!["prompt".into()],
+            },
+        }],
+    };
+
+    worker_client
+        .publish_capability_advertisement(&advertisement, &room_id)
+        .await
+        .unwrap();
+
+    worker_mc.sync_once().await.unwrap();
+
+    let state_json = worker_mc
+        .get_room_state_event(&room_id, EVENT_CAPABILITY, &worker_id)
+        .await
+        .unwrap();
+
+    let parsed: CapabilityAdvertisement = serde_json::from_value(state_json.clone())
+        .unwrap_or_else(|e| {
+            panic!(
+                "state event should deserialize to CapabilityAdvertisement: {e}, raw: {state_json}"
+            )
+        });
+
+    assert_eq!(parsed.worker_id, worker_id);
+    assert_eq!(parsed.host, "test-host");
+    assert_eq!(parsed.tools.len(), 1);
+    assert_eq!(parsed.tools[0].name, "jcode");
+    assert_eq!(parsed.tools[0].version, Some("0.8.0".into()));
+    assert!(parsed.tools[0].healthy);
+    assert_eq!(parsed.tools[0].input_schema.r#type, "object");
+    assert_eq!(parsed.tools[0].input_schema.properties.len(), 2);
+    assert!(parsed.tools[0]
+        .input_schema
+        .properties
+        .contains_key("prompt"));
+    assert!(parsed.tools[0].input_schema.properties.contains_key("cwd"));
+    assert_eq!(parsed.tools[0].input_schema.required, vec!["prompt"]);
+
+    assert_eq!(parsed, advertisement);
+
     hs.stop().await;
 }
