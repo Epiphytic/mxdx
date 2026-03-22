@@ -1109,8 +1109,25 @@ async fn test_fabric_cli_post() {
         stdout
     );
 
-    let result_json: serde_json::Value = serde_json::from_str(stdout.trim())
-        .unwrap_or_else(|e| panic!("stdout should be valid JSON: {e}, got: {stdout}"));
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert!(
+        lines.len() >= 2,
+        "stdout should have at least task_uuid + event_id lines, got: {stdout}"
+    );
+    assert!(
+        lines[0].starts_with("task_uuid: "),
+        "first line should be task_uuid, got: {}",
+        lines[0]
+    );
+    assert!(
+        lines[1].starts_with("event_id: "),
+        "second line should be event_id, got: {}",
+        lines[1]
+    );
+
+    let json_part = lines[2..].join("\n");
+    let result_json: serde_json::Value = serde_json::from_str(json_part.trim())
+        .unwrap_or_else(|e| panic!("result portion should be valid JSON: {e}, got: {stdout}"));
     assert_eq!(
         result_json.get("status").and_then(|s| s.as_str()),
         Some("success"),
