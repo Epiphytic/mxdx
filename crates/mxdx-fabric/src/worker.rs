@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use mxdx_matrix::{MatrixClient, RoomId};
+use mxdx_types::events::capability::CapabilityAdvertisement;
 use mxdx_types::events::fabric::{
     CapabilityEvent, ClaimEvent, HeartbeatEvent, TaskEvent, TaskResultEvent, TaskStatus,
 };
@@ -53,6 +54,33 @@ impl WorkerClient {
         debug!(
             worker_id = %self.worker_id,
             "capability advertisement sent"
+        );
+
+        Ok(())
+    }
+
+    pub async fn publish_capability_advertisement(
+        &self,
+        advertisement: &CapabilityAdvertisement,
+        room_id: &RoomId,
+    ) -> Result<()> {
+        info!(
+            worker_id = %self.worker_id,
+            host = %advertisement.host,
+            tools = advertisement.tools.len(),
+            room_id = %room_id,
+            "publishing capability advertisement"
+        );
+
+        let content = serde_json::to_value(advertisement)?;
+
+        self.matrix_client
+            .send_state_event(room_id, EVENT_CAPABILITY, &self.worker_id, content)
+            .await?;
+
+        debug!(
+            worker_id = %self.worker_id,
+            "capability advertisement published"
         );
 
         Ok(())
@@ -260,5 +288,9 @@ impl WorkerClient {
 
     pub fn homeserver(&self) -> &str {
         &self.homeserver
+    }
+
+    pub fn matrix_client_arc(&self) -> Arc<MatrixClient> {
+        self.matrix_client.clone()
     }
 }

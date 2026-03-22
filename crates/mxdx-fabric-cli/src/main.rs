@@ -4,11 +4,7 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use mxdx_fabric::{
-    coordinator::CoordinatorBot,
-    jcode_worker::JcodeWorker,
-    worker::WorkerClient,
-};
+use mxdx_fabric::{coordinator::CoordinatorBot, jcode_worker::JcodeWorker, worker::WorkerClient};
 use mxdx_matrix::MatrixClient;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -181,8 +177,7 @@ async fn main() -> Result<()> {
             )?;
             let user_id = coordinator_user_id
                 .unwrap_or_else(|| "@bel-coordinator:ca1-beta.mxdx.dev".to_string());
-            let device_id = coordinator_device_id
-                .unwrap_or_else(|| "scfvjFQUVO".to_string());
+            let device_id = coordinator_device_id.unwrap_or_else(|| "scfvjFQUVO".to_string());
             cmd_coordinator(&homeserver, &token, &coordinator_room, &user_id, &device_id).await
         }
         Commands::Worker {
@@ -195,11 +190,18 @@ async fn main() -> Result<()> {
                 &config.coordinator_room,
                 "coordinator-room",
             )?;
-            let user_id = worker_user_id
-                .unwrap_or_else(|| "@bel-worker:ca1-beta.mxdx.dev".to_string());
-            let device_id = worker_device_id
-                .unwrap_or_else(|| "vDLnPCG2CQ".to_string());
-            cmd_worker(&homeserver, &token, &coordinator_room, &capabilities, &user_id, &device_id).await
+            let user_id =
+                worker_user_id.unwrap_or_else(|| "@bel-worker:ca1-beta.mxdx.dev".to_string());
+            let device_id = worker_device_id.unwrap_or_else(|| "vDLnPCG2CQ".to_string());
+            cmd_worker(
+                &homeserver,
+                &token,
+                &coordinator_room,
+                &capabilities,
+                &user_id,
+                &device_id,
+            )
+            .await
         }
     }
 }
@@ -259,13 +261,10 @@ async fn cmd_worker(
         .try_into()
         .context("invalid coordinator room ID")?;
 
-    let worker_client = WorkerClient::new(
-        matrix_client,
-        user_id.to_string(),
-        homeserver.to_string(),
-    );
+    let worker_client =
+        WorkerClient::new(matrix_client, user_id.to_string(), homeserver.to_string());
 
-    // Advertise capabilities
+    // Advertise capabilities (legacy CSV)
     worker_client
         .advertise_capabilities(&caps, &room_id)
         .await
@@ -273,9 +272,42 @@ async fn cmd_worker(
 
     let jcode_worker = JcodeWorker::new(worker_client, None);
 
+    // Publish structured capability advertisement (ADR-0005)
+    if let Err(e) = jcode_worker
+        .publish_capability_advertisement(&room_id)
+        .await
+    {
+        eprintln!("Warning: failed to publish capability advertisement: {e:#}");
+    }
+
+    // Spawn periodic capability advertisement refresh (every 60s)
+    let refresh_room_id = room_id.clone();
+    let refresh_jcode_bin: std::path::PathBuf = "jcode".into();
+    let refresh_worker_id = user_id.to_string();
+    let refresh_homeserver = homeserver.to_string();
+    let refresh_matrix = jcode_worker.worker_client().matrix_client_arc();
+    tokio::spawn(async move {
+        let refresh_worker_client =
+            WorkerClient::new(refresh_matrix, refresh_worker_id, refresh_homeserver);
+        let refresh_worker = JcodeWorker::new(refresh_worker_client, Some(refresh_jcode_bin));
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            if let Err(e) = refresh_worker
+                .publish_capability_advertisement(&refresh_room_id)
+                .await
+            {
+                eprintln!("Warning: periodic capability refresh failed: {e:#}");
+            }
+        }
+    });
+
     // Watch coordinator room for tasks
     loop {
-        match jcode_worker.worker_client().watch_and_claim(&room_id, &caps).await {
+        match jcode_worker
+            .worker_client()
+            .watch_and_claim(&room_id, &caps)
+            .await
+        {
             Ok(Some(task)) => {
                 println!("Claimed task {}", task.uuid);
                 if let Err(e) = jcode_worker.run_task(task, &room_id).await {

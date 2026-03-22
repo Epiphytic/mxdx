@@ -18,6 +18,7 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
+hostname = "0.4"
 
 [dev-dependencies]
 mxdx-test-helpers = { path = "../../tests/helpers" }

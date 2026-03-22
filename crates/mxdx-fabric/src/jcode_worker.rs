@@ -1,9 +1,13 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use mxdx_matrix::RoomId;
+use mxdx_types::events::capability::{
+    CapabilityAdvertisement, InputSchema, SchemaProperty, WorkerTool,
+};
 use mxdx_types::events::fabric::{TaskEvent, TaskStatus};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
@@ -183,10 +187,7 @@ impl JcodeOptions {
     pub fn build_args(&self, prompt: &str) -> Vec<String> {
         let mut args = Vec::new();
 
-        let provider = self
-            .provider
-            .as_deref()
-            .unwrap_or("claude");
+        let provider = self.provider.as_deref().unwrap_or("claude");
         args.push("--provider".to_string());
         args.push(provider.to_string());
 
@@ -538,6 +539,133 @@ impl JcodeWorker {
         Ok(())
     }
 
+    pub async fn probe_jcode_version(&self) -> Option<String> {
+        match Command::new(&self.jcode_bin)
+            .arg("--version")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .await
+        {
+            Ok(output) if output.status.success() => {
+                let raw = String::from_utf8_lossy(&output.stdout);
+                let version = raw
+                    .split_whitespace()
+                    .find(|s| s.chars().next().is_some_and(|c| c.is_ascii_digit()))
+                    .map(|s| s.trim().to_string());
+                debug!(version = ?version, "probed jcode version");
+                version
+            }
+            Ok(output) => {
+                warn!(
+                    exit_code = ?output.status.code(),
+                    "jcode --version returned non-zero"
+                );
+                None
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to run jcode --version");
+                None
+            }
+        }
+    }
+
+    pub async fn probe_jcode_auth_healthy(&self) -> bool {
+        match Command::new(&self.jcode_bin)
+            .args(["auth", "status"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .await
+        {
+            Ok(output) => {
+                let healthy = output.status.success();
+                debug!(healthy = healthy, "probed jcode auth status");
+                healthy
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to run jcode auth status");
+                false
+            }
+        }
+    }
+
+    pub fn build_jcode_input_schema() -> InputSchema {
+        let mut properties = HashMap::new();
+        properties.insert(
+            "prompt".into(),
+            SchemaProperty {
+                r#type: "string".into(),
+                description: "Task prompt".into(),
+            },
+        );
+        properties.insert(
+            "cwd".into(),
+            SchemaProperty {
+                r#type: "string".into(),
+                description: "Absolute working directory path (no .. components)".into(),
+            },
+        );
+        properties.insert(
+            "model".into(),
+            SchemaProperty {
+                r#type: "string".into(),
+                description: "Model override (e.g. claude-opus-4-6)".into(),
+            },
+        );
+        properties.insert(
+            "resume_session".into(),
+            SchemaProperty {
+                r#type: "string".into(),
+                description: "Session UUID to resume a prior jcode session".into(),
+            },
+        );
+        properties.insert(
+            "quiet".into(),
+            SchemaProperty {
+                r#type: "boolean".into(),
+                description: "Suppress status output".into(),
+            },
+        );
+
+        InputSchema {
+            r#type: "object".into(),
+            properties,
+            required: vec!["prompt".into()],
+        }
+    }
+
+    pub async fn build_capability_advertisement(&self) -> CapabilityAdvertisement {
+        let worker_id = self.worker_client.worker_id().to_string();
+        let host = hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "unknown".into());
+
+        let version = self.probe_jcode_version().await;
+        let healthy = self.probe_jcode_auth_healthy().await;
+
+        let tool = WorkerTool {
+            name: "jcode".into(),
+            version,
+            description: "Rust coding agent (Claude Max OAuth)".into(),
+            healthy,
+            input_schema: Self::build_jcode_input_schema(),
+        };
+
+        CapabilityAdvertisement {
+            worker_id,
+            host,
+            tools: vec![tool],
+        }
+    }
+
+    pub async fn publish_capability_advertisement(&self, room_id: &RoomId) -> Result<()> {
+        let ad = self.build_capability_advertisement().await;
+        self.worker_client
+            .publish_capability_advertisement(&ad, room_id)
+            .await
+    }
+
     fn tail_lines(all_lines: &[String]) -> String {
         all_lines
             .iter()
@@ -782,5 +910,42 @@ mod tests {
                 provider
             );
         }
+    }
+
+    #[test]
+    fn test_build_jcode_input_schema_has_all_fields() {
+        let schema = JcodeWorker::build_jcode_input_schema();
+        assert_eq!(schema.r#type, "object");
+        assert_eq!(schema.required, vec!["prompt"]);
+
+        let expected_props = ["prompt", "cwd", "model", "resume_session", "quiet"];
+        for prop in &expected_props {
+            assert!(
+                schema.properties.contains_key(*prop),
+                "schema should contain property '{prop}'"
+            );
+        }
+        assert_eq!(
+            schema.properties.len(),
+            expected_props.len(),
+            "schema should have exactly {} properties",
+            expected_props.len()
+        );
+
+        assert_eq!(schema.properties["prompt"].r#type, "string");
+        assert_eq!(schema.properties["cwd"].r#type, "string");
+        assert_eq!(schema.properties["model"].r#type, "string");
+        assert_eq!(schema.properties["resume_session"].r#type, "string");
+        assert_eq!(schema.properties["quiet"].r#type, "boolean");
+    }
+
+    #[test]
+    fn test_build_jcode_input_schema_round_trips_json() {
+        let schema = JcodeWorker::build_jcode_input_schema();
+        let json = serde_json::to_string(&schema).unwrap();
+        let parsed: InputSchema = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.r#type, "object");
+        assert_eq!(parsed.required, vec!["prompt"]);
+        assert_eq!(parsed.properties.len(), 5);
     }
 }
