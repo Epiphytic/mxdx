@@ -1268,3 +1268,151 @@ async fn capability_advertisement_publish_and_read_back() {
 
     hs.stop().await;
 }
+
+#[tokio::test]
+async fn test_process_worker_claude_output() {
+    let mut hs = TuwunelInstance::start().await.unwrap();
+    let base_url = format!("http://127.0.0.1:{}", hs.port);
+
+    let sender_mc =
+        MatrixClient::register_and_connect(&base_url, "sender-claude", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
+    let worker_mc =
+        MatrixClient::register_and_connect(&base_url, "worker-claude", "pass", "mxdx-test-token")
+            .await
+            .unwrap();
+
+    let shared_room_id = sender_mc
+        .create_named_unencrypted_room("claude-output-room", "org.mxdx.fabric.task")
+        .await
+        .unwrap();
+
+    sender_mc
+        .invite_user(&shared_room_id, worker_mc.user_id())
+        .await
+        .unwrap();
+    worker_mc.sync_once().await.unwrap();
+    worker_mc.join_room(&shared_room_id).await.unwrap();
+
+    let power_levels = serde_json::json!({
+        "users": {
+            sender_mc.user_id().to_string(): 100,
+            worker_mc.user_id().to_string(): 50
+        },
+        "users_default": 0,
+        "events": {},
+        "events_default": 0,
+        "state_default": 0,
+        "ban": 50,
+        "kick": 50,
+        "invite": 50,
+        "redact": 50
+    });
+    sender_mc
+        .send_state_event(&shared_room_id, "m.room.power_levels", "", power_levels)
+        .await
+        .unwrap();
+
+    sender_mc.sync_once().await.unwrap();
+    worker_mc.sync_once().await.unwrap();
+
+    let sender_mc = Arc::new(sender_mc);
+    let worker_mc = Arc::new(worker_mc);
+
+    let sender_id = format!("@sender-claude:{}", hs.server_name);
+    let sender = SenderClient::new(sender_mc.clone(), sender_id.clone());
+
+    let task = TaskEvent {
+        uuid: "claude-task-001".to_string(),
+        sender_id: sender_id.clone(),
+        required_capabilities: vec![],
+        estimated_cycles: None,
+        timeout_seconds: 120,
+        heartbeat_interval_seconds: 30,
+        on_timeout: FailurePolicy::Escalate,
+        on_heartbeat_miss: FailurePolicy::Escalate,
+        routing_mode: RoutingMode::Direct,
+        p2p_stream: false,
+        payload: serde_json::json!({
+            "bin": "claude",
+            "args": [
+                "--print",
+                "--permission-mode", "bypassPermissions",
+                "--output-format", "stream-json",
+                "--verbose",
+                "what is 2+2? Reply with just the number."
+            ],
+            "env": {},
+            "cwd": "/tmp"
+        }),
+        plan: None,
+    };
+
+    let posted_uuid = sender
+        .post_task(task.clone(), &shared_room_id)
+        .await
+        .unwrap();
+    assert_eq!(posted_uuid, "claude-task-001");
+
+    worker_mc.sync_once().await.unwrap();
+    let _events = worker_mc
+        .sync_and_collect_events(&shared_room_id, Duration::from_secs(5))
+        .await
+        .unwrap();
+
+    let worker = WorkerClient::new(
+        worker_mc.clone(),
+        format!("@worker-claude:{}", hs.server_name),
+        hs.server_name.clone(),
+    );
+
+    let process_worker = ProcessWorker::new(worker);
+
+    let worker_task = task.clone();
+    let worker_room_id = shared_room_id.clone();
+    let worker_handle = tokio::spawn(async move {
+        process_worker
+            .run_task(worker_task, &worker_room_id, String::new())
+            .await
+            .unwrap();
+    });
+
+    // Wait for the result with a 120s timeout
+    let result = tokio::time::timeout(
+        Duration::from_secs(120),
+        sender.wait_for_result("claude-task-001", &shared_room_id, Duration::from_secs(120)),
+    )
+    .await
+    .expect("timed out waiting for claude task result")
+    .expect("error waiting for result");
+
+    assert!(
+        result.is_some(),
+        "sender should receive a result for the claude task"
+    );
+    let result = result.unwrap();
+
+    assert_eq!(
+        result.status,
+        TaskStatus::Success,
+        "claude task should succeed, got status: {:?}, error: {:?}",
+        result.status,
+        result.error
+    );
+
+    // The output should contain stream-json lines including a {"type":"result" line
+    let output_str = result
+        .output
+        .as_ref()
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    assert!(
+        output_str.contains(r#""type":"result"#),
+        "output should contain a stream-json result line, got: {}",
+        &output_str[..output_str.len().min(500)]
+    );
+
+    worker_handle.await.unwrap();
+    hs.stop().await;
+}
