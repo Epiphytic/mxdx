@@ -8,8 +8,8 @@
 Currently the mxdx-fabric worker advertises capabilities as a simple CSV string (`rust,linux,bash`) when claiming tasks. This has several problems:
 
 1. **No schema visibility.** There is no way for a client (human or LLM) to know what payload fields a worker accepts, what arguments a tool supports, or what version of a tool is running.
-2. **No health signal.** A worker may have an expired OAuth token or missing model access. Clients discover this only after a task fails.
-3. **Global capability tags.** Capability strings are not host-scoped. Different hosts may run different versions of `jcode` with different flags, hardware, or OAuth tokens. There is no way to target a specific host's worker.
+2. **No health signal.** A worker may have a missing binary or misconfigured environment. Clients discover this only after a task fails.
+3. **Global capability tags.** Capability strings are not host-scoped. Different hosts may run different binaries with different flags, hardware, or configurations. There is no way to target a specific host's worker.
 
 ## Decision
 
@@ -27,30 +27,31 @@ content:
   worker_id: "@bel-worker:ca1-beta.mxdx.dev"
   host: "belthanior"                         # hostname
   tools:
-    - name: "jcode"
-      version: "0.7.2"
-      description: "Rust coding agent (Claude Max OAuth)"
-      healthy: true                           # false if e.g. OAuth token expired
+    - name: "process"                        # generic process executor
+      version: "0.1.0"                       # ProcessWorker version
+      description: "Generic process executor — runs any binary specified by the client"
+      healthy: true                           # false if e.g. binary not found on PATH
       inputSchema:                            # MCP-compatible JSON Schema
         type: object
         properties:
-          prompt:
+          bin:
             type: string
-            description: "Task prompt"
+            description: "Binary to execute (e.g. jcode, cargo, bash)"
+          args:
+            type: array
+            items:
+              type: string
+            description: "Command-line arguments passed to the binary"
+          env:
+            type: object
+            additionalProperties:
+              type: string
+            description: "Environment variables to set for the process"
           cwd:
             type: string
             description: "Absolute working directory path (no .. components)"
-          model:
-            type: string
-            description: "Model override (e.g. claude-opus-4-6)"
-          resume_session:
-            type: string
-            description: "Session UUID to resume a prior jcode session"
-          quiet:
-            type: boolean
-            description: "Suppress status output"
         required:
-          - prompt
+          - bin
 ```
 
 ### New CLI Subcommand
@@ -71,8 +72,8 @@ content:
 
 ### Why Host-Scoped (Not Global Capability Tags)
 
-- Different hosts may run different versions of `jcode` with different flags.
-- Different hosts have different OAuth tokens, available models, and hardware.
+- Different hosts may have different binaries available with different versions and flags.
+- Different hosts have different configurations, available tools, and hardware.
 - Host-specific targeting by worker Matrix ID is already possible — this makes it explicit.
 - The coordinator uses `state_key` to scope per-worker; it can route to a specific worker ID or to any worker advertising a matching tool name.
 
@@ -82,7 +83,7 @@ content:
 - Clients (human and LLM) can discover exact tool schemas before constructing task payloads
 - Health status surfaces broken workers before tasks are dispatched
 - Per-host capability scoping enables targeted task routing
-- Future workers (non-jcode) follow the same pattern — capability advertisement becomes part of the worker contract
+- Any binary can be executed through the same generic worker — capability advertisement becomes part of the worker contract
 
 **Negative:**
 - Workers gain startup logic to publish the capability state event and must re-publish on changes
@@ -90,7 +91,7 @@ content:
 - Schema maintenance is now the worker's responsibility — stale schemas are possible if a worker crashes without clearing state
 
 **Migration:**
-- `jcode-fabric` skill documentation updated to reference `fabric capabilities` for discovering current arguments instead of hardcoding payload fields
+- Skill documentation updated to reference `fabric capabilities` for discovering current input schema instead of hardcoding payload fields
 - Existing CSV-based capability tags can coexist during transition; the state event is additive
 
 ## Related

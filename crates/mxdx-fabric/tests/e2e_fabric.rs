@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mxdx_fabric::coordinator::CoordinatorBot;
-use mxdx_fabric::jcode_worker::JcodeWorker;
+use mxdx_fabric::process_worker::ProcessWorker;
 use mxdx_fabric::sender::SenderClient;
 use mxdx_fabric::worker::{WorkerClient, EVENT_CAPABILITY};
 use mxdx_fabric::{
@@ -786,7 +786,6 @@ async fn test_failure_policy_respawn() {
 
 #[tokio::test]
 async fn test_p2p_stream_unix_socket() {
-    use std::path::PathBuf;
     use tokio::io::AsyncReadExt;
 
     let mut hs = TuwunelInstance::start().await.unwrap();
@@ -885,12 +884,19 @@ async fn test_p2p_stream_unix_socket() {
         hs.server_name.clone(),
     );
 
-    let jcode_worker = JcodeWorker::new(worker, Some(PathBuf::from(helper_script)));
+    let process_worker = ProcessWorker::new(worker);
+
+    // Create a task with the generic {bin, args, env, cwd} payload format
+    let mut worker_task = task.clone();
+    worker_task.payload = serde_json::json!({
+        "bin": helper_script,
+        "args": [],
+        "env": {},
+    });
 
     let worker_room_id = shared_room_id.clone();
-    let worker_task = task.clone();
     let worker_handle = tokio::spawn(async move {
-        jcode_worker
+        process_worker
             .run_task(worker_task, &worker_room_id, String::new())
             .await
             .unwrap();

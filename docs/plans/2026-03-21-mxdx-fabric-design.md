@@ -43,7 +43,7 @@ mxdx already has the right primitives. This is the coordination layer on top.
 
 **Sender** — an LLM agent (e.g., Bel/OpenClaw) that posts task events to Matrix. Doesn't need to know which worker will handle it or where it's running.
 
-**Worker** — a process that can execute tasks (jcode, bash, girt pipeline, etc.). Advertises its capabilities as a Matrix state event. Watches capability rooms for matching tasks, claims them, executes, reports back.
+**Worker** — a generic process executor that can run any binary specified by the client (jcode, cargo, bash, etc.). Advertises its capabilities as a Matrix state event. Watches capability rooms for matching tasks, claims them, spawns the requested process, reports back.
 
 **Coordinator** — a persistent mxdx bot that watches all task rooms. Handles routing (inviting tasks to the right room), monitors heartbeats, enforces failure policies. Does **not** relay data — only manages lifecycle.
 
@@ -312,21 +312,27 @@ Mark task as failed in room state, notify sender, done.
 
 ---
 
-## Integration with jcode
+## Integration with process execution
 
-jcode doesn't speak Matrix natively. The worker adapter wraps it:
+The worker is a generic process executor (`ProcessWorker`). It does not know or care what binary it runs. The client (e.g., OpenClaw) specifies the binary, arguments, environment variables, and working directory in the task payload. The worker just spawns the process and reports results.
 
 ```rust
-// worker.rs — jcode adapter
+// process_worker.rs — generic process executor
 async fn execute_task(task: &TaskEvent, matrix_room: &RoomId) {
     // post claim
     claim_task(task.uuid, matrix_room).await?;
 
-    // spawn jcode
-    let mut child = Command::new("jcode")
-        .args(["--provider", "claude", "--ndjson", "run", &task.payload["prompt"]])
-        .stdout(Stdio::piped())
-        .spawn()?;
+    // extract process payload — all fields specified by the client
+    let bin = task.payload["bin"].as_str().unwrap();       // e.g. "jcode", "cargo", "bash"
+    let args: Vec<&str> = /* task.payload["args"] */;      // e.g. ["--provider", "claude", "run"]
+    let env: HashMap<&str, &str> = /* task.payload["env"] */; // e.g. {"CLAUDE_MODEL": "opus"}
+    let cwd = task.payload["cwd"].as_str();                // e.g. "/home/user/project"
+
+    // spawn the requested process
+    let mut cmd = Command::new(bin);
+    cmd.args(&args).envs(&env).stdout(Stdio::piped());
+    if let Some(dir) = cwd { cmd.current_dir(dir); }
+    let mut child = cmd.spawn()?;
 
     // if P2P requested: negotiate socket, stream stdout over it
     // else: batch stdout and post as HeartbeatEvents to Matrix
@@ -343,6 +349,11 @@ async fn execute_task(task: &TaskEvent, matrix_room: &RoomId) {
     post_result(task.uuid, status, matrix_room).await?;
 }
 ```
+
+Example client payloads:
+- **jcode:** `{"bin": "jcode", "args": ["--provider", "claude", "--ndjson", "run", "fix the bug"], "env": {}, "cwd": "/home/user/project"}`
+- **cargo:** `{"bin": "cargo", "args": ["test", "-p", "mxdx-fabric"], "env": {}, "cwd": "/home/user/mxdx"}`
+- **bash:** `{"bin": "bash", "args": ["-c", "echo hello"], "env": {"FOO": "bar"}, "cwd": "/tmp"}`
 
 The `OutputBatcher` already exists in `mxdx-launcher/terminal/batcher.rs` — reuse it.
 
@@ -370,7 +381,7 @@ Deferred to v2. Workers self-manage: they advertise availability and simply don'
 
 ### Sender clients
 - **OpenClaw/Bel**: integration built on the existing `mxdx-core-wasm` client. OpenClaw gains a skill/plugin that wraps task posting and result waiting.
-- **jcode workers**: native Rust integration using `mxdx-matrix` directly. jcode adapter becomes a proper `mxdx-fabric` worker crate.
+- **ProcessWorker**: native Rust integration using `mxdx-matrix` directly. Generic process executor that accepts `{bin, args, env, cwd}` payloads from any client.
 
 ### Cross-host transport
 No new transport mechanisms. Cross-host P2P uses the existing mxdx P2P session infrastructure unchanged (WebRTC data channels, `m.call.*` signaling, TURN provisioning from the homeserver). The launcher's workflow is identical — it just joins more rooms. The fabric is a coordination layer, not a transport layer.
@@ -384,11 +395,11 @@ No new transport mechanisms. Cross-host P2P uses the existing mxdx P2P session i
 - Coordinator loop: routing + watchlist (no failure policy yet)
 - Basic integration test: sender posts task, worker claims, coordinator routes
 
-### Phase 2 — Worker client + jcode adapter (1-2 days)
+### Phase 2 — Worker client + ProcessWorker (1-2 days)
 - Worker capability advertisement
 - Claim race + back-off
-- jcode adapter: wrap CLI, post heartbeats, post result
-- Integration test: full task lifecycle with real jcode
+- ProcessWorker: generic process executor with {bin, args, env, cwd} payload, post heartbeats, post result
+- Integration test: full task lifecycle with a real process (e.g. jcode)
 
 ### Phase 3 — Failure policies (1 day)
 - `Escalate`, `Respawn`, `RespawnWithContext`, `Abandon`
@@ -416,7 +427,7 @@ The fabric does not replace or modify existing mxdx features. It adds a coordina
 |----------|-----------|
 | `mxdx-matrix` MatrixClient | Used directly by coordinator and workers |
 | `mxdx-launcher` TerminalSession | Workers can use it for PTY-based tasks |
-| `mxdx-launcher` OutputBatcher | Reused in jcode adapter |
+| `mxdx-launcher` OutputBatcher | Reused in ProcessWorker for output batching |
 | `mxdx-secrets` SecretCoordinator | Workers request credentials via existing double-encryption protocol |
 | P2P transport | Workers negotiate P2P for streaming tasks |
 | `CommandEvent` | Existing mechanism; fabric adds higher-level `TaskEvent` on top |

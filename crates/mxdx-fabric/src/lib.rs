@@ -2,7 +2,7 @@ pub mod capability_index;
 pub mod claim;
 pub mod coordinator;
 pub mod failure;
-pub mod jcode_worker;
+pub mod process_worker;
 pub mod sender;
 pub mod worker;
 

@@ -52,11 +52,11 @@ Commit: included in `feat(fabric): failure policy enforcement`
 
 ## Phase 4 — P2P Stream Integration
 
-### Task 4.1 — Unix socket stream in JcodeWorker
+### Task 4.1 — Unix socket stream in ProcessWorker
 
 For tasks where `task.p2p_stream == true`:
 
-In `jcode_worker.rs`:
+In `process_worker.rs`:
 - When `task.p2p_stream && task.heartbeat_interval_seconds < 5`:
   - Create a Unix domain socket at `/tmp/mxdx-fabric-{task_uuid}.sock`
   - Post socket path to the task room as a state event (event_type: `org.mxdx.fabric.stream_offer`, state_key: `task/{uuid}/stream`, content: `{socket_path, worker_id}`)
@@ -156,5 +156,5 @@ Add `test_fabric_cli_post` to e2e_fabric.rs:
 - Start TuwunelInstance, register coordinator + worker
 - Start coordinator in background task
 - Run `fabric post ...` as a subprocess with `--homeserver` pointing to TuwunelInstance URL
-- Worker claims and completes task (using JcodeWorker with mock jcode_bin)
+- Worker claims and completes task (using ProcessWorker with mock binary)
 - Assert: fabric CLI subprocess exits 0, stdout contains valid result JSON

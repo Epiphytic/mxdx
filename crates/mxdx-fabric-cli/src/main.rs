@@ -1,10 +1,12 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use chrono::{NaiveDate, Utc};
 use clap::{Parser, Subcommand};
-use mxdx_fabric::{coordinator::CoordinatorBot, jcode_worker::JcodeWorker, worker::WorkerClient};
+use mxdx_fabric::{coordinator::CoordinatorBot, process_worker::ProcessWorker, worker::WorkerClient};
 use mxdx_matrix::MatrixClient;
 use mxdx_types::events::capability::CapabilityAdvertisement;
 use serde::{Deserialize, Serialize};
@@ -65,6 +67,14 @@ enum Commands {
         #[arg(long)]
         room: Option<String>,
     },
+    /// Show full logs/output for a task by UUID.
+    Logs {
+        #[arg(value_name = "TASK_UUID")]
+        task_uuid: String,
+
+        #[arg(long)]
+        room: Option<String>,
+    },
     /// Run the coordinator daemon: routes tasks from the coordinator room to worker rooms.
     Coordinator {
         /// User ID for the coordinator account (e.g. @bel-coordinator:example.com)
@@ -81,11 +91,41 @@ enum Commands {
         #[arg(value_name = "WORKER_ID")]
         worker_id: Option<String>,
     },
-    /// Run the worker daemon: claims and executes tasks via jcode.
+    /// Show past task history from the coordinator room timeline.
+    History {
+        /// Max number of tasks to show (default: 20)
+        #[arg(long, default_value = "20")]
+        limit: usize,
+
+        /// Filter by status: "done", "failed", "success", "timeout", or "any" (default: "any")
+        #[arg(long, default_value = "any")]
+        status: String,
+
+        /// Show tasks from a specific date (YYYY-MM-DD, UTC)
+        #[arg(long)]
+        date: Option<String>,
+
+        /// Relative time filter: "1h", "1d", "1w", "1m" (last hour/day/week/month)
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Start of date range (YYYY-MM-DD, inclusive)
+        #[arg(long)]
+        from_date: Option<String>,
+
+        /// End of date range (YYYY-MM-DD, inclusive)
+        #[arg(long)]
+        to_date: Option<String>,
+    },
+    /// Run the worker daemon: claims and executes tasks as a generic process executor.
     Worker {
         /// Capabilities this worker advertises (CSV)
         #[arg(long, default_value = "rust,linux,bash")]
         capabilities: String,
+
+        /// Binaries available on this worker host (CSV, for capability advertisement)
+        #[arg(long, default_value = "jcode")]
+        available_bins: String,
 
         /// Worker user ID (e.g. @bel-worker:example.com)
         #[arg(long, env = "FABRIC_WORKER_USER_ID")]
@@ -187,6 +227,11 @@ async fn main() -> Result<()> {
                 .or_else(|_| resolve(&None, &config.coordinator_room, "room"))?;
             cmd_watch(&homeserver, &token, &room_id, &task_uuid).await
         }
+        Commands::Logs { task_uuid, room } => {
+            let room_id = resolve(&room, &cli.coordinator_room, "room")
+                .or_else(|_| resolve(&None, &config.coordinator_room, "room"))?;
+            cmd_logs(&homeserver, &token, &room_id, &task_uuid).await
+        }
         Commands::Coordinator {
             coordinator_user_id,
             coordinator_device_id,
@@ -209,8 +254,35 @@ async fn main() -> Result<()> {
             )?;
             cmd_capabilities(&homeserver, &token, &coordinator_room, worker_id.as_deref()).await
         }
+        Commands::History {
+            limit,
+            status,
+            date,
+            since,
+            from_date,
+            to_date,
+        } => {
+            let coordinator_room = resolve(
+                &cli.coordinator_room,
+                &config.coordinator_room,
+                "coordinator-room",
+            )?;
+            cmd_history(
+                &homeserver,
+                &token,
+                &coordinator_room,
+                limit,
+                &status,
+                date.as_deref(),
+                since.as_deref(),
+                from_date.as_deref(),
+                to_date.as_deref(),
+            )
+            .await
+        }
         Commands::Worker {
             capabilities,
+            available_bins,
             worker_user_id,
             worker_device_id,
         } => {
@@ -222,11 +294,16 @@ async fn main() -> Result<()> {
             let user_id =
                 worker_user_id.unwrap_or_else(|| "@bel-worker:ca1-beta.mxdx.dev".to_string());
             let device_id = worker_device_id.unwrap_or_else(|| "vDLnPCG2CQ".to_string());
+            let bins: Vec<String> = available_bins
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
             cmd_worker(
                 &homeserver,
                 &token,
                 &coordinator_room,
                 &capabilities,
+                &bins,
                 &user_id,
                 &device_id,
             )
@@ -383,6 +460,7 @@ async fn cmd_worker(
     token: &str,
     coordinator_room: &str,
     capabilities_csv: &str,
+    available_bins: &[String],
     user_id: &str,
     device_id: &str,
 ) -> Result<()> {
@@ -392,8 +470,8 @@ async fn cmd_worker(
         .collect();
 
     println!(
-        "Worker running on {homeserver}, room {coordinator_room}, capabilities: {:?}",
-        caps
+        "Worker running on {homeserver}, room {coordinator_room}, capabilities: {:?}, bins: {:?}",
+        caps, available_bins
     );
 
     let matrix_client = MatrixClient::connect_with_token(homeserver, token, user_id, device_id)
@@ -415,11 +493,12 @@ async fn cmd_worker(
         .await
         .context("failed to advertise capabilities")?;
 
-    let jcode_worker = JcodeWorker::new(worker_client, None);
+    let process_worker = ProcessWorker::new(worker_client);
 
     // Publish structured capability advertisement (ADR-0005)
-    if let Err(e) = jcode_worker
-        .publish_capability_advertisement(&room_id)
+    let bin_refs: Vec<&str> = available_bins.iter().map(|s| s.as_str()).collect();
+    if let Err(e) = process_worker
+        .publish_capability_advertisement(&bin_refs, &room_id)
         .await
     {
         eprintln!("Warning: failed to publish capability advertisement: {e:#}");
@@ -427,18 +506,19 @@ async fn cmd_worker(
 
     // Spawn periodic capability advertisement refresh (every 60s)
     let refresh_room_id = room_id.clone();
-    let refresh_jcode_bin: std::path::PathBuf = "jcode".into();
     let refresh_worker_id = user_id.to_string();
     let refresh_homeserver = homeserver.to_string();
-    let refresh_matrix = jcode_worker.worker_client().matrix_client_arc();
+    let refresh_bins: Vec<String> = available_bins.to_vec();
+    let refresh_matrix = process_worker.worker_client().matrix_client_arc();
     tokio::spawn(async move {
         let refresh_worker_client =
             WorkerClient::new(refresh_matrix, refresh_worker_id, refresh_homeserver);
-        let refresh_worker = JcodeWorker::new(refresh_worker_client, Some(refresh_jcode_bin));
+        let refresh_worker = ProcessWorker::new(refresh_worker_client);
+        let bin_refs: Vec<&str> = refresh_bins.iter().map(|s| s.as_str()).collect();
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
             if let Err(e) = refresh_worker
-                .publish_capability_advertisement(&refresh_room_id)
+                .publish_capability_advertisement(&bin_refs, &refresh_room_id)
                 .await
             {
                 eprintln!("Warning: periodic capability refresh failed: {e:#}");
@@ -448,14 +528,14 @@ async fn cmd_worker(
 
     // Watch coordinator room for tasks
     loop {
-        match jcode_worker
+        match process_worker
             .worker_client()
             .watch_and_claim(&room_id, &caps)
             .await
         {
             Ok(Some((task, task_event_id))) => {
                 println!("Claimed task {}", task.uuid);
-                if let Err(e) = jcode_worker.run_task(task, &room_id, task_event_id).await {
+                if let Err(e) = process_worker.run_task(task, &room_id, task_event_id).await {
                     eprintln!("Task error: {e:#}");
                 }
             }
@@ -852,6 +932,445 @@ async fn cmd_watch(homeserver: &str, token: &str, room_id: &str, task_uuid: &str
     }
 }
 
+async fn cmd_logs(homeserver: &str, token: &str, room_id: &str, task_uuid: &str) -> Result<()> {
+    let http = reqwest::Client::new();
+
+    // Page backwards through the timeline, collecting up to 500 events
+    let mut all_events: Vec<serde_json::Value> = Vec::new();
+    let mut pagination_token: Option<String> = None;
+    let max_events: usize = 500;
+
+    loop {
+        let (events, next_token) = matrix_get_messages(
+            &http,
+            homeserver,
+            token,
+            room_id,
+            100,
+            pagination_token.as_deref(),
+        )
+        .await?;
+
+        if events.is_empty() {
+            break;
+        }
+
+        all_events.extend(events);
+
+        if all_events.len() >= max_events {
+            break;
+        }
+
+        match next_token {
+            Some(t) => pagination_token = Some(t),
+            None => break,
+        }
+    }
+
+    // Heartbeats (full event objects, so we can read origin_server_ts)
+    let mut heartbeats = find_heartbeat_events(&all_events, task_uuid);
+    // Sort chronologically (oldest first) by origin_server_ts
+    heartbeats.sort_by_key(|hb| {
+        hb.get("origin_server_ts")
+            .and_then(|t| t.as_i64())
+            .unwrap_or(0)
+    });
+
+    if !heartbeats.is_empty() {
+        println!("=== Heartbeats ===");
+        for hb in &heartbeats {
+            let ts_ms = hb
+                .get("origin_server_ts")
+                .and_then(|t| t.as_i64())
+                .unwrap_or(0);
+            let dt = chrono::DateTime::from_timestamp_millis(ts_ms)
+                .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let progress = hb
+                .get("content")
+                .and_then(|c| c.get("progress"))
+                .and_then(|p| p.as_str())
+                .unwrap_or("(no progress)");
+            println!("[{dt}] {progress}");
+        }
+        println!();
+    }
+
+    // Result
+    let result = find_result_events(&all_events, task_uuid);
+
+    match result {
+        Some(content) => {
+            println!("=== Result ===");
+            if let Some(output) = content.get("output") {
+                if let Some(s) = output.as_str() {
+                    println!("{s}");
+                } else {
+                    println!("{}", serde_json::to_string_pretty(output)?);
+                }
+            } else if let Some(result_val) = content.get("result") {
+                if let Some(s) = result_val.as_str() {
+                    println!("{s}");
+                } else {
+                    println!("{}", serde_json::to_string_pretty(result_val)?);
+                }
+            } else {
+                println!("{}", serde_json::to_string_pretty(&content)?);
+            }
+        }
+        None => {
+            println!("Task still running or no result found.");
+        }
+    }
+
+    Ok(())
+}
+
+/// Parsed info about a task event for history display.
+#[derive(Debug, Clone)]
+struct HistoryTask {
+    timestamp_ms: i64,
+    uuid: String,
+    capabilities: Vec<String>,
+    prompt: String,
+    status: String,
+    duration_seconds: Option<u64>,
+}
+
+/// Format a single history task as one line of output.
+fn format_history_line(task: &HistoryTask) -> String {
+    let dt = chrono::DateTime::from_timestamp_millis(task.timestamp_ms)
+        .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let short_uuid = if task.uuid.len() >= 7 {
+        &task.uuid[..7]
+    } else {
+        &task.uuid
+    };
+
+    let caps = if task.capabilities.is_empty() {
+        "-".to_string()
+    } else {
+        task.capabilities.join(",")
+    };
+
+    let prompt_display = if task.prompt.len() > 60 {
+        format!("\"{}...\"", &task.prompt[..57])
+    } else {
+        format!("\"{}\"", task.prompt)
+    };
+
+    let duration = task
+        .duration_seconds
+        .map(|d| format!("  ({}s)", d))
+        .unwrap_or_default();
+
+    format!(
+        "{}  {}  {}  {}  {}{}",
+        dt, task.status, short_uuid, caps, prompt_display, duration,
+    )
+}
+
+/// Parse a relative time period like "1h", "1d", "1w", "1m" into a duration.
+fn parse_since_period(period: &str) -> Result<chrono::Duration> {
+    let period = period.trim();
+    if period.len() < 2 {
+        bail!("Invalid --since value: {period}. Use format like 1h, 1d, 1w, 1m");
+    }
+    let (num_str, unit) = period.split_at(period.len() - 1);
+    let num: i64 = num_str
+        .parse()
+        .with_context(|| format!("Invalid number in --since: {num_str}"))?;
+
+    match unit {
+        "h" => Ok(chrono::Duration::hours(num)),
+        "d" => Ok(chrono::Duration::days(num)),
+        "w" => Ok(chrono::Duration::weeks(num)),
+        "m" => Ok(chrono::Duration::days(num * 30)),
+        _ => bail!("Invalid --since unit: {unit}. Use h, d, w, or m"),
+    }
+}
+
+/// Compute the time window (start_ms, end_ms) for filtering based on CLI options.
+fn compute_time_window(
+    date: Option<&str>,
+    since: Option<&str>,
+    from_date: Option<&str>,
+    to_date: Option<&str>,
+) -> Result<(Option<i64>, Option<i64>)> {
+    if let Some(date_str) = date {
+        let d = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+            .with_context(|| format!("Invalid --date: {date_str}. Use YYYY-MM-DD"))?;
+        let start = d
+            .and_hms_opt(0, 0, 0)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis();
+        let end = d
+            .and_hms_opt(23, 59, 59)
+            .unwrap()
+            .and_utc()
+            .timestamp_millis()
+            + 999;
+        return Ok((Some(start), Some(end)));
+    }
+
+    if let Some(period) = since {
+        let duration = parse_since_period(period)?;
+        let cutoff = Utc::now() - duration;
+        return Ok((Some(cutoff.timestamp_millis()), None));
+    }
+
+    let start = if let Some(from) = from_date {
+        let d = NaiveDate::parse_from_str(from, "%Y-%m-%d")
+            .with_context(|| format!("Invalid --from-date: {from}. Use YYYY-MM-DD"))?;
+        Some(
+            d.and_hms_opt(0, 0, 0)
+                .unwrap()
+                .and_utc()
+                .timestamp_millis(),
+        )
+    } else {
+        None
+    };
+
+    let end = if let Some(to) = to_date {
+        let d = NaiveDate::parse_from_str(to, "%Y-%m-%d")
+            .with_context(|| format!("Invalid --to-date: {to}. Use YYYY-MM-DD"))?;
+        Some(
+            d.and_hms_opt(23, 59, 59)
+                .unwrap()
+                .and_utc()
+                .timestamp_millis()
+                + 999,
+        )
+    } else {
+        None
+    };
+
+    Ok((start, end))
+}
+
+/// Check whether a task status matches the CLI --status filter.
+fn status_matches_filter(task_status: &str, filter: &str) -> bool {
+    match filter {
+        "any" => true,
+        "done" => matches!(
+            task_status,
+            "success" | "failed" | "timeout" | "cancelled"
+        ),
+        "success" => task_status == "success",
+        "failed" => task_status == "failed",
+        "timeout" => task_status == "timeout",
+        _ => task_status == filter,
+    }
+}
+
+/// Extract the prompt/plan text from a task event's content.
+fn extract_prompt(content: &serde_json::Value) -> String {
+    // Try plan field first, then payload.prompt
+    if let Some(plan) = content.get("plan").and_then(|p| p.as_str()) {
+        if !plan.is_empty() {
+            return plan.to_string();
+        }
+    }
+    if let Some(prompt) = content
+        .get("payload")
+        .and_then(|p| p.get("prompt"))
+        .and_then(|p| p.as_str())
+    {
+        return prompt.to_string();
+    }
+    "(no prompt)".to_string()
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn cmd_history(
+    homeserver: &str,
+    token: &str,
+    coordinator_room: &str,
+    limit: usize,
+    status_filter: &str,
+    date: Option<&str>,
+    since: Option<&str>,
+    from_date: Option<&str>,
+    to_date: Option<&str>,
+) -> Result<()> {
+    let http = reqwest::Client::new();
+    let (time_start, time_end) = compute_time_window(date, since, from_date, to_date)?;
+
+    // Collect task events and result events by paging backwards through the timeline
+    let mut task_events: Vec<serde_json::Value> = Vec::new();
+    let mut result_map: HashMap<String, serde_json::Value> = HashMap::new();
+    let mut pagination_token: Option<String> = None;
+    let mut total_events_seen: usize = 0;
+    let max_events: usize = 500;
+
+    loop {
+        let (events, next_token) = matrix_get_messages(
+            &http,
+            homeserver,
+            token,
+            coordinator_room,
+            100,
+            pagination_token.as_deref(),
+        )
+        .await?;
+
+        if events.is_empty() {
+            break;
+        }
+
+        total_events_seen += events.len();
+
+        for event in &events {
+            let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+            match event_type {
+                "org.mxdx.fabric.task" => {
+                    task_events.push(event.clone());
+                }
+                "org.mxdx.fabric.result" => {
+                    if let Some(content) = event.get("content") {
+                        if let Some(task_uuid) =
+                            content.get("task_uuid").and_then(|u| u.as_str())
+                        {
+                            // Keep the first result we see (most recent, since we page backwards)
+                            result_map
+                                .entry(task_uuid.to_string())
+                                .or_insert_with(|| event.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Check if we should stop paging
+        if total_events_seen >= max_events {
+            break;
+        }
+
+        match next_token {
+            Some(t) => pagination_token = Some(t),
+            None => break,
+        }
+    }
+
+    // Build HistoryTask entries
+    let mut history_tasks: Vec<HistoryTask> = Vec::new();
+
+    for event in &task_events {
+        let content = match event.get("content") {
+            Some(c) => c,
+            None => continue,
+        };
+
+        let uuid = content
+            .get("uuid")
+            .and_then(|u| u.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        if uuid.is_empty() {
+            continue;
+        }
+
+        let timestamp_ms = event
+            .get("origin_server_ts")
+            .and_then(|t| t.as_i64())
+            .unwrap_or(0);
+
+        // Apply time window filter
+        if let Some(start) = time_start {
+            if timestamp_ms < start {
+                continue;
+            }
+        }
+        if let Some(end) = time_end {
+            if timestamp_ms > end {
+                continue;
+            }
+        }
+
+        let capabilities: Vec<String> = content
+            .get("required_capabilities")
+            .and_then(|c| c.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let prompt = extract_prompt(content);
+
+        // Look up result
+        let (status, duration_seconds) = if let Some(result_event) = result_map.get(&uuid) {
+            let result_content = result_event.get("content").unwrap_or(content);
+            let status = result_content
+                .get("status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            let duration = result_content
+                .get("duration_seconds")
+                .and_then(|d| d.as_u64());
+
+            // If no explicit duration_seconds, compute from timestamps
+            let duration = duration.or_else(|| {
+                let result_ts = result_event
+                    .get("origin_server_ts")
+                    .and_then(|t| t.as_i64())
+                    .unwrap_or(0);
+                if result_ts > timestamp_ms {
+                    Some(((result_ts - timestamp_ms) / 1000) as u64)
+                } else {
+                    None
+                }
+            });
+
+            (status, duration)
+        } else {
+            ("pending".to_string(), None)
+        };
+
+        // Apply status filter
+        if !status_matches_filter(&status, status_filter) {
+            continue;
+        }
+
+        history_tasks.push(HistoryTask {
+            timestamp_ms,
+            uuid,
+            capabilities,
+            prompt,
+            status,
+            duration_seconds,
+        });
+    }
+
+    // Sort reverse-chronological (most recent first)
+    history_tasks.sort_by(|a, b| b.timestamp_ms.cmp(&a.timestamp_ms));
+
+    // Truncate to limit
+    history_tasks.truncate(limit);
+
+    if history_tasks.is_empty() {
+        println!("No tasks found.");
+        return Ok(());
+    }
+
+    for task in &history_tasks {
+        println!("{}", format_history_line(task));
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -910,6 +1429,167 @@ mod tests {
         let result = merge_payload(base, Some(extra)).unwrap();
         assert_eq!(result["prompt"], "do stuff");
         assert_eq!(result.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn format_history_line_basic() {
+        // 2026-03-24T04:10:19Z = 1774339819000 ms
+        let task = HistoryTask {
+            timestamp_ms: 1774339819000,
+            uuid: "e79b93f1-2345-6789-abcd-ef0123456789".to_string(),
+            capabilities: vec!["rust".to_string(), "linux".to_string()],
+            prompt: "summarize the repo structure".to_string(),
+            status: "success".to_string(),
+            duration_seconds: Some(120),
+        };
+        let line = format_history_line(&task);
+        assert!(line.contains("success"));
+        assert!(line.contains("e79b93f"));
+        assert!(line.contains("rust,linux"));
+        assert!(line.contains("\"summarize the repo structure\""));
+        assert!(line.contains("(120s)"));
+        // Verify timestamp format
+        assert!(line.starts_with("2026-03-24T"));
+    }
+
+    #[test]
+    fn format_history_line_no_duration() {
+        let task = HistoryTask {
+            timestamp_ms: 1774339819000,
+            uuid: "abcdefg-1234".to_string(),
+            capabilities: vec!["rust".to_string()],
+            prompt: "do something".to_string(),
+            status: "pending".to_string(),
+            duration_seconds: None,
+        };
+        let line = format_history_line(&task);
+        assert!(line.contains("pending"));
+        assert!(line.contains("abcdefg"));
+        assert!(!line.contains("("));
+    }
+
+    #[test]
+    fn format_history_line_truncates_long_prompt() {
+        let long_prompt = "a".repeat(80);
+        let task = HistoryTask {
+            timestamp_ms: 1774339819000,
+            uuid: "1234567890".to_string(),
+            capabilities: vec![],
+            prompt: long_prompt,
+            status: "failed".to_string(),
+            duration_seconds: Some(10),
+        };
+        let line = format_history_line(&task);
+        // Should truncate to 57 chars + "..."
+        assert!(line.contains("...\""));
+        // Capabilities should show "-" when empty
+        assert!(line.contains("  -  "));
+    }
+
+    #[test]
+    fn format_history_line_prompt_exactly_60_chars() {
+        let prompt = "b".repeat(60);
+        let task = HistoryTask {
+            timestamp_ms: 1774339819000,
+            uuid: "1234567890".to_string(),
+            capabilities: vec!["linux".to_string()],
+            prompt: prompt.clone(),
+            status: "success".to_string(),
+            duration_seconds: Some(5),
+        };
+        let line = format_history_line(&task);
+        // Exactly 60 chars should NOT be truncated
+        assert!(line.contains(&format!("\"{}\"", prompt)));
+        assert!(!line.contains("..."));
+    }
+
+    #[test]
+    fn status_matches_filter_any() {
+        assert!(status_matches_filter("success", "any"));
+        assert!(status_matches_filter("failed", "any"));
+        assert!(status_matches_filter("pending", "any"));
+        assert!(status_matches_filter("timeout", "any"));
+        assert!(status_matches_filter("cancelled", "any"));
+        assert!(status_matches_filter("unknown", "any"));
+    }
+
+    #[test]
+    fn status_matches_filter_done() {
+        assert!(status_matches_filter("success", "done"));
+        assert!(status_matches_filter("failed", "done"));
+        assert!(status_matches_filter("timeout", "done"));
+        assert!(status_matches_filter("cancelled", "done"));
+        assert!(!status_matches_filter("pending", "done"));
+        assert!(!status_matches_filter("unknown", "done"));
+    }
+
+    #[test]
+    fn status_matches_filter_specific() {
+        assert!(status_matches_filter("success", "success"));
+        assert!(!status_matches_filter("failed", "success"));
+        assert!(status_matches_filter("failed", "failed"));
+        assert!(!status_matches_filter("success", "failed"));
+        assert!(status_matches_filter("timeout", "timeout"));
+    }
+
+    #[test]
+    fn parse_since_period_valid() {
+        let h = parse_since_period("1h").unwrap();
+        assert_eq!(h.num_hours(), 1);
+        let d = parse_since_period("7d").unwrap();
+        assert_eq!(d.num_days(), 7);
+        let w = parse_since_period("2w").unwrap();
+        assert_eq!(w.num_weeks(), 2);
+        let m = parse_since_period("1m").unwrap();
+        assert_eq!(m.num_days(), 30);
+    }
+
+    #[test]
+    fn parse_since_period_invalid() {
+        assert!(parse_since_period("x").is_err());
+        assert!(parse_since_period("1x").is_err());
+        assert!(parse_since_period("").is_err());
+    }
+
+    #[test]
+    fn compute_time_window_date() {
+        let (start, end) = compute_time_window(Some("2026-03-24"), None, None, None).unwrap();
+        assert!(start.is_some());
+        assert!(end.is_some());
+        // start should be midnight UTC
+        let start_dt =
+            chrono::DateTime::from_timestamp_millis(start.unwrap()).unwrap();
+        assert_eq!(start_dt.format("%Y-%m-%d").to_string(), "2026-03-24");
+    }
+
+    #[test]
+    fn compute_time_window_none() {
+        let (start, end) = compute_time_window(None, None, None, None).unwrap();
+        assert!(start.is_none());
+        assert!(end.is_none());
+    }
+
+    #[test]
+    fn extract_prompt_from_plan() {
+        let content = serde_json::json!({
+            "plan": "write some code",
+            "payload": {"prompt": "fallback prompt"}
+        });
+        assert_eq!(extract_prompt(&content), "write some code");
+    }
+
+    #[test]
+    fn extract_prompt_from_payload() {
+        let content = serde_json::json!({
+            "payload": {"prompt": "the actual prompt"}
+        });
+        assert_eq!(extract_prompt(&content), "the actual prompt");
+    }
+
+    #[test]
+    fn extract_prompt_missing() {
+        let content = serde_json::json!({"uuid": "abc"});
+        assert_eq!(extract_prompt(&content), "(no prompt)");
     }
 
     #[test]

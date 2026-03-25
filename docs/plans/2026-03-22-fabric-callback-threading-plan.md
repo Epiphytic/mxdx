@@ -84,7 +84,7 @@ The worker needs the Matrix event ID of the `org.mxdx.fabric.task` event to thre
 
 Changes needed:
 - `WorkerClient::watch_and_claim` — when returning a `TaskEvent`, also return the Matrix event ID (`task_event_id: String`)
-- `JcodeWorker::run_task(task, room_id, task_event_id)` — accept the event ID
+- `ProcessWorker::run_task(task, room_id, task_event_id)` — accept the event ID
 - Pass it through to both `run_task_matrix` and `run_task_p2p`
 
 ### Worker output threading
