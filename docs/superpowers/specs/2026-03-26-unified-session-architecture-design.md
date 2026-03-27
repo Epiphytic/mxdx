@@ -70,7 +70,12 @@ Client posts TaskEvent → Worker claims (state event: session/{uuid}/active)
   → Client reconnects:
       → Finds session via state event
       → Tails thread and/or re-establishes acceleration layer
-  → Process exits:
+  → If cancel event received:
+      → Worker sends SIGTERM, waits grace_seconds (default 10)
+      → If still alive: SIGKILL
+      → ResultEvent posted with status: "cancelled"
+      → State event updated to session/{uuid}/completed
+  → Process exits (normal or after cancel):
       → ResultEvent posted to thread (exit code, duration)
       → State event updated to session/{uuid}/completed
   → After retention period (default 90 days):
@@ -192,7 +197,12 @@ org.mxdx.session.resize
 org.mxdx.session.cancel
 ├── session_uuid: String
 ├── reason: Option<String>
+├── grace_seconds: Option<u64>         // default: 10
 ```
+
+**Cancel behavior:** When a worker receives a `cancel` event, it sends SIGTERM to the process, waits `grace_seconds` (default 10), then sends SIGKILL if the process is still alive. The worker then posts a `result` event with `status: "cancelled"` and updates the state event to `session/{uuid}/completed`. The `signal` event is for sending a specific signal without the graceful shutdown sequence.
+
+**CLI dispatch:** `mxdx cancel <uuid>` sends an `org.mxdx.session.cancel` event (graceful shutdown). `mxdx cancel <uuid> --signal SIGKILL` sends an `org.mxdx.session.signal` event directly (immediate, no grace period).
 
 ### Task Submission Event (Thread Root)
 
