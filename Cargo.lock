@@ -2558,6 +2558,42 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxdx-client"
+version = "1.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "clap",
+ "mxdx-matrix",
+ "mxdx-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "mxdx-coordinator"
+version = "1.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hostname",
+ "mxdx-matrix",
+ "mxdx-types",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml 0.8.23",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "mxdx-core-wasm"
 version = "1.1.0"
 dependencies = [
@@ -2571,6 +2607,7 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen",
  "serde_json",
+ "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
