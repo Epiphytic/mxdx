@@ -1,9 +1,11 @@
+pub mod attach;
 pub mod cancel;
 pub mod config;
 pub mod identity;
 pub mod logs;
 pub mod ls;
 pub mod matrix;
+pub mod reconnect;
 pub mod submit;
 pub mod tail;
 pub mod trust;
