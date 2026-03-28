@@ -8,3 +8,4 @@ pub mod secret;
 pub mod session;
 pub mod telemetry;
 pub mod terminal;
+pub mod worker_info;
