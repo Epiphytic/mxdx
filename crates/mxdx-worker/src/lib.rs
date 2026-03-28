@@ -1,8 +1,12 @@
 pub mod config;
 pub mod executor;
 pub mod heartbeat;
+pub mod identity;
+pub mod matrix;
 pub mod output;
 pub mod retention;
 pub mod session;
 pub mod telemetry;
 pub mod tmux;
+pub mod trust;
+pub mod webrtc;
