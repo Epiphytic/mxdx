@@ -2782,6 +2782,7 @@ dependencies = [
  "clap",
  "hostname",
  "mxdx-matrix",
+ "mxdx-test-helpers",
  "mxdx-types",
  "serde",
  "serde_json",
