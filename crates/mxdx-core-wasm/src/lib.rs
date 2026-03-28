@@ -976,3 +976,97 @@ impl WasmMatrixClient {
         Ok(response.room_id().to_string())
     }
 }
+
+// === Unified Session Types ===
+
+/// Create a SessionTask JSON string from parameters.
+/// `timeout_seconds_js` accepts a JS number or null/undefined for None.
+#[wasm_bindgen]
+pub fn create_session_task(
+    bin: &str,
+    args: JsValue,
+    interactive: bool,
+    no_room_output: bool,
+    timeout_seconds_js: JsValue,
+    heartbeat_interval_seconds: u64,
+    sender_id: &str,
+) -> Result<String, JsValue> {
+    let args_vec: Vec<String> = serde_wasm_bindgen::from_value(args).map_err(to_js_err)?;
+    let timeout_seconds: Option<u64> = if timeout_seconds_js.is_null() || timeout_seconds_js.is_undefined() {
+        None
+    } else {
+        Some(
+            timeout_seconds_js
+                .as_f64()
+                .ok_or_else(|| to_js_err("timeout_seconds must be a number or null"))? as u64,
+        )
+    };
+    let task = mxdx_types::events::session::SessionTask {
+        uuid: uuid::Uuid::new_v4().to_string(),
+        sender_id: sender_id.to_string(),
+        bin: bin.to_string(),
+        args: args_vec,
+        env: None,
+        cwd: None,
+        interactive,
+        no_room_output,
+        timeout_seconds,
+        heartbeat_interval_seconds,
+        plan: None,
+        required_capabilities: vec![],
+        routing_mode: None,
+        on_timeout: None,
+        on_heartbeat_miss: None,
+    };
+    serde_json::to_string(&task).map_err(to_js_err)
+}
+
+/// Parse a SessionResult JSON string and return it (for JS consumption).
+#[wasm_bindgen]
+pub fn parse_session_result(json: &str) -> Result<String, JsValue> {
+    let result: mxdx_types::events::session::SessionResult =
+        serde_json::from_str(json).map_err(to_js_err)?;
+    serde_json::to_string(&result).map_err(to_js_err)
+}
+
+/// Parse an ActiveSessionState JSON string.
+#[wasm_bindgen]
+pub fn parse_active_session(json: &str) -> Result<String, JsValue> {
+    let state: mxdx_types::events::session::ActiveSessionState =
+        serde_json::from_str(json).map_err(to_js_err)?;
+    serde_json::to_string(&state).map_err(to_js_err)
+}
+
+/// Parse a CompletedSessionState JSON string.
+#[wasm_bindgen]
+pub fn parse_completed_session(json: &str) -> Result<String, JsValue> {
+    let state: mxdx_types::events::session::CompletedSessionState =
+        serde_json::from_str(json).map_err(to_js_err)?;
+    serde_json::to_string(&state).map_err(to_js_err)
+}
+
+/// Parse a WorkerInfo JSON string.
+#[wasm_bindgen]
+pub fn parse_worker_info(json: &str) -> Result<String, JsValue> {
+    let info: mxdx_types::events::worker_info::WorkerInfo =
+        serde_json::from_str(json).map_err(to_js_err)?;
+    serde_json::to_string(&info).map_err(to_js_err)
+}
+
+/// Get session event type constants as JSON.
+#[wasm_bindgen]
+pub fn session_event_types() -> String {
+    serde_json::json!({
+        "SESSION_TASK": mxdx_types::events::session::SESSION_TASK,
+        "SESSION_START": mxdx_types::events::session::SESSION_START,
+        "SESSION_OUTPUT": mxdx_types::events::session::SESSION_OUTPUT,
+        "SESSION_HEARTBEAT": mxdx_types::events::session::SESSION_HEARTBEAT,
+        "SESSION_RESULT": mxdx_types::events::session::SESSION_RESULT,
+        "SESSION_INPUT": mxdx_types::events::session::SESSION_INPUT,
+        "SESSION_SIGNAL": mxdx_types::events::session::SESSION_SIGNAL,
+        "SESSION_RESIZE": mxdx_types::events::session::SESSION_RESIZE,
+        "SESSION_CANCEL": mxdx_types::events::session::SESSION_CANCEL,
+        "WORKER_INFO": mxdx_types::events::worker_info::WORKER_INFO,
+    })
+    .to_string()
+}

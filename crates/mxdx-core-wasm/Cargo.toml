@@ -32,6 +32,7 @@ matrix-sdk = { version = "0.16", default-features = false, features = ["e2e-encr
 matrix-sdk-base = { version = "0.16", default-features = false, features = ["experimental-encrypted-state-events"] }
 
 mxdx-types = { path = "../mxdx-types", version = "1.1.0" }
+uuid = { version = "1", features = ["v4", "js"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
