@@ -1,3 +1,7 @@
+#![deprecated(
+    note = "Use mxdx-worker and mxdx-coordinator instead. This crate will be removed in v2.0."
+)]
+
 pub mod capability_index;
 pub mod claim;
 pub mod coordinator;

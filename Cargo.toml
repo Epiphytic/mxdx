@@ -4,10 +4,10 @@ members = [
     "crates/mxdx-matrix",
     "crates/mxdx-policy",
     "crates/mxdx-secrets",
-    "crates/mxdx-launcher",
+    "crates/mxdx-launcher",   # DEPRECATED: use mxdx-worker instead (removed in v2.0)
     "crates/mxdx-web",
     "crates/mxdx-core-wasm",
-    "crates/mxdx-fabric",
+    "crates/mxdx-fabric",     # DEPRECATED: use mxdx-worker + mxdx-coordinator instead (removed in v2.0)
     "crates/mxdx-fabric-cli",
     "crates/mxdx-worker",
     "crates/mxdx-client",
