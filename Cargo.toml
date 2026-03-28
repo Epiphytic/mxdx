@@ -10,6 +10,7 @@ members = [
     "crates/mxdx-fabric",
     "crates/mxdx-fabric-cli",
     "crates/mxdx-worker",
+    "crates/mxdx-client",
     "xtask",
     "tests/helpers",
 ]
