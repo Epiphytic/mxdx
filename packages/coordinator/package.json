@@ -1,0 +1,11 @@
+{
+  "name": "@mxdx/coordinator",
+  "version": "1.1.0",
+  "type": "module",
+  "bin": {
+    "mxdx-coordinator": "bin/mxdx-coordinator.js"
+  },
+  "dependencies": {
+    "@mxdx/core": "^1.1.0"
+  }
+}
