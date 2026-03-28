@@ -29,6 +29,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 hostname = "0.4"
+whoami = "1"
 sysinfo = { workspace = true }
 base64 = { workspace = true }
 
