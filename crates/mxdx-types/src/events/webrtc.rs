@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+// --- Event type string constants ---
+
+pub const WEBRTC_OFFER: &str = "org.mxdx.session.webrtc.offer";
+pub const WEBRTC_ANSWER: &str = "org.mxdx.session.webrtc.answer";
+pub const WEBRTC_SDP: &str = "org.mxdx.webrtc.sdp";
+pub const WEBRTC_ICE: &str = "org.mxdx.webrtc.ice";
+
 // --- Thread events (metadata only, no crypto material) ---
 
 /// Thread event: WebRTC offer signal posted to the session thread.
@@ -155,5 +162,13 @@ mod tests {
         let json = serde_json::to_string(&ice).unwrap();
         assert!(json.contains("sdp_mid"), "expected snake_case in: {json}");
         assert!(json.contains("sdp_mline_index"), "expected snake_case in: {json}");
+    }
+
+    #[test]
+    fn webrtc_event_type_constants() {
+        assert_eq!(WEBRTC_OFFER, "org.mxdx.session.webrtc.offer");
+        assert_eq!(WEBRTC_ANSWER, "org.mxdx.session.webrtc.answer");
+        assert_eq!(WEBRTC_SDP, "org.mxdx.webrtc.sdp");
+        assert_eq!(WEBRTC_ICE, "org.mxdx.webrtc.ice");
     }
 }

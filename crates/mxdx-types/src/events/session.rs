@@ -4,6 +4,18 @@ use serde::{Deserialize, Serialize};
 
 use super::fabric::{FailurePolicy, RoutingMode};
 
+// --- Event type string constants ---
+
+pub const SESSION_TASK: &str = "org.mxdx.session.task";
+pub const SESSION_START: &str = "org.mxdx.session.start";
+pub const SESSION_OUTPUT: &str = "org.mxdx.session.output";
+pub const SESSION_HEARTBEAT: &str = "org.mxdx.session.heartbeat";
+pub const SESSION_RESULT: &str = "org.mxdx.session.result";
+pub const SESSION_INPUT: &str = "org.mxdx.session.input";
+pub const SESSION_SIGNAL: &str = "org.mxdx.session.signal";
+pub const SESSION_RESIZE: &str = "org.mxdx.session.resize";
+pub const SESSION_CANCEL: &str = "org.mxdx.session.cancel";
+
 /// Thread root event — a client submits a task for execution.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionTask {
@@ -582,5 +594,20 @@ mod tests {
         assert!(json.contains("exit_code"), "expected snake_case in: {json}");
         assert!(json.contains("duration_seconds"), "expected snake_case in: {json}");
         assert!(json.contains("completion_time"), "expected snake_case in: {json}");
+    }
+
+    // --- Event type constant tests ---
+
+    #[test]
+    fn session_event_type_constants() {
+        assert_eq!(SESSION_TASK, "org.mxdx.session.task");
+        assert_eq!(SESSION_START, "org.mxdx.session.start");
+        assert_eq!(SESSION_OUTPUT, "org.mxdx.session.output");
+        assert_eq!(SESSION_HEARTBEAT, "org.mxdx.session.heartbeat");
+        assert_eq!(SESSION_RESULT, "org.mxdx.session.result");
+        assert_eq!(SESSION_INPUT, "org.mxdx.session.input");
+        assert_eq!(SESSION_SIGNAL, "org.mxdx.session.signal");
+        assert_eq!(SESSION_RESIZE, "org.mxdx.session.resize");
+        assert_eq!(SESSION_CANCEL, "org.mxdx.session.cancel");
     }
 }

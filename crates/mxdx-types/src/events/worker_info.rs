@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 
 use super::capability::WorkerTool;
 
+// --- Event type string constant ---
+
+pub const WORKER_INFO: &str = "org.mxdx.worker.info";
+
 /// State event representing a worker's current info and capabilities.
 /// Merges capability advertisement with telemetry data into a single state event.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -86,5 +90,10 @@ mod tests {
         assert!(!json.contains("workerId"), "unexpected camelCase workerId in: {json}");
         assert!(!json.contains("cpuCount"), "unexpected camelCase cpuCount in: {json}");
         assert!(!json.contains("memoryTotalMb"), "unexpected camelCase memoryTotalMb in: {json}");
+    }
+
+    #[test]
+    fn worker_info_event_type_constant() {
+        assert_eq!(WORKER_INFO, "org.mxdx.worker.info");
     }
 }
