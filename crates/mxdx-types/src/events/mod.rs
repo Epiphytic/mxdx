@@ -5,5 +5,6 @@ pub mod launcher;
 pub mod output;
 pub mod result;
 pub mod secret;
+pub mod session;
 pub mod telemetry;
 pub mod terminal;
