@@ -15,7 +15,7 @@ The only real difference is whether the client stays connected interactively or 
 
 ## Solution
 
-Unify into a single session model where every command execution — fire-and-forget, long-running, or interactive — follows the same lifecycle. Output always flows to Matrix threads (ground truth). A low-latency acceleration layer (specified separately — see Future Work) can transparently accelerate interactive sessions. A client can disconnect and reconnect to any session.
+Unify into a single session model where every command execution — fire-and-forget, long-running, or interactive — follows the same lifecycle. Output always flows to Matrix threads (ground truth). WebRTC DataChannels transparently accelerate interactive sessions with application-level E2EE. A client can disconnect and reconnect to any session.
 
 ## Crate Layout
 
@@ -23,7 +23,7 @@ Unify into a single session model where every command execution — fire-and-for
 
 | Crate | Purpose |
 |---|---|
-| `mxdx-worker` | Unified execution engine. Spawns processes in tmux, manages sessions, streams output to Matrix threads, maintains process table via state events, cleans up history past retention window. Future: acceleration layer for interactive sessions. |
+| `mxdx-worker` | Unified execution engine. Spawns processes in tmux, manages sessions, streams output to Matrix threads, WebRTC DataChannels for interactive sessions, maintains process table via state events, cleans up history past retention window. |
 | `mxdx-client` | CLI for submitting commands, tailing output threads, attaching to interactive sessions, listing active/historical commands, reconnecting to disconnected sessions. |
 | `mxdx-coordinator` | Optional fleet routing. Capability-based task routing to worker rooms, failure policies (timeout/retry/escalate), claim arbitration. Not required for single-host use. |
 | `mxdx-types` | Shared event types — unified session events, capability schemas. Extended from existing crate. |
@@ -60,8 +60,8 @@ Client posts TaskEvent → Worker claims (state event: session/{uuid}/active)
   → Process spawns inside tmux
   → Output streams to Matrix thread (batched output events)
   → Heartbeat events posted periodically (liveness, independent of output)
-  → If interactive + acceleration layer available:
-      → Output also streams via acceleration layer (low latency)
+  → If interactive: WebRTC DataChannel established (see WebRTC Acceleration Layer)
+      → Output streams via DataChannel (low latency) AND Matrix thread (ground truth)
       → --no-room-output suppresses stdout/stderr in thread, but session
         start/end/exit-code events and heartbeats are ALWAYS posted
   → If client disconnects:
@@ -69,7 +69,7 @@ Client posts TaskEvent → Worker claims (state event: session/{uuid}/active)
       → tmux session preserves full scrollback on worker
   → Client reconnects:
       → Finds session via state event
-      → Tails thread and/or re-establishes acceleration layer
+      → Tails thread and/or re-establishes WebRTC DataChannel
   → If cancel event received:
       → Worker sends SIGTERM, waits grace_seconds (default 10)
       → If still alive: SIGKILL
@@ -85,10 +85,10 @@ Client posts TaskEvent → Worker claims (state event: session/{uuid}/active)
 
 ### Output Modes
 
-| Mode | Matrix Thread | Acceleration Layer | tmux |
+| Mode | Matrix Thread | WebRTC DataChannel | tmux |
 |---|---|---|---|
-| Default | Full stdout/stderr + heartbeats | If interactive & available | Always |
-| `--no-room-output` | Start/end/exit-code + heartbeats only | If interactive & available | Always |
+| Default | Full stdout/stderr + heartbeats | If interactive | Always |
+| `--no-room-output` | Start/end/exit-code + heartbeats only | If interactive | Always |
 
 With `--no-room-output`, all session metadata (command, who, when, exit code, duration) and liveness heartbeats are always recorded in the thread. Only stdout/stderr content is suppressed. Output is still fully available via tmux scrollback on the worker, accessible through reconnection.
 
@@ -105,7 +105,7 @@ With `--no-room-output`, all session metadata (command, who, when, exit code, du
 - `mxdx ls` reads all `session/*/active` state events
 - `mxdx ls --all` includes `session/*/completed` within retention window
 - `mxdx logs <uuid>` fetches the thread from the task event
-- `mxdx attach <uuid>` reads active state, re-establishes acceleration layer if interactive, else tails thread
+- `mxdx attach <uuid>` reads active state, re-establishes WebRTC DataChannel if interactive, else tails thread
 
 **Session state events double as claim events.** When a worker writes `session/{uuid}/active` with its `worker_id`, that constitutes the claim. The worker reads back the state event to confirm it won (last-write-wins). No separate claim event type is needed.
 
@@ -233,7 +233,7 @@ org.mxdx.session.task
 - `cwd`: Must be an absolute path. No `..` traversal allowed. Must exist on the worker filesystem.
 - `env`: Keys must be valid environment variable names (`[A-Z_][A-Z0-9_]*`). Values are arbitrary strings.
 
-**`interactive` field:** This replaces the old `p2p_stream` field from `fabric::TaskEvent`. The semantic change is intentional: `p2p_stream` described a transport mechanism, `interactive` describes the session mode (PTY allocation). The acceleration layer is orthogonal — it is used when available for interactive sessions but is not implied by this flag alone.
+**`interactive` field:** This replaces the old `p2p_stream` field from `fabric::TaskEvent`. The semantic change is intentional: `p2p_stream` described a transport mechanism, `interactive` describes the session mode (PTY allocation). WebRTC is automatically initiated for interactive sessions (see WebRTC Acceleration Layer section).
 
 **Coordinator-only fields:** `routing_mode`, `on_timeout`, and `on_heartbeat_miss` are only meaningful when a coordinator is in the path. For direct client→worker communication, these are ignored. They are `Option` types so single-host users don't need to specify them.
 
@@ -252,6 +252,7 @@ org.mxdx.session.task
 | `retention` | Periodic sweep of completed session state events past retention window. |
 | `identity` | Device key management via OS keychain. Stable device ID across restarts. |
 | `trust` | Trust store management. Cross-signing, trust anchor, trust list propagation. Invitation/task filtering by trusted device IDs. |
+| `webrtc` | WebRTC DataChannel management. App-level E2EE key derivation, payload encryption, ICE state monitoring, automatic failover to Matrix thread. Signaling via thread metadata + to-device messages. |
 | `config` | TOML config loading (defaults.toml + worker.toml). CLI argument merging. |
 | `matrix` | Room setup, thread posting, state event read/write. Built on `mxdx-matrix`. |
 
@@ -270,7 +271,7 @@ Even non-interactive commands run inside tmux:
 |---|---|
 | `submit` | Build and post TaskEvent to worker/coordinator room. Return session UUID. |
 | `tail` | Follow a session's Matrix thread in real-time. Render stdout/stderr with stream markers. |
-| `attach` | Attach to active session. Initially thread-tailing only; future acceleration layer support. Falls back gracefully. |
+| `attach` | Attach to active session. WebRTC DataChannel for interactive, thread-tailing for non-interactive. Falls back gracefully. |
 | `ls` | Read session state events from worker room. Format as process table. Filter active/completed/all. |
 | `logs` | Fetch full thread history for a session. |
 | `reconnect` | On startup, check for active sessions this client previously started. Offer to reattach. |
@@ -298,7 +299,7 @@ mxdx run --timeout 300 ...           5 minute timeout
 
 mxdx exec <command> [args...]        alias for `mxdx run` (backward compat)
 
-mxdx attach <uuid>                   reconnect to session (tail thread, future: acceleration)
+mxdx attach <uuid>                   reconnect to session (WebRTC if interactive, else tail thread)
 mxdx ls                              list active sessions on target worker
 mxdx ls --all                        include completed (within retention)
 mxdx logs <uuid>                     fetch full thread output
@@ -343,7 +344,7 @@ Client posts TaskEvent to coordinator room
 
 - Execute anything — it only routes
 - Manage sessions — that's the worker's job
-- Handle acceleration layer — that's client↔worker direct
+- Handle WebRTC — that's client↔worker direct
 - Store history — session state lives in worker rooms
 
 ## Configuration
@@ -600,7 +601,7 @@ New crate pulling from:
 
 Add: session state events, retention cleanup, output routing with `--no-room-output`, start/result events, heartbeat/output separation.
 
-Note: Acceleration layer (low-latency transport) is deferred to a future design. Phase 2 implements Matrix-thread-only output. The existing P2P Unix socket approach from fabric is retained as a same-host optimization.
+Add: WebRTC DataChannel support for interactive sessions with app-level E2EE, automatic failover to Matrix threads on disconnect.
 
 ### Phase 3: Build `mxdx-client`
 New Rust crate pulling from:
@@ -654,7 +655,10 @@ Workers running new code handle `org.mxdx.fabric.task` events from old clients d
 
 ### E2E Tests (Tuwunel instances + beta server credentials)
 - Full flow: client → worker → process → output → client (both npm and native binary paths)
-- Interactive session: attach with PTY, send input, receive output, disconnect, reattach via thread
+- Interactive session: WebRTC DataChannel with PTY, send input, receive output via DataChannel
+- WebRTC failover: disconnect DataChannel mid-session, verify output continues on Matrix thread
+- WebRTC reconnection: re-establish DataChannel, verify output resumes with no duplicates (seq dedup)
+- WebRTC upgrade: non-interactive session upgraded to interactive via `mxdx attach -i`
 - Coordinator routing: two workers with different capabilities, coordinator routes to correct one
 - Fleet scenario: `mxdx ls` shows sessions across workers, `mxdx logs` fetches from correct thread
 - Backward compatibility: old-format `org.mxdx.fabric.task` events handled by new worker
@@ -673,18 +677,164 @@ Workers running new code handle `org.mxdx.fabric.task` events from old clients d
 - Manual cross-signing mode blocks automatic trust propagation
 - Trust list propagation is one-directional (initiator→worker only)
 - Device identity is stable across restarts (no device proliferation)
+- WebRTC signaling: no cryptographic material in thread events (SDP/keys only in to-device messages)
+- WebRTC app-level E2EE: TURN relay cannot read DataChannel payloads
+- WebRTC ephemeral keys: fresh key pair per connection (no key reuse across reconnections)
+
+## WebRTC Acceleration Layer
+
+### Overview
+
+WebRTC DataChannels provide low-latency P2P communication for interactive sessions. Matrix threads remain the ground truth for all output. WebRTC is a transparent acceleration layer — sessions work identically without it, just with higher latency.
+
+Interactive sessions (`interactive: true`) automatically trigger WebRTC setup. Non-interactive sessions use Matrix threads only, but can be upgraded to interactive via `mxdx attach -i <uuid>`. Future enhancement: heuristic-based auto-upgrade for high-throughput non-interactive output.
+
+### Encryption (Two Layers)
+
+1. **DTLS** — WebRTC's built-in transport encryption. Protects P2P traffic. For TURN-relayed traffic, DTLS terminates at each hop (relay can see plaintext at the DTLS level).
+2. **Application-level E2EE** — Using existing Matrix device keys (Curve25519) to derive a shared secret between the two devices via ephemeral key exchange. All DataChannel payloads encrypted with this key before being sent. TURN relay sees only ciphertext. This layer is always active, regardless of whether traffic is P2P or relayed.
+
+This double encryption ensures the E2EE guarantee holds regardless of network topology, consistent with the project's strict encryption requirements.
+
+### Signaling (Split Model)
+
+Signaling is split between room thread events and to-device messages to prevent cryptographic material from being exposed in the room:
+
+**Thread events (metadata only, auditable):**
+- Announce *that* a WebRTC connection is being established
+- Contain only session UUID, device IDs, and timestamp
+- No cryptographic material (no SDP, no DTLS fingerprints, no keys)
+
+**To-device messages (private, encrypted by Olm):**
+- Full SDP offer/answer (with DTLS fingerprints)
+- ICE candidates (trickle ICE)
+- Application-level E2EE ephemeral public keys
+
+This split ensures the room log shows when WebRTC connections were established between which devices (auditability), while the actual cryptographic handshake remains private between the two devices.
+
+### ICE Configuration
+
+Default STUN servers are public (for NAT traversal). TURN servers are user-configured, with credentials typically provided by the matrix-hosting auth infrastructure.
+
+```toml
+# In defaults.toml, worker.toml, client.toml, or coordinator.toml
+[webrtc]
+stun_servers = ["stun:stun.l.google.com:19302", "stun:stun.mozilla.com"]
+
+[[webrtc.turn_servers]]
+url = "turn:turn.example.com:3478"
+# Credentials provided by matrix-hosting auth endpoint
+auth_endpoint = "https://hosting.example.com/turn/credentials"
+```
+
+Overridable via CLI flags (e.g., `--stun-server`, `--turn-server`, `--turn-auth-endpoint`).
+
+### Connection Lifecycle
+
+**Initiation (automatic for interactive sessions):**
+
+```
+Client sends TaskEvent with interactive: true
+  → Worker claims session, starts process in tmux with PTY
+  → Worker posts org.mxdx.session.webrtc.offer to thread
+    (metadata only: session_uuid, worker_device_id, timestamp)
+  → Worker sends full SDP offer + app-level E2EE ephemeral key via to-device message
+  → Client receives to-device message
+  → Client posts org.mxdx.session.webrtc.answer to thread (metadata only)
+  → Client sends SDP answer + E2EE ephemeral key via to-device message
+  → ICE candidates exchanged via to-device messages
+  → DataChannel established, app-level E2EE active
+  → Output streams via DataChannel (low latency) AND Matrix thread (ground truth)
+```
+
+**Failover (automatic on disconnect):**
+
+```
+WebRTC ICE state → disconnected/failed
+  → Worker continues posting output to Matrix thread (already happening)
+  → Worker stops sending on DataChannel
+  → Client detects disconnect, falls back to tailing Matrix thread
+  → Output continuity maintained via seq field on output events (no duplicates)
+```
+
+**Reconnection (automatic):**
+
+```
+Client detects network recovery or runs `mxdx attach -i <uuid>`
+  → New signaling round: thread metadata event + to-device key exchange
+  → New DataChannel established with fresh E2EE ephemeral keys
+  → Output switches back to DataChannel
+  → Client merges thread + DataChannel output using seq numbers (no duplicates)
+```
+
+**Upgrade (non-interactive → interactive):**
+
+```
+$ mxdx attach -i <uuid>
+  → Client posts webrtc.offer to thread (metadata)
+  → To-device key exchange with worker
+  → DataChannel established
+  → tmux session already exists (all sessions use tmux)
+  → Client now has full PTY access via DataChannel
+```
+
+### Thread Events (Metadata Only)
+
+```
+org.mxdx.session.webrtc.offer
+├── session_uuid: String
+├── device_id: String              // offering device
+├── timestamp: u64
+
+org.mxdx.session.webrtc.answer
+├── session_uuid: String
+├── device_id: String              // answering device
+├── timestamp: u64
+```
+
+No cryptographic material. These exist solely for auditability.
+
+### To-Device Messages
+
+```
+org.mxdx.webrtc.sdp
+├── session_uuid: String
+├── type: "offer" | "answer"
+├── sdp: String                    // full SDP with DTLS fingerprints
+├── e2ee_public_key: String        // Curve25519 ephemeral key for app-level E2EE
+
+org.mxdx.webrtc.ice
+├── session_uuid: String
+├── candidate: String              // ICE candidate
+├── sdp_mid: String
+├── sdp_mline_index: u32
+```
+
+These are already encrypted by Matrix's to-device encryption (Olm). The app-level E2EE key negotiation piggybacks on the SDP exchange.
+
+### Worker Module
+
+The worker's `webrtc` module handles:
+- DataChannel creation and management
+- App-level E2EE key derivation from ephemeral Curve25519 exchange
+- Payload encryption/decryption on DataChannel
+- ICE state monitoring and automatic failover to Matrix thread
+- Signaling event posting (thread metadata) and to-device message handling
+
+### Client Module
+
+The client's `attach` module handles:
+- WebRTC connection initiation (for interactive sessions and `mxdx attach -i`)
+- App-level E2EE key derivation
+- Payload encryption/decryption on DataChannel
+- Output merging: deduplicates thread + DataChannel output using seq numbers
+- Automatic reconnection on network recovery
+- Graceful fallback to thread-only when WebRTC is unavailable
 
 ## Future Work
 
-### Low-Latency Acceleration Layer
-A separate design document will specify a low-latency transport for interactive sessions. This will cover:
-- Protocol selection (WebRTC DataChannels, custom WebSocket relay, or other)
-- E2EE guarantees (end-to-end encryption between client and worker, not just to relay)
-- Server provisioning and discovery
-- Credential distribution
-- Integration with the session model (transparent fallback to Matrix threads)
-
-Until the acceleration layer is specified and implemented, interactive sessions operate via Matrix threads with the existing P2P Unix socket approach available as a same-host optimization.
+### Heuristic-Based WebRTC Auto-Upgrade
+Non-interactive sessions could automatically upgrade to WebRTC when output rate exceeds a threshold (e.g., high-throughput log streaming). This would be opt-in via configuration.
 
 ### Event Versioning
 The current design uses unversioned event types (`org.mxdx.session.task`). If schema evolution requires breaking changes, a versioning scheme (e.g., `org.mxdx.session.task.v2`) will be introduced. For the initial implementation, backward compatibility is handled by translating old `org.mxdx.fabric.*` events at the worker boundary.
