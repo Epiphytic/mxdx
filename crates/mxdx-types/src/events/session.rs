@@ -104,6 +104,28 @@ pub struct SessionCancel {
     pub grace_seconds: Option<u64>,
 }
 
+/// State key: session/{uuid}/active
+/// Represents an active running session as a room state event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ActiveSessionState {
+    pub bin: String,
+    pub args: Vec<String>,
+    pub pid: Option<u32>,
+    pub start_time: u64,
+    pub client_id: String,
+    pub interactive: bool,
+    pub worker_id: String,
+}
+
+/// State key: session/{uuid}/completed
+/// Represents a completed session as a room state event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompletedSessionState {
+    pub exit_code: Option<i32>,
+    pub duration_seconds: u64,
+    pub completion_time: u64,
+}
+
 /// Output stream type.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -477,5 +499,88 @@ mod tests {
     fn session_status_rejects_unknown() {
         let result: Result<SessionStatus, _> = serde_json::from_str(r#""exploded""#);
         assert!(result.is_err());
+    }
+
+    // --- ActiveSessionState tests ---
+
+    #[test]
+    fn active_session_state_roundtrip() {
+        let state = ActiveSessionState {
+            bin: "claude".into(),
+            args: vec!["--model".into(), "opus".into()],
+            pid: Some(42567),
+            start_time: 1742572800,
+            client_id: "@alice:example.com".into(),
+            interactive: true,
+            worker_id: "@bel-worker:ca1-beta.mxdx.dev".into(),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let back: ActiveSessionState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.bin, "claude");
+        assert_eq!(back.args, vec!["--model", "opus"]);
+        assert_eq!(back.pid, Some(42567));
+        assert_eq!(back.start_time, 1742572800);
+        assert_eq!(back.client_id, "@alice:example.com");
+        assert!(back.interactive);
+        assert_eq!(back.worker_id, "@bel-worker:ca1-beta.mxdx.dev");
+    }
+
+    #[test]
+    fn active_session_state_snake_case_fields() {
+        let state = ActiveSessionState {
+            bin: "echo".into(),
+            args: vec![],
+            pid: None,
+            start_time: 0,
+            client_id: "@c:example.com".into(),
+            interactive: false,
+            worker_id: "@w:example.com".into(),
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("start_time"), "expected snake_case in: {json}");
+        assert!(json.contains("client_id"), "expected snake_case in: {json}");
+        assert!(json.contains("worker_id"), "expected snake_case in: {json}");
+    }
+
+    // --- CompletedSessionState tests ---
+
+    #[test]
+    fn completed_session_state_roundtrip() {
+        let state = CompletedSessionState {
+            exit_code: Some(0),
+            duration_seconds: 120,
+            completion_time: 1742572920,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let back: CompletedSessionState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.exit_code, Some(0));
+        assert_eq!(back.duration_seconds, 120);
+        assert_eq!(back.completion_time, 1742572920);
+    }
+
+    #[test]
+    fn completed_session_state_no_exit_code() {
+        let state = CompletedSessionState {
+            exit_code: None,
+            duration_seconds: 3600,
+            completion_time: 1742576400,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        let back: CompletedSessionState = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.exit_code, None);
+        assert_eq!(back.duration_seconds, 3600);
+    }
+
+    #[test]
+    fn completed_session_state_snake_case_fields() {
+        let state = CompletedSessionState {
+            exit_code: Some(1),
+            duration_seconds: 5,
+            completion_time: 1742572805,
+        };
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(json.contains("exit_code"), "expected snake_case in: {json}");
+        assert!(json.contains("duration_seconds"), "expected snake_case in: {json}");
+        assert!(json.contains("completion_time"), "expected snake_case in: {json}");
     }
 }
