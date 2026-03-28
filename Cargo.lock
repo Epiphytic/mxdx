@@ -2565,6 +2565,7 @@ dependencies = [
  "base64 0.22.1",
  "clap",
  "mxdx-matrix",
+ "mxdx-test-helpers",
  "mxdx-types",
  "serde",
  "serde_json",
