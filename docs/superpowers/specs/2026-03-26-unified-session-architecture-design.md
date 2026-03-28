@@ -250,6 +250,9 @@ org.mxdx.session.task
 | `tmux` | tmux session management — every process runs inside tmux. Scrollback persistence and terminal state across disconnections. |
 | `telemetry` | Host info + capability advertisement — single state event with OS/arch/resources and available tools/binaries. Periodic refresh. |
 | `retention` | Periodic sweep of completed session state events past retention window. |
+| `identity` | Device key management via OS keychain. Stable device ID across restarts. |
+| `trust` | Trust store management. Cross-signing, trust anchor, trust list propagation. Invitation/task filtering by trusted device IDs. |
+| `config` | TOML config loading (defaults.toml + worker.toml). CLI argument merging. |
 | `matrix` | Room setup, thread posting, state event read/write. Built on `mxdx-matrix`. |
 
 ### Why tmux Always
@@ -271,6 +274,9 @@ Even non-interactive commands run inside tmux:
 | `ls` | Read session state events from worker room. Format as process table. Filter active/completed/all. |
 | `logs` | Fetch full thread history for a session. |
 | `reconnect` | On startup, check for active sessions this client previously started. Offer to reattach. |
+| `identity` | Device key management via OS keychain. Stable device ID across restarts. |
+| `trust` | Trust store, cross-signing ceremony initiation, trust list exchange. `mxdx trust` subcommands. |
+| `config` | TOML config loading (defaults.toml + client.toml). CLI argument merging. |
 | `matrix` | Auth, sync, room discovery. Built on `mxdx-matrix` / WASM. |
 
 ### JS Layer (npm packages)
@@ -340,12 +346,252 @@ Client posts TaskEvent to coordinator room
 - Handle acceleration layer — that's client↔worker direct
 - Store history — session state lives in worker rooms
 
+## Configuration
+
+### File Layout
+
+All configuration lives in `$HOME/.mxdx/`:
+
+```
+~/.mxdx/
+├── defaults.toml          # Shared defaults (applies to all modes)
+├── client.toml            # Client-specific config
+├── worker.toml            # Worker-specific config
+├── coordinator.toml       # Coordinator-specific config
+```
+
+**Precedence:** CLI arguments > mode-specific TOML > defaults.toml.
+
+### `defaults.toml` (shared)
+
+```toml
+# Matrix account(s) — used by all modes unless overridden
+[[accounts]]
+user_id = "@alice:example.com"
+homeserver = "https://example.com"
+
+# Optional: multiple accounts for multi-homeserver redundancy
+[[accounts]]
+user_id = "@alice:backup.example.com"
+homeserver = "https://backup.example.com"
+
+# Trust settings (apply to all modes)
+[trust]
+# "auto" = automatically trust verified device IDs from trusted identities
+# "manual" = require manual approval for each new device ID
+cross_signing_mode = "auto"
+```
+
+### `worker.toml`
+
+```toml
+# Override or extend accounts from defaults.toml
+# If omitted, inherits from defaults.toml
+
+# Worker room naming: defaults to {hostname}.{username}.{account}
+# e.g., "prod-web-01.deploy.alice" — unless overridden here or by coordinator
+room_name = ""  # empty = use default naming
+
+# Trust anchor — the Matrix identity trusted at bootstrap
+# In single-host mode, this is typically the client user
+# In fleet mode, this is typically the coordinator
+trust_anchor = "@alice:example.com"
+
+# Session retention
+history_retention = "90d"
+
+# Capabilities (auto-detected + manual additions)
+[capabilities]
+extra = ["docker", "gpu"]  # added to auto-detected capabilities
+
+# Telemetry refresh interval
+telemetry_refresh_seconds = 300
+```
+
+### `client.toml`
+
+```toml
+# Default target worker (for single-host mode, direct connection)
+default_worker_room = ""  # empty = discover via room list
+
+# Default coordinator (for fleet mode)
+coordinator_room = ""
+
+# Session defaults
+[session]
+timeout_seconds = 0        # 0 = no timeout
+heartbeat_interval = 30
+interactive = false
+no_room_output = false
+```
+
+### `coordinator.toml`
+
+```toml
+# Coordinator room
+room = ""  # empty = auto-create
+
+# Capability room prefix
+capability_room_prefix = "workers"
+
+# Failure policy defaults
+[failure]
+default_on_timeout = "escalate"
+default_on_heartbeat_miss = "escalate"
+```
+
+### CLI Override
+
+Every configuration value has a corresponding CLI flag. Examples:
+
+```
+mxdx worker start --trust-anchor @coordinator:example.com
+mxdx worker start --history-retention 30d
+mxdx worker start --cross-signing-mode manual
+mxdx run --timeout 300 --no-room-output echo hello
+mxdx client --coordinator-room '!abc:example.com' run echo hello
+```
+
+## Identity & Key Management
+
+### Device Identity
+
+Each (host, OS user, Matrix account) tuple gets exactly one Matrix device ID. The device's keys (Ed25519 signing key, Curve25519 identity key) are stored in the OS keychain (e.g., libsecret on Linux, Keychain on macOS, Credential Manager on Windows). This ensures:
+
+- Devices are created only once per (host, user, account) — no device proliferation from restarts
+- Keys survive process restarts without re-login
+- Keys are encrypted at rest by the OS keychain
+
+**Keychain entry naming:** `mxdx/{user_id}/{device_id}` — contains the serialized crypto store or a reference to it.
+
+### Room Naming (Worker)
+
+Worker rooms are named by default using the pattern: `{hostname}.{username}.{matrix_account_localpart}`
+
+Examples:
+- `prod-web-01.deploy.alice` — host "prod-web-01", OS user "deploy", Matrix user "@alice:example.com"
+- `dev-laptop.liam.liamhelmer` — host "dev-laptop", OS user "liam", Matrix user "@liamhelmer:matrix.org"
+
+This allows multiple workers on the same Matrix account (different hosts or OS users) without room name collisions. The room name can be overridden in `worker.toml` or by the coordinator.
+
+## Trust Model
+
+### Overview
+
+The trust model is built on Matrix cross-signing. Each mxdx device (worker, client, coordinator) has a device ID tied to a Matrix account. Trust is established through cross-signing between devices, with trust lists stored in the OS keychain.
+
+### Trust Store
+
+Each device maintains a trust store in the OS keychain containing:
+- Its own device keys
+- A list of trusted device IDs (cross-signed)
+- The trust anchor identity (Matrix user ID)
+
+**Keychain entry:** `mxdx/{user_id}/trust-store` — contains the list of trusted device IDs and their signing keys.
+
+### Trust Topology
+
+**Single-host mode:**
+```
+Client (trust anchor)
+  ↓ cross-signs
+Worker
+```
+- Client's Matrix identity is the worker's trust anchor
+- Worker trusts all verified device IDs belonging to the client's Matrix identity at bootstrap
+- Client creates/joins the worker room directly
+
+**Fleet/coordinator mode:**
+```
+Coordinator (trust anchor)
+  ↓ cross-signs          ↓ cross-signs
+Worker A               Worker B
+  ↑ cross-signs (via coordinator's trust list)
+Client
+```
+- Coordinator's Matrix identity is the workers' trust anchor
+- Workers trust all verified device IDs belonging to the coordinator's Matrix identity at bootstrap
+- Coordinator creates capability rooms, invites workers
+- Workers accept invitations only from trusted device IDs
+- During client↔coordinator cross-signing, the coordinator sends its trust list to the client
+
+### Cross-Signing Modes
+
+| Mode | Behavior | Use Case |
+|---|---|---|
+| `auto` (default) | Automatically trust all verified device IDs belonging to trusted Matrix identities. New devices from trusted identities are cross-signed without interaction. | Most deployments — low friction, relies on Matrix identity verification. |
+| `manual` | Each new device ID requires explicit CLI approval before cross-signing. | High-security environments where every device must be individually vetted. |
+
+Configurable per-mode in `defaults.toml`, `worker.toml`, `client.toml`, or `coordinator.toml`. CLI override: `--cross-signing-mode manual`.
+
+### Bootstrap Flow
+
+**Worker bootstrap (single-host):**
+```
+1. Worker starts for the first time
+2. Reads trust_anchor from worker.toml (e.g., @alice:example.com)
+3. Logs into Matrix, creates device ID, stores keys in OS keychain
+4. Fetches verified device IDs for @alice:example.com
+5. Cross-signs all verified devices (auto mode) or prompts for each (manual mode)
+6. Creates worker room (using default naming or config override)
+7. Ready to accept tasks from trusted devices
+```
+
+**Worker bootstrap (fleet mode):**
+```
+1. Worker starts for the first time
+2. Reads trust_anchor from worker.toml (e.g., @coordinator:fleet.example.com)
+3. Logs into Matrix, creates device ID, stores keys in OS keychain
+4. Fetches verified device IDs for @coordinator:fleet.example.com
+5. Cross-signs coordinator's devices (auto or manual)
+6. Waits for coordinator to invite it to capability rooms
+7. Accepts invitations from trusted device IDs only
+8. Ready to accept tasks
+```
+
+### Cross-Signing Ceremony
+
+When a worker or coordinator cross-signs with a client, there is a manual approval step:
+
+```
+1. Client initiates: mxdx trust add --device <worker_device_id>
+   (or: worker initiates: mxdx worker trust add --device <client_device_id>)
+2. Both sides confirm the device fingerprint (displayed on CLI)
+3. Cross-signing keys are exchanged
+4. The initiator (client or coordinator) sends its trust list to the worker
+5. Worker automatically cross-signs all devices in the received list
+   (in auto mode — in manual mode, each requires approval)
+```
+
+**Trust list propagation is one-directional:** The initiator sends its list to the worker. The worker does NOT automatically send its list back. A client can manually pull the worker's trust list via `mxdx trust pull --from <worker_device_id>`, but this is not the default.
+
+### Room Trust Enforcement
+
+- A worker room must be created by a trusted device ID (the worker itself, or a trusted coordinator)
+- Workers reject task events from untrusted device IDs
+- Workers reject room invitations from untrusted device IDs
+- All room events are E2EE — untrusted devices cannot read room content even if they somehow join
+
+### Trust CLI Commands
+
+```
+mxdx trust list                          list trusted device IDs
+mxdx trust add --device <device_id>      initiate cross-signing with a device
+mxdx trust remove --device <device_id>   revoke trust for a device
+mxdx trust pull --from <device_id>       pull trust list from a trusted device
+mxdx trust anchor                        show current trust anchor identity
+mxdx trust anchor set <user_id>          set trust anchor (requires restart)
+```
+
 ## Migration Path
 
-### Phase 1: Unified Types and Events
+### Phase 1: Unified Types, Events, and Identity
 - Extend `mxdx-types` with unified `org.mxdx.session.*` events
 - Deprecate `org.mxdx.fabric.*` and `org.mxdx.command` event types
 - Add combined capability+telemetry state event type (`org.mxdx.worker.info`)
+- Implement TOML configuration loading (defaults.toml + mode-specific files)
+- Implement OS keychain integration for device keys and trust store
+- Implement trust model: trust anchor, cross-signing, trust list propagation
 
 ### Phase 2: Build `mxdx-worker`
 New crate pulling from:
@@ -399,6 +645,12 @@ Workers running new code handle `org.mxdx.fabric.task` events from old clients d
 - Heartbeat posted even during quiet periods (no output) and with `--no-room-output`
 - Retention cleanup removes completed sessions past window
 - Bidirectional: client posts input/signal/cancel to thread, worker receives and applies
+- Trust bootstrap: worker trusts anchor identity's verified devices on first start
+- Cross-signing ceremony: client and worker exchange fingerprints, trust established
+- Trust list propagation: worker receives and cross-signs initiator's trust list
+- Manual mode: worker prompts for approval on each new device ID
+- Room invitation rejection: worker refuses invitation from untrusted device
+- Config loading: CLI args override TOML, mode-specific overrides defaults
 
 ### E2E Tests (Tuwunel instances + beta server credentials)
 - Full flow: client → worker → process → output → client (both npm and native binary paths)
@@ -414,6 +666,13 @@ Workers running new code handle `org.mxdx.fabric.task` events from old clients d
 - Arg sanitization prevents command injection (shell metacharacters in bin, null bytes in args, traversal in cwd)
 - `--no-room-output` doesn't leak content to Matrix
 - `env` field validated for proper key format
+- Device keys stored in OS keychain, not on filesystem
+- Worker rejects task events from untrusted device IDs
+- Worker rejects room invitations from untrusted device IDs
+- Cross-signing ceremony requires fingerprint confirmation
+- Manual cross-signing mode blocks automatic trust propagation
+- Trust list propagation is one-directional (initiator→worker only)
+- Device identity is stable across restarts (no device proliferation)
 
 ## Future Work
 
