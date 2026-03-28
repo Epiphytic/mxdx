@@ -1,4 +1,7 @@
+pub mod claim;
 pub mod config;
+pub mod failure;
+pub mod index;
 pub mod router;
 pub mod watchlist;
 
@@ -13,15 +16,13 @@ pub async fn run_coordinator(config: CoordinatorRuntimeConfig) -> Result<()> {
         "starting mxdx-coordinator"
     );
 
-    // Initialize router
+    // Initialize all components
     let _router = router::Router::new();
-    tracing::info!("router initialized");
-
-    // Initialize watchlist
     let _watchlist = watchlist::Watchlist::new();
-    tracing::info!("watchlist initialized");
+    let _claims = claim::ClaimTracker::new();
+    let _index = index::CapabilityIndex::new();
 
-    tracing::info!("coordinator initialized, ready for events");
+    tracing::info!("coordinator initialized, ready for routing");
 
     // Main event loop will be connected to Matrix sync in integration.
     // For now, the coordinator starts up, initializes all components, and exits.
