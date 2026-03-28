@@ -524,6 +524,17 @@ export class LauncherRuntime {
       const eventType = event?.type;
       const eventId = event?.event_id;
 
+      // Unified session event types (Phase 6 migration):
+      //   SESSION_START  = 'org.mxdx.session.start'   — replaces org.mxdx.command
+      //   SESSION_OUTPUT = 'org.mxdx.session.output'   — replaces org.mxdx.output
+      //   SESSION_RESULT = 'org.mxdx.session.result'   — replaces org.mxdx.result
+      //   SESSION_CANCEL = 'org.mxdx.session.cancel'   — new
+      //   SESSION_HEARTBEAT = 'org.mxdx.session.heartbeat' — new
+      // State events:
+      //   ACTIVE_SESSION  = 'org.mxdx.session.active'
+      //   COMPLETED_SESSION = 'org.mxdx.session.completed'
+      //   WORKER_INFO     = 'org.mxdx.worker.info'     — replaces org.mxdx.host_telemetry
+
       if (eventType !== 'org.mxdx.command' || !eventId) continue;
       if (this.#processedEvents.has(eventId)) continue;
       this.#processedEvents.add(eventId);

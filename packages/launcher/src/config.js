@@ -123,6 +123,13 @@ export class LauncherConfig {
   }
 
   static defaultPath() {
+    return path.join(os.homedir(), '.mxdx', 'worker.toml');
+  }
+
+  /**
+   * @deprecated Use defaultPath() instead. Retained for migration.
+   */
+  static legacyDefaultPath() {
     return path.join(os.homedir(), '.config', 'mxdx', 'launcher.toml');
   }
 }
