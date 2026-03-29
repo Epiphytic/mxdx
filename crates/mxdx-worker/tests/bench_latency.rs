@@ -34,7 +34,7 @@ struct BenchmarkReport {
     metrics: Vec<Metric>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Metric {
     name: String,
     operation: String,
@@ -1200,4 +1200,178 @@ async fn bench_beta_federated_latency() {
             );
         }
     }
+}
+
+// ===========================================================================
+// SSH Baseline Benchmark
+// ===========================================================================
+
+/// Measure SSH localhost latency as a baseline comparison for Matrix-based sessions.
+///
+/// Uses a local ed25519 key at ~/.ssh/id_ed25519_mxdx_test.
+/// Generate with: ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_mxdx_test -N ""
+/// Authorize with: cat ~/.ssh/id_ed25519_mxdx_test.pub >> ~/.ssh/authorized_keys
+#[tokio::test]
+#[ignore = "benchmark — requires ~/.ssh/id_ed25519_mxdx_test"]
+async fn bench_ssh_baseline() {
+    let key_path = std::path::PathBuf::from(std::env::var("HOME").expect("HOME not set"))
+        .join(".ssh/id_ed25519_mxdx_test");
+    if !key_path.exists() {
+        panic!(
+            "SSH test key not found at {}. Generate with:\n  \
+             ssh-keygen -t ed25519 -f ~/.ssh/id_ed25519_mxdx_test -N \"\"\n  \
+             cat ~/.ssh/id_ed25519_mxdx_test.pub >> ~/.ssh/authorized_keys",
+            key_path.display()
+        );
+    }
+    let key = key_path.to_str().unwrap();
+
+    let ssh_cmd = |args: &[&str]| -> std::process::Command {
+        let mut cmd = std::process::Command::new("ssh");
+        cmd.args([
+            "-i", key,
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "BatchMode=yes",
+            "-o", "LogLevel=ERROR",
+            "localhost",
+        ]);
+        for a in args {
+            cmd.arg(a);
+        }
+        cmd
+    };
+
+    let mut metrics = Vec::new();
+
+    // 1. SSH single command (echo hello) — 20 samples
+    eprintln!("=== SSH Baseline Benchmark ===");
+    eprintln!("[1/6] SSH single command latency (echo hello)...");
+    let mut cmd_times = Vec::new();
+    for _ in 0..20 {
+        let start = Instant::now();
+        let output = ssh_cmd(&["echo", "hello"]).output().expect("ssh failed");
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        assert!(output.status.success());
+        cmd_times.push(ms);
+    }
+    metrics.push(metric_from_samples("ssh_command_echo", "ssh localhost echo hello", cmd_times));
+
+    // 2. SSH command with output (ls -la /)
+    eprintln!("[2/6] SSH command with output (ls -la /)...");
+    let mut ls_times = Vec::new();
+    for _ in 0..10 {
+        let start = Instant::now();
+        let output = ssh_cmd(&["ls", "-la", "/"]).output().expect("ssh failed");
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        assert!(output.status.success());
+        ls_times.push(ms);
+    }
+    metrics.push(metric_from_samples("ssh_command_ls", "ssh localhost ls -la /", ls_times));
+
+    // 3. SSH command with computation (sha256sum)
+    eprintln!("[3/6] SSH command with computation...");
+    let mut hash_times = Vec::new();
+    for _ in 0..10 {
+        let start = Instant::now();
+        let output = ssh_cmd(&["sha256sum", "/etc/hostname"]).output().expect("ssh failed");
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        assert!(output.status.success());
+        hash_times.push(ms);
+    }
+    metrics.push(metric_from_samples("ssh_command_sha256sum", "ssh localhost sha256sum /etc/hostname", hash_times));
+
+    // 4. SSH burst throughput (20 sequential commands)
+    eprintln!("[4/6] SSH burst throughput (20 sequential echo)...");
+    let burst_start = Instant::now();
+    for i in 0..20 {
+        let output = ssh_cmd(&["echo", &format!("burst-{i}")]).output().expect("ssh failed");
+        assert!(output.status.success());
+    }
+    let burst_ms = burst_start.elapsed().as_secs_f64() * 1000.0;
+    let burst_ops = 20.0 / (burst_ms / 1000.0);
+    metrics.push(Metric {
+        name: "ssh_burst_throughput".into(),
+        operation: "20 sequential ssh echo commands".into(),
+        latency_ms: burst_ms,
+        throughput_ops_per_sec: Some(burst_ops),
+        samples: 20,
+        min_ms: None, max_ms: None, p50_ms: None, p95_ms: None, p99_ms: None,
+    });
+
+    // 5. SSH session lifecycle (connect + multi-step script + capture output)
+    eprintln!("[5/6] SSH full session lifecycle equivalent...");
+    let mut lifecycle_times = Vec::new();
+    for i in 0..5 {
+        let start = Instant::now();
+        let output = ssh_cmd(&["bash", "-c", &format!(
+            "echo 'session-{i} started'; sleep 0.1; echo 'processing...'; echo 'session-{i} done'; exit 0"
+        )]).output().expect("ssh failed");
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains(&format!("session-{i} done")));
+        lifecycle_times.push(ms);
+    }
+    metrics.push(metric_from_samples("ssh_session_lifecycle", "ssh: connect + bash script + capture output", lifecycle_times));
+
+    // 6. SSH with PTY allocation (-t -t)
+    eprintln!("[6/6] SSH with PTY allocation...");
+    let mut pty_times = Vec::new();
+    for _ in 0..10 {
+        let start = Instant::now();
+        let mut cmd = std::process::Command::new("ssh");
+        cmd.args(["-i", key, "-o", "StrictHostKeyChecking=accept-new",
+                  "-o", "BatchMode=yes", "-o", "LogLevel=ERROR",
+                  "-t", "-t", "localhost", "echo", "pty-test"]);
+        let output = cmd.output().expect("ssh -t failed");
+        let ms = start.elapsed().as_secs_f64() * 1000.0;
+        if output.status.success() {
+            pty_times.push(ms);
+        }
+    }
+    if !pty_times.is_empty() {
+        metrics.push(metric_from_samples("ssh_pty_command", "ssh -t localhost echo (with PTY)", pty_times));
+    }
+
+    // Write report
+    let report = BenchmarkReport {
+        timestamp: Utc::now().to_rfc3339(),
+        server: "localhost-ssh".into(),
+        federated: false,
+        git_sha: git_sha(),
+        metrics: metrics.clone(),
+    };
+    write_report(&report, "ssh-baseline");
+
+    eprintln!("\n=== SSH Baseline Summary ===");
+    for m in &metrics {
+        if let Some(tps) = m.throughput_ops_per_sec {
+            eprintln!("  {:<30} {:>10.1}ms  ({:.1} ops/sec, {} samples)",
+                m.name, m.latency_ms, tps, m.samples);
+        } else {
+            eprintln!("  {:<30} {:>10.1}ms  (p50={:.1}, p95={:.1}, {} samples)",
+                m.name, m.latency_ms, m.p50_ms.unwrap_or(0.0), m.p95_ms.unwrap_or(0.0), m.samples);
+        }
+    }
+
+    eprintln!("\n=== SSH vs mxdx Comparison ===");
+    let ssh_echo = metrics.iter().find(|m| m.name == "ssh_command_echo")
+        .map(|m| m.p50_ms.unwrap_or(m.latency_ms)).unwrap_or(0.0);
+    let ssh_lifecycle = metrics.iter().find(|m| m.name == "ssh_session_lifecycle")
+        .map(|m| m.p50_ms.unwrap_or(m.latency_ms)).unwrap_or(0.0);
+    let ssh_burst = metrics.iter().find(|m| m.name == "ssh_burst_throughput")
+        .and_then(|m| m.throughput_ops_per_sec).unwrap_or(0.0);
+
+    eprintln!("  Single command:");
+    eprintln!("    SSH echo (p50):             {:>8.1}ms", ssh_echo);
+    eprintln!("    mxdx local event send:      {:>8}ms  (from local benchmark)", "~18");
+    eprintln!("    mxdx local event delivery:  {:>8}ms  (includes sync polling)", "~5100");
+    eprintln!("  Session lifecycle:");
+    eprintln!("    SSH (script + output):      {:>8.1}ms", ssh_lifecycle);
+    eprintln!("    mxdx local (full flow):     {:>8}ms", "~5271");
+    eprintln!("    mxdx beta federated:        {:>8}ms", "~8093");
+    eprintln!("  Throughput:");
+    eprintln!("    SSH burst:                  {:>8.1} ops/sec", ssh_burst);
+    eprintln!("    mxdx local burst:           {:>8} ops/sec", "~83");
+    eprintln!("    mxdx beta burst:            {:>8} ops/sec", "~10");
 }
