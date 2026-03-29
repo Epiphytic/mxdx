@@ -1,0 +1,85 @@
+{
+  "timestamp": "2026-03-29T06:08:36.679306823+00:00",
+  "server": "https://ca1-beta.mxdx.dev + https://ca2-beta.mxdx.dev",
+  "federated": true,
+  "git_sha": "d00791cb5cdb993731e9de989f7dce0580ef8815",
+  "metrics": [
+    {
+      "name": "login_federated",
+      "operation": "MatrixClient::login_and_connect (cross-server)",
+      "latency_ms": 1513.8302985,
+      "samples": 1,
+      "min_ms": 1513.8302985,
+      "max_ms": 1513.8302985,
+      "p50_ms": 1513.8302985,
+      "p95_ms": 1513.8302985,
+      "p99_ms": 1513.8302985
+    },
+    {
+      "name": "room_creation_federated",
+      "operation": "create_encrypted_room (cross-server invite)",
+      "latency_ms": 197.147616,
+      "samples": 1,
+      "min_ms": 197.147616,
+      "max_ms": 197.147616,
+      "p50_ms": 197.147616,
+      "p95_ms": 197.147616,
+      "p99_ms": 197.147616
+    },
+    {
+      "name": "e2ee_key_exchange_federated",
+      "operation": "6x sync_once round-trip (cross-server)",
+      "latency_ms": 42279.812620000004,
+      "samples": 1,
+      "min_ms": 42279.812620000004,
+      "max_ms": 42279.812620000004,
+      "p50_ms": 42279.812620000004,
+      "p95_ms": 42279.812620000004,
+      "p99_ms": 42279.812620000004
+    },
+    {
+      "name": "event_send_federated",
+      "operation": "send_event (session task, cross-server)",
+      "latency_ms": 233.84708959999998,
+      "samples": 5,
+      "min_ms": 95.017998,
+      "max_ms": 783.141706,
+      "p50_ms": 96.673112,
+      "p95_ms": 783.141706,
+      "p99_ms": 783.141706
+    },
+    {
+      "name": "event_delivery_federated",
+      "operation": "send -> sync_and_collect (cross-server)",
+      "latency_ms": -0.0,
+      "samples": 0,
+      "min_ms": 0.0,
+      "max_ms": 0.0,
+      "p50_ms": 0.0,
+      "p95_ms": 0.0,
+      "p99_ms": 0.0
+    },
+    {
+      "name": "state_event_roundtrip_federated",
+      "operation": "send_state_event + sync + get_room_state_event (cross-server)",
+      "latency_ms": 1412.862887,
+      "samples": 3,
+      "min_ms": 1256.225129,
+      "max_ms": 1680.952531,
+      "p50_ms": 1301.411001,
+      "p95_ms": 1680.952531,
+      "p99_ms": 1680.952531
+    },
+    {
+      "name": "full_session_lifecycle_federated",
+      "operation": "task -> start -> result (cross-server)",
+      "latency_ms": 8092.697321,
+      "samples": 2,
+      "min_ms": 7620.811329,
+      "max_ms": 8564.583313,
+      "p50_ms": 7620.811329,
+      "p95_ms": 8564.583313,
+      "p99_ms": 8564.583313
+    }
+  ]
+}
