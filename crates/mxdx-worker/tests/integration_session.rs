@@ -1,8 +1,12 @@
-//! End-to-end session lifecycle tests using a real Tuwunel Matrix homeserver.
+//! Integration tests for the unified session event schema using a real Tuwunel Matrix homeserver.
 //!
-//! These tests verify that the unified session event schema works correctly
+//! NOTE: These are INTEGRATION tests, not end-to-end tests. They exercise library code
+//! directly (MatrixClient, session types) to validate that the event schema works correctly
 //! through real Matrix protocol — encrypted rooms, threaded events, state events,
-//! and E2EE key exchange — with no shortcuts or mocks.
+//! and E2EE key exchange. They do NOT spawn the compiled mxdx-worker/mxdx-client binaries.
+//!
+//! For true E2E tests that exercise the compiled binaries as subprocesses,
+//! see `e2e_binary.rs` and `e2e_binary_beta.rs`.
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};

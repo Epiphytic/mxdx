@@ -1,8 +1,13 @@
-//! End-to-end tests for the mxdx-client crate using a real Tuwunel Matrix homeserver.
+//! Integration tests for the mxdx-client library using a real Tuwunel Matrix homeserver.
 //!
-//! These tests validate that the client's public API (submit, tail, ls, logs, cancel,
-//! reconnect) works correctly when events flow through a real Matrix room with E2EE,
-//! threaded events, and state events.
+//! NOTE: These are INTEGRATION tests, not end-to-end tests. They exercise library code
+//! directly (MatrixClient, client modules like submit, tail, ls, logs, cancel, reconnect)
+//! to validate the client's public API works correctly when events flow through a real
+//! Matrix room with E2EE, threaded events, and state events. They do NOT spawn the
+//! compiled mxdx-client binary as a subprocess.
+//!
+//! For true E2E tests that exercise the compiled binaries as subprocesses,
+//! see `crates/mxdx-worker/tests/e2e_binary.rs` and `e2e_binary_beta.rs`.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
