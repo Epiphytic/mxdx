@@ -324,7 +324,8 @@ impl MatrixClient {
     }
 
     /// Sync and collect decrypted timeline events for a specific room within a timeout.
-    /// Uses Room::messages() which automatically decrypts E2EE events.
+    /// Extracts new events from the sync response timeline, which are automatically
+    /// decrypted by the SDK for E2EE rooms.
     pub async fn sync_and_collect_events(
         &self,
         room_id: &RoomId,
@@ -344,25 +345,29 @@ impl MatrixClient {
             let response = self.client.sync_once(settings).await?;
             sync_token = Some(response.next_batch.clone());
 
-            // After syncing, use Room::messages() to get decrypted events
-            if let Some(room) = self.client.get_room(room_id) {
-                let messages = room.messages(MessagesOptions::backward()).await?;
-                let mut collected: Vec<Value> = Vec::new();
-                for event in &messages.chunk {
-                    if let Ok(json) = serde_json::to_value(event.raw().json()) {
+            // Extract timeline events from the sync response for our room
+            let mut collected: Vec<Value> = Vec::new();
+
+            if let Some(joined) = response.rooms.joined.get(&room_id.to_owned()) {
+                for timeline_event in &joined.timeline.events {
+                    // TimelineEvent has .raw() which returns the decrypted event JSON
+                    let json_str = timeline_event.raw().json().get();
+                    if let Ok(json) = serde_json::from_str::<Value>(json_str) {
                         let event_type = json.get("type").and_then(|t| t.as_str());
-                        // Skip state events and encrypted events that weren't decrypted
+                        // Skip infrastructure events
                         if event_type != Some("m.room.encrypted")
                             && event_type != Some("m.room.encryption")
                             && event_type != Some("m.room.member")
+                            && event_type != Some("m.room.power_levels")
                         {
                             collected.push(json);
                         }
                     }
                 }
-                if !collected.is_empty() {
-                    return Ok(collected);
-                }
+            }
+
+            if !collected.is_empty() {
+                return Ok(collected);
             }
         }
 
