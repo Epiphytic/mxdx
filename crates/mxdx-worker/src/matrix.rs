@@ -1,4 +1,7 @@
+use std::time::Duration;
+
 use anyhow::Result;
+use mxdx_matrix::MatrixClient;
 use serde::{de::DeserializeOwned, Serialize};
 
 /// Abstraction over Matrix room operations for the worker.
@@ -101,6 +104,208 @@ pub enum IncomingEvent {
         session_uuid: String,
         content: serde_json::Value,
     },
+}
+
+/// Live Matrix-backed implementation of `WorkerRoomOps`.
+/// Wraps an `mxdx_matrix::MatrixClient` and a pre-resolved room ID.
+pub struct MatrixWorkerRoom {
+    client: MatrixClient,
+    room_id: mxdx_matrix::OwnedRoomId,
+}
+
+impl MatrixWorkerRoom {
+    pub fn new(client: MatrixClient, room_id: mxdx_matrix::OwnedRoomId) -> Self {
+        Self { client, room_id }
+    }
+
+    pub fn room_id(&self) -> &mxdx_matrix::RoomId {
+        &self.room_id
+    }
+
+    pub fn client(&self) -> &MatrixClient {
+        &self.client
+    }
+
+    /// Sync and parse incoming events into `IncomingEvent` variants.
+    /// This is not part of the `WorkerRoomOps` trait because it is
+    /// specific to the live Matrix implementation.
+    pub async fn sync_events(&self, timeout: Duration) -> Result<Vec<IncomingEvent>> {
+        let raw_events = self
+            .client
+            .sync_and_collect_events(&self.room_id, timeout)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        let mut parsed = Vec::new();
+        for event in raw_events {
+            let event_type = event
+                .get("type")
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            let content = event.get("content").cloned().unwrap_or(serde_json::json!({}));
+
+            match event_type {
+                "org.mxdx.session.task" => {
+                    let event_id = event
+                        .get("event_id")
+                        .and_then(|e| e.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    parsed.push(IncomingEvent::TaskSubmission { event_id, content });
+                }
+                "org.mxdx.session.input" => {
+                    let session_uuid = content
+                        .get("session_uuid")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    parsed.push(IncomingEvent::SessionInput {
+                        session_uuid,
+                        content,
+                    });
+                }
+                "org.mxdx.session.signal" => {
+                    let session_uuid = content
+                        .get("session_uuid")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    parsed.push(IncomingEvent::SessionSignal {
+                        session_uuid,
+                        content,
+                    });
+                }
+                "org.mxdx.session.resize" => {
+                    let session_uuid = content
+                        .get("session_uuid")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    parsed.push(IncomingEvent::SessionResize {
+                        session_uuid,
+                        content,
+                    });
+                }
+                "org.mxdx.session.cancel" => {
+                    let session_uuid = content
+                        .get("session_uuid")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    parsed.push(IncomingEvent::SessionCancel {
+                        session_uuid,
+                        content,
+                    });
+                }
+                _ => {
+                    // Unknown event types are silently ignored
+                }
+            }
+        }
+
+        Ok(parsed)
+    }
+}
+
+impl WorkerRoomOps for MatrixWorkerRoom {
+    fn get_or_create_room(
+        &self,
+        _room_name: &str,
+    ) -> impl std::future::Future<Output = Result<String>> + Send {
+        // Room is already set up at construction time
+        let room_id = self.room_id.to_string();
+        async move { Ok(room_id) }
+    }
+
+    fn post_to_thread(
+        &self,
+        room_id: &str,
+        thread_root: &str,
+        event_type: &str,
+        content: serde_json::Value,
+    ) -> impl std::future::Future<Output = Result<String>> + Send {
+        let rid_str = room_id.to_string();
+        let thread_root = thread_root.to_string();
+        let event_type = event_type.to_string();
+        // Safety: we need to move these into the async block
+        // but self is borrowed, so capture client ref as owned clone isn't possible.
+        // Instead, we parse room_id eagerly.
+        let client = &self.client;
+        // We can't move &self.client into the future, so we use a helper pattern:
+        // parse room_id now, then call client method.
+        async move {
+            let rid = <&mxdx_matrix::RoomId>::try_from(rid_str.as_str())
+                .map_err(|e| anyhow::anyhow!("Invalid room ID: {e}"))?;
+            client
+                .send_threaded_event(rid, &event_type, &thread_root, content)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }
+    }
+
+    fn write_state(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+        content: serde_json::Value,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        let rid_str = room_id.to_string();
+        let event_type = event_type.to_string();
+        let state_key = state_key.to_string();
+        let client = &self.client;
+        async move {
+            let rid = <&mxdx_matrix::RoomId>::try_from(rid_str.as_str())
+                .map_err(|e| anyhow::anyhow!("Invalid room ID: {e}"))?;
+            client
+                .send_state_event(rid, &event_type, &state_key, content)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }
+    }
+
+    fn read_state(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+    ) -> impl std::future::Future<Output = Result<Option<serde_json::Value>>> + Send {
+        let rid_str = room_id.to_string();
+        let event_type = event_type.to_string();
+        let state_key = state_key.to_string();
+        let client = &self.client;
+        async move {
+            let rid = <&mxdx_matrix::RoomId>::try_from(rid_str.as_str())
+                .map_err(|e| anyhow::anyhow!("Invalid room ID: {e}"))?;
+            match client
+                .get_room_state_event(rid, &event_type, &state_key)
+                .await
+            {
+                Ok(value) => Ok(Some(value)),
+                Err(_) => Ok(None),
+            }
+        }
+    }
+
+    fn remove_state(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+    ) -> impl std::future::Future<Output = Result<()>> + Send {
+        let rid_str = room_id.to_string();
+        let event_type = event_type.to_string();
+        let state_key = state_key.to_string();
+        let client = &self.client;
+        async move {
+            let rid = <&mxdx_matrix::RoomId>::try_from(rid_str.as_str())
+                .map_err(|e| anyhow::anyhow!("Invalid room ID: {e}"))?;
+            client
+                .send_state_event(rid, &event_type, &state_key, serde_json::json!({}))
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -226,5 +431,12 @@ mod tests {
 
         let room2 = WorkerRoom::new("!xyz789:matrix.org".to_string());
         assert_eq!(room2.room_id(), "!xyz789:matrix.org");
+    }
+
+    fn _assert_implements_trait<T: WorkerRoomOps>() {}
+
+    #[test]
+    fn matrix_worker_room_implements_worker_room_ops() {
+        _assert_implements_trait::<MatrixWorkerRoom>();
     }
 }
