@@ -28,6 +28,18 @@ enum Commands {
         /// Room name override
         #[arg(long)]
         room_name: Option<String>,
+
+        /// Matrix homeserver URL
+        #[arg(long, env = "MXDX_HOMESERVER")]
+        homeserver: Option<String>,
+
+        /// Matrix username
+        #[arg(long, env = "MXDX_USERNAME")]
+        username: Option<String>,
+
+        /// Matrix password
+        #[arg(long, env = "MXDX_PASSWORD")]
+        password: Option<String>,
     },
 }
 
@@ -43,12 +55,18 @@ async fn main() -> Result<()> {
             history_retention,
             cross_signing_mode,
             room_name,
+            homeserver,
+            username,
+            password,
         } => {
             let args = WorkerArgs {
                 trust_anchor,
                 history_retention,
                 cross_signing_mode,
                 room_name,
+                homeserver,
+                username,
+                password,
             };
             let config = WorkerRuntimeConfig::load()?.with_cli_overrides(&args);
             mxdx_worker::run_worker(config).await?;

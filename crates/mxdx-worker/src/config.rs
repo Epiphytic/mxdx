@@ -1,12 +1,24 @@
 use anyhow::Result;
 use mxdx_types::config::{DefaultsConfig, WorkerConfig, load_merged_config};
 
+/// Matrix credentials for login (from CLI flags, env vars, or config).
+/// NOTE: The password field must NEVER be logged or included in tracing output.
+#[derive(Debug, Clone)]
+pub struct WorkerCredentials {
+    pub homeserver: String,
+    pub username: String,
+    pub password: String,
+}
+
 /// CLI arguments that can override config file values.
 pub struct WorkerArgs {
     pub trust_anchor: Option<String>,
     pub history_retention: Option<u64>,
     pub cross_signing_mode: Option<String>,
     pub room_name: Option<String>,
+    pub homeserver: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 /// Runtime configuration for the worker, combining defaults + worker config + CLI overrides.
@@ -15,6 +27,8 @@ pub struct WorkerRuntimeConfig {
     pub worker: WorkerConfig,
     /// Computed from hostname.username.localpart, or explicitly set.
     pub resolved_room_name: String,
+    /// Matrix credentials for login. None if not all fields are available.
+    pub credentials: Option<WorkerCredentials>,
 }
 
 impl WorkerRuntimeConfig {
@@ -28,6 +42,7 @@ impl WorkerRuntimeConfig {
             defaults,
             worker,
             resolved_room_name,
+            credentials: None,
         })
     }
 
@@ -38,6 +53,7 @@ impl WorkerRuntimeConfig {
             defaults,
             worker,
             resolved_room_name,
+            credentials: None,
         }
     }
 
@@ -52,6 +68,23 @@ impl WorkerRuntimeConfig {
         if let Some(ref name) = args.room_name {
             self.resolved_room_name = name.clone();
         }
+
+        // Build credentials: CLI args take highest priority, fall back to first account in defaults.
+        let homeserver = args
+            .homeserver
+            .clone()
+            .or_else(|| self.defaults.accounts.first().map(|a| a.homeserver.clone()));
+
+        if let (Some(hs), Some(user), Some(pass)) =
+            (homeserver, args.username.clone(), args.password.clone())
+        {
+            self.credentials = Some(WorkerCredentials {
+                homeserver: hs,
+                username: user,
+                password: pass,
+            });
+        }
+
         self
     }
 
@@ -112,6 +145,9 @@ mod tests {
             history_retention: Some(7),
             cross_signing_mode: None,
             room_name: Some("cli-room".into()),
+            homeserver: None,
+            username: None,
+            password: None,
         };
         let cfg = cfg.with_cli_overrides(&args);
 
@@ -163,6 +199,77 @@ mod tests {
             "Expected room name to end with '.anon', got: {}",
             cfg.resolved_room_name
         );
+    }
+
+    #[test]
+    fn credentials_built_from_cli_args() {
+        let defaults = DefaultsConfig::default();
+        let worker = WorkerConfig::default();
+        let cfg = WorkerRuntimeConfig::from_parts(defaults, worker);
+
+        let args = WorkerArgs {
+            trust_anchor: None,
+            history_retention: None,
+            cross_signing_mode: None,
+            room_name: None,
+            homeserver: Some("https://matrix.example.com".into()),
+            username: Some("bot".into()),
+            password: Some("secret".into()),
+        };
+        let cfg = cfg.with_cli_overrides(&args);
+
+        let creds = cfg.credentials.expect("credentials should be set");
+        assert_eq!(creds.homeserver, "https://matrix.example.com");
+        assert_eq!(creds.username, "bot");
+        assert_eq!(creds.password, "secret");
+    }
+
+    #[test]
+    fn credentials_fallback_homeserver_from_defaults() {
+        let defaults = DefaultsConfig {
+            accounts: vec![AccountConfig {
+                user_id: "@worker:fallback.com".into(),
+                homeserver: "https://fallback.com".into(),
+            }],
+            ..Default::default()
+        };
+        let worker = WorkerConfig::default();
+        let cfg = WorkerRuntimeConfig::from_parts(defaults, worker);
+
+        let args = WorkerArgs {
+            trust_anchor: None,
+            history_retention: None,
+            cross_signing_mode: None,
+            room_name: None,
+            homeserver: None, // not provided — should fall back to defaults
+            username: Some("bot".into()),
+            password: Some("secret".into()),
+        };
+        let cfg = cfg.with_cli_overrides(&args);
+
+        let creds = cfg.credentials.expect("credentials should be set from fallback");
+        assert_eq!(creds.homeserver, "https://fallback.com");
+        assert_eq!(creds.username, "bot");
+    }
+
+    #[test]
+    fn credentials_none_when_incomplete() {
+        let defaults = DefaultsConfig::default();
+        let worker = WorkerConfig::default();
+        let cfg = WorkerRuntimeConfig::from_parts(defaults, worker);
+
+        // Only username, no homeserver or password
+        let args = WorkerArgs {
+            trust_anchor: None,
+            history_retention: None,
+            cross_signing_mode: None,
+            room_name: None,
+            homeserver: None,
+            username: Some("bot".into()),
+            password: None,
+        };
+        let cfg = cfg.with_cli_overrides(&args);
+        assert!(cfg.credentials.is_none(), "credentials should be None when incomplete");
     }
 
     #[test]

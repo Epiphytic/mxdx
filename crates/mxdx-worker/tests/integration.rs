@@ -103,6 +103,9 @@ fn cli_args_override_toml() {
         history_retention: Some(7),
         cross_signing_mode: None,
         room_name: Some("cli-room".into()),
+        homeserver: None,
+        username: None,
+        password: None,
     };
     let cfg = cfg.with_cli_overrides(&args);
 
