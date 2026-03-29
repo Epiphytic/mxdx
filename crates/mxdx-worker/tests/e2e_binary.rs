@@ -58,7 +58,7 @@ fn start_worker_with_room_id(
         .expect("failed to start mxdx-worker binary")
 }
 
-/// Run an mxdx-client command synchronously with a direct room ID.
+/// Run an mxdx-client command synchronously with a direct room ID and a 30s timeout.
 fn run_client_with_room_id(
     homeserver: &str,
     username: &str,
@@ -73,10 +73,16 @@ fn run_client_with_room_id(
         "--room-id", room_id,
     ];
     full_args.extend_from_slice(subcommand_args);
-    Command::new(cargo_bin("mxdx-client"))
+    // Use timeout to prevent hanging on sync loops
+    let mut child = Command::new("timeout")
+        .arg("30")
+        .arg(cargo_bin("mxdx-client"))
         .args(&full_args)
-        .output()
-        .expect("failed to run mxdx-client binary")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn mxdx-client binary");
+    child.wait_with_output().expect("failed to wait for mxdx-client")
 }
 
 /// Register a user via the tuwunel HTTP API so the binary can log in.
@@ -187,9 +193,16 @@ async fn e2e_echo_command_lifecycle() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
 
-    eprintln!("[e2e_echo] stdout: {}", stdout);
-    eprintln!("[e2e_echo] stderr: {}", stderr);
-    eprintln!("[e2e_echo] exit code: {:?}", output.status.code());
+    eprintln!("[e2e_echo] client stdout: {}", stdout);
+    eprintln!("[e2e_echo] client stderr: {}", stderr);
+    eprintln!("[e2e_echo] client exit code: {:?}", output.status.code());
+
+    // Capture worker stderr
+    let _ = worker.kill();
+    let worker_out = worker.wait_with_output().expect("wait_with_output");
+    let worker_stderr = String::from_utf8_lossy(&worker_out.stderr);
+    eprintln!("[e2e_echo] worker stderr (last 2000 chars): {}",
+        &worker_stderr[worker_stderr.len().saturating_sub(2000)..]);
 
     assert!(
         stdout.contains("hello world"),
@@ -202,8 +215,6 @@ async fn e2e_echo_command_lifecycle() {
         output.status.code(),
     );
 
-    let _ = worker.kill();
-    let _ = worker.wait();
     hs.stop().await;
 }
 
