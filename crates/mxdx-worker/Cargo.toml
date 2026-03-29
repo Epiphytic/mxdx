@@ -40,3 +40,4 @@ mxdx-types = { path = "../mxdx-types", version = "1.1.0" }
 mxdx-matrix = { path = "../mxdx-matrix", version = "1.1.0" }
 mxdx-test-helpers = { path = "../../tests/helpers" }
 base64 = { workspace = true }
+chrono = "0.4"
