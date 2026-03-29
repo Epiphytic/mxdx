@@ -460,4 +460,140 @@ impl MatrixClient {
             ))),
         }
     }
+
+    // ── Cross-signing ──────────────────────────────────────────────────
+
+    /// Bootstrap cross-signing keys (master, user-signing, self-signing) and
+    /// upload them. Tries without auth first (UIA grace period right after
+    /// login), falls back to password auth if the server requires UIA.
+    pub async fn bootstrap_cross_signing(&self, password: Option<&str>) -> Result<()> {
+        use matrix_sdk::ruma::api::client::uiaa;
+
+        let encryption = self.client.encryption();
+
+        match encryption.bootstrap_cross_signing(None).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                // If no password provided, can't handle UIA
+                let password = password.ok_or_else(|| {
+                    MatrixClientError::Other(anyhow::anyhow!(
+                        "Cross-signing bootstrap requires UIA but no password provided: {e}"
+                    ))
+                })?;
+
+                let uiaa_info = e.as_uiaa_response().ok_or_else(|| {
+                    MatrixClientError::Other(anyhow::anyhow!(
+                        "Cross-signing bootstrap failed (not UIA): {e}"
+                    ))
+                })?;
+
+                let session = uiaa_info.session.clone();
+                let user_id = self.user_id();
+
+                let mut password_auth = uiaa::Password::new(
+                    uiaa::UserIdentifier::UserIdOrLocalpart(user_id.localpart().to_owned()),
+                    password.to_owned(),
+                );
+                password_auth.session = session;
+
+                encryption
+                    .bootstrap_cross_signing(Some(uiaa::AuthData::Password(password_auth)))
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Bootstrap cross-signing only if not already set up.
+    /// No-op if keys exist and private parts are in the local crypto store.
+    /// Falls back to full bootstrap if private keys are missing.
+    pub async fn bootstrap_cross_signing_if_needed(&self, password: Option<&str>) -> Result<()> {
+        let encryption = self.client.encryption();
+        match encryption.bootstrap_cross_signing_if_needed(None).await {
+            Ok(()) => return Ok(()),
+            Err(_) => {}
+        }
+        // Fall back to full bootstrap
+        self.bootstrap_cross_signing(password).await
+    }
+
+    /// Verify our own user identity (marks as locally verified).
+    /// Must be done before verifying other users.
+    pub async fn verify_own_identity(&self) -> Result<()> {
+        let user_id = self.user_id().to_owned();
+        let identity = self
+            .client
+            .encryption()
+            .get_user_identity(&user_id)
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?
+            .ok_or_else(|| {
+                MatrixClientError::Other(anyhow::anyhow!(
+                    "No identity found — bootstrap cross-signing first"
+                ))
+            })?;
+        identity
+            .verify()
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+        Ok(())
+    }
+
+    /// Verify another user's identity by signing their master key.
+    /// Both users must have bootstrapped cross-signing first.
+    pub async fn verify_user(&self, user_id: &UserId) -> Result<()> {
+        let identity = self
+            .client
+            .encryption()
+            .get_user_identity(user_id)
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?
+            .ok_or_else(|| {
+                MatrixClientError::Other(anyhow::anyhow!(
+                    "No identity found for {} — they may not have bootstrapped cross-signing",
+                    user_id
+                ))
+            })?;
+        identity
+            .verify()
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+        Ok(())
+    }
+
+    /// Check if a user's identity is verified from our perspective.
+    pub async fn is_user_verified(&self, user_id: &UserId) -> Result<bool> {
+        let identity = self
+            .client
+            .encryption()
+            .get_user_identity(user_id)
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+        Ok(identity.map(|i| i.is_verified()).unwrap_or(false))
+    }
+
+    /// Get all verified user IDs in a room by scanning active members.
+    pub async fn get_verified_user_ids_in_room(
+        &self,
+        room_id: &RoomId,
+    ) -> Result<Vec<OwnedUserId>> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| MatrixClientError::RoomNotFound(room_id.to_string()))?;
+
+        let members = room
+            .members(matrix_sdk::RoomMemberships::ACTIVE)
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+
+        let mut verified = Vec::new();
+        for member in &members {
+            let uid = member.user_id();
+            if self.is_user_verified(uid).await? {
+                verified.push(uid.to_owned());
+            }
+        }
+        Ok(verified)
+    }
 }
