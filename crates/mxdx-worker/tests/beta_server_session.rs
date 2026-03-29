@@ -896,3 +896,545 @@ async fn beta_coordinator_routes_task() {
 
     eprintln!("[ok] Three-party coordinator routing flow passed on beta server");
 }
+
+// ---------------------------------------------------------------------------
+// Test 7: Cross-server federation — client on ca1, worker on ca2
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires test-credentials.toml with both servers"]
+async fn beta_cross_server_session_flow() {
+    let creds = load_test_credentials().expect("test-credentials.toml required");
+    let server2_url = creds.server2_url.as_ref().expect("server2 URL required for federation tests");
+
+    eprintln!("[1/9] Logging in client on ca1 ({})...", creds.server_url);
+    let mut client = MatrixClient::login_and_connect(&creds.server_url, &creds.username1, &creds.password1)
+        .await
+        .expect("Client login on ca1 failed");
+    client.set_room_creation_delay(Some(Duration::from_secs(3)));
+    client.set_room_creation_timeout(Duration::from_secs(120));
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    eprintln!("[2/9] Logging in worker on ca2 ({server2_url})...");
+    let worker = MatrixClient::login_and_connect(server2_url, &creds.username2, &creds.password2)
+        .await
+        .expect("Worker login on ca2 failed");
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    eprintln!("  Client user_id: {}", client.user_id());
+    eprintln!("  Worker user_id: {}", worker.user_id());
+    assert_ne!(
+        client.user_id().server_name(),
+        worker.user_id().server_name(),
+        "Client and worker must be on different servers for this test"
+    );
+
+    // Client creates room on ca1 and invites worker on ca2
+    let topic = "org.mxdx.e2e.cross-server-session";
+    eprintln!("[3/9] Client creating federated room, inviting worker...");
+    let room_id_str = match find_room_by_topic(&client, topic).await {
+        Some(id) => {
+            eprintln!("  Reusing existing room: {id}");
+            id
+        }
+        None => {
+            eprintln!("  Creating new E2EE room with cross-server invite...");
+            let rid = client
+                .create_encrypted_room(&[worker.user_id().to_owned()])
+                .await
+                .expect("Room creation failed");
+
+            tokio::time::sleep(Duration::from_secs(5)).await; // Extra time for federation
+
+            client
+                .send_state_event(
+                    &rid,
+                    "m.room.topic",
+                    "",
+                    serde_json::json!({ "topic": topic }),
+                )
+                .await
+                .expect("Failed to set room topic");
+
+            eprintln!("  Created federated room: {rid}");
+            rid.to_string()
+        }
+    };
+
+    let room_id = <&RoomId>::try_from(room_id_str.as_str()).expect("Invalid room ID");
+
+    // Worker joins from ca2 (federation must deliver the invite)
+    eprintln!("[4/9] Worker joining from ca2 (federation)...");
+    for attempt in 1..=5 {
+        worker.sync_once().await.ok();
+        match worker.join_room(room_id).await {
+            Ok(_) => {
+                eprintln!("  Worker joined on attempt {attempt}");
+                break;
+            }
+            Err(e) if attempt < 5 => {
+                eprintln!("  Join attempt {attempt} failed ({e}), retrying after 3s...");
+                tokio::time::sleep(Duration::from_secs(3)).await;
+            }
+            Err(e) => panic!("Worker failed to join after 5 attempts: {e}"),
+        }
+    }
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Exchange E2EE keys across federation
+    eprintln!("[5/9] Exchanging E2EE keys across federation...");
+    for round in 1..=6 {
+        client.sync_once().await.ok();
+        worker.sync_once().await.ok();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if round % 2 == 0 {
+            eprintln!("  Key exchange round {round}/6");
+        }
+    }
+
+    // Client submits task from ca1
+    let session_uuid = format!("beta-xserver-{}", uuid::Uuid::new_v4());
+    eprintln!("[6/9] Client (ca1) submitting task {session_uuid}...");
+    let task_content = serde_json::json!({
+        "type": "org.mxdx.session.task",
+        "content": {
+            "uuid": session_uuid,
+            "sender_id": client.user_id().to_string(),
+            "bin": "hostname",
+            "args": [],
+            "interactive": false,
+            "no_room_output": false,
+            "heartbeat_interval_seconds": 30,
+            "required_capabilities": [],
+        }
+    });
+    let task_event_id = client
+        .send_event(room_id, task_content)
+        .await
+        .expect("Failed to send task from ca1");
+    eprintln!("  Task sent from ca1: {task_event_id}");
+
+    tokio::time::sleep(Duration::from_secs(5)).await; // Federation delivery time
+
+    // Worker on ca2 receives the task
+    eprintln!("[7/9] Worker (ca2) syncing to receive task...");
+    worker.sync_once().await.ok();
+    let events = worker
+        .sync_and_collect_events(room_id, Duration::from_secs(15))
+        .await
+        .expect("Worker sync failed");
+
+    let found_task = events.iter().any(|e| {
+        e.get("content")
+            .and_then(|c| c.get("uuid"))
+            .and_then(|u| u.as_str())
+            == Some(&session_uuid)
+    });
+    assert!(found_task, "Worker on ca2 should see the task sent from ca1 via federation");
+    eprintln!("  Worker on ca2 received task via federation");
+
+    // Worker on ca2 posts result back
+    eprintln!("[8/9] Worker (ca2) posting result...");
+    let result_content = serde_json::json!({
+        "session_uuid": session_uuid,
+        "worker_id": worker.user_id().to_string(),
+        "status": "success",
+        "exit_code": 0,
+        "duration_seconds": 2,
+        "tail": "ca2-worker-host\n",
+    });
+    worker
+        .send_threaded_event(room_id, "org.mxdx.session.result", &task_event_id, result_content)
+        .await
+        .expect("Worker on ca2 failed to send result");
+
+    tokio::time::sleep(Duration::from_secs(5)).await; // Federation delivery time
+
+    // Client on ca1 sees the result
+    eprintln!("[9/9] Client (ca1) verifying result from ca2...");
+    client.sync_once().await.ok();
+    let client_events = client
+        .sync_and_collect_events(room_id, Duration::from_secs(15))
+        .await
+        .expect("Client sync failed");
+
+    let found_result = client_events.iter().any(|e| {
+        e.get("content")
+            .and_then(|c| c.get("status"))
+            .and_then(|s| s.as_str())
+            == Some("success")
+    });
+    assert!(found_result, "Client on ca1 should see result from worker on ca2");
+
+    eprintln!("[ok] Cross-server federated session flow passed (ca1 ↔ ca2)");
+}
+
+// ---------------------------------------------------------------------------
+// Test 8: Cross-server state events — state events readable across federation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires test-credentials.toml with both servers"]
+async fn beta_cross_server_state_events() {
+    let creds = load_test_credentials().expect("test-credentials.toml required");
+    let server2_url = creds.server2_url.as_ref().expect("server2 URL required");
+
+    eprintln!("[1/6] Logging in: client on ca1, worker on ca2...");
+    let mut client = MatrixClient::login_and_connect(&creds.server_url, &creds.username1, &creds.password1)
+        .await
+        .expect("Client login failed");
+    client.set_room_creation_delay(Some(Duration::from_secs(3)));
+    client.set_room_creation_timeout(Duration::from_secs(120));
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let worker = MatrixClient::login_and_connect(server2_url, &creds.username2, &creds.password2)
+        .await
+        .expect("Worker login failed");
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Find or create federated room
+    let topic = "org.mxdx.e2e.cross-server-state";
+    eprintln!("[2/6] Setting up federated room...");
+    let room_id_str = match find_room_by_topic(&client, topic).await {
+        Some(id) => id,
+        None => {
+            let rid = client
+                .create_encrypted_room(&[worker.user_id().to_owned()])
+                .await
+                .expect("Room creation failed");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            client
+                .send_state_event(&rid, "m.room.topic", "", serde_json::json!({ "topic": topic }))
+                .await
+                .expect("Failed to set topic");
+            rid.to_string()
+        }
+    };
+    let room_id = <&RoomId>::try_from(room_id_str.as_str()).expect("Invalid room ID");
+
+    // Worker joins and exchange keys
+    for _ in 0..3 {
+        worker.sync_once().await.ok();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    worker.join_room(room_id).await.ok();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    for _ in 0..4 {
+        client.sync_once().await.ok();
+        worker.sync_once().await.ok();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    // Worker on ca2 needs power level to send state events
+    // Grant power level 50 to worker
+    eprintln!("[3/6] Granting worker power level for state events...");
+    let power_levels = serde_json::json!({
+        "users": {
+            client.user_id().to_string(): 100,
+            worker.user_id().to_string(): 50,
+        },
+        "state_default": 50,
+    });
+    client
+        .send_state_event(room_id, "m.room.power_levels", "", power_levels)
+        .await
+        .expect("Failed to set power levels");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    worker.sync_once().await.ok();
+
+    // Worker on ca2 writes ActiveSessionState
+    let session_uuid = format!("beta-xstate-{}", uuid::Uuid::new_v4());
+    let state_key = format!("session/{session_uuid}/active");
+    eprintln!("[4/6] Worker (ca2) writing ActiveSessionState...");
+    let active = ActiveSessionState {
+        bin: "uname".into(),
+        args: vec!["-a".into()],
+        pid: Some(54321),
+        start_time: now_secs(),
+        client_id: client.user_id().to_string(),
+        interactive: false,
+        worker_id: worker.user_id().to_string(),
+    };
+    worker
+        .send_state_event(
+            room_id,
+            "org.mxdx.session.active",
+            &state_key,
+            serde_json::to_value(&active).expect("serialize"),
+        )
+        .await
+        .expect("Worker on ca2 failed to write state event");
+    eprintln!("  State event written from ca2");
+
+    tokio::time::sleep(Duration::from_secs(5)).await; // Federation sync time
+
+    // Client on ca1 reads the state event
+    eprintln!("[5/6] Client (ca1) reading state event written by ca2...");
+    client.sync_once().await.ok();
+    let readback = client
+        .get_room_state_event(room_id, "org.mxdx.session.active", &state_key)
+        .await
+        .expect("Client on ca1 failed to read state event from ca2");
+    let parsed: ActiveSessionState =
+        serde_json::from_value(readback).expect("Failed to parse");
+
+    assert_eq!(parsed.bin, "uname");
+    assert_eq!(parsed.worker_id, worker.user_id().to_string());
+    assert_eq!(parsed.client_id, client.user_id().to_string());
+    eprintln!("  Client (ca1) verified state event from worker (ca2): bin={}, worker={}", parsed.bin, parsed.worker_id);
+
+    // Worker on ca2 writes CompletedSessionState
+    let completed_key = format!("session/{session_uuid}/completed");
+    eprintln!("[6/6] Cross-server completed state event...");
+    let completed = CompletedSessionState {
+        exit_code: Some(0),
+        duration_seconds: 3,
+        completion_time: now_secs(),
+    };
+    worker
+        .send_state_event(
+            room_id,
+            "org.mxdx.session.completed",
+            &completed_key,
+            serde_json::to_value(&completed).expect("serialize"),
+        )
+        .await
+        .expect("Failed to write completed state");
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    let readback = client
+        .get_room_state_event(room_id, "org.mxdx.session.completed", &completed_key)
+        .await
+        .expect("Failed to read completed state");
+    let parsed: CompletedSessionState = serde_json::from_value(readback).expect("parse");
+    assert_eq!(parsed.exit_code, Some(0));
+    eprintln!("  Completed state verified across federation");
+
+    eprintln!("[ok] Cross-server state events work across ca1 ↔ ca2 federation");
+}
+
+// ---------------------------------------------------------------------------
+// Test 9: Three-party cross-server — coordinator ca1, client ca1, worker ca2
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires test-credentials.toml with both servers and coordinator"]
+async fn beta_cross_server_coordinator_routing() {
+    let creds = load_test_credentials().expect("test-credentials.toml required");
+    let server2_url = creds.server2_url.as_ref().expect("server2 URL required");
+    let coord_user = creds.coordinator_username.as_ref().expect("coordinator required");
+    let coord_pass = creds.coordinator_password.as_ref().expect("coordinator password required");
+
+    eprintln!("[1/9] Logging in: coordinator + client on ca1, worker on ca2...");
+    let mut coordinator = MatrixClient::login_and_connect(&creds.server_url, coord_user, coord_pass)
+        .await
+        .expect("Coordinator login failed");
+    coordinator.set_room_creation_delay(Some(Duration::from_secs(3)));
+    coordinator.set_room_creation_timeout(Duration::from_secs(120));
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    let client = MatrixClient::login_and_connect(&creds.server_url, &creds.username1, &creds.password1)
+        .await
+        .expect("Client login failed");
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Worker on the OTHER server
+    let worker = MatrixClient::login_and_connect(server2_url, &creds.username2, &creds.password2)
+        .await
+        .expect("Worker login on ca2 failed");
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    eprintln!("  Coordinator: {} (ca1)", coordinator.user_id());
+    eprintln!("  Client:      {} (ca1)", client.user_id());
+    eprintln!("  Worker:      {} (ca2)", worker.user_id());
+
+    // Coordinator creates room, invites both
+    let topic = "org.mxdx.e2e.cross-server-coordinator";
+    eprintln!("[2/9] Coordinator creating federated room...");
+    let room_id_str = match find_room_by_topic(&coordinator, topic).await {
+        Some(id) => {
+            eprintln!("  Reusing existing room: {id}");
+            id
+        }
+        None => {
+            let rid = coordinator
+                .create_encrypted_room(&[
+                    client.user_id().to_owned(),
+                    worker.user_id().to_owned(),
+                ])
+                .await
+                .expect("Room creation failed");
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            coordinator
+                .send_state_event(&rid, "m.room.topic", "", serde_json::json!({ "topic": topic }))
+                .await
+                .expect("Failed to set topic");
+            eprintln!("  Created federated room: {rid}");
+            rid.to_string()
+        }
+    };
+    let room_id = <&RoomId>::try_from(room_id_str.as_str()).expect("Invalid room ID");
+
+    // Everyone joins
+    eprintln!("[3/9] All parties joining (including ca2 worker via federation)...");
+    for _ in 0..3 {
+        client.sync_once().await.ok();
+        worker.sync_once().await.ok();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    client.join_room(room_id).await.ok();
+    worker.join_room(room_id).await.ok();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    // Exchange E2EE keys (extra rounds for 3-party federation)
+    eprintln!("[4/9] Exchanging E2EE keys (3-party federation)...");
+    for round in 1..=8 {
+        coordinator.sync_once().await.ok();
+        client.sync_once().await.ok();
+        worker.sync_once().await.ok();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if round % 2 == 0 {
+            eprintln!("  Key exchange round {round}/8");
+        }
+    }
+
+    // Worker on ca2 posts WorkerInfo
+    eprintln!("[5/9] Worker (ca2) posting WorkerInfo...");
+    let worker_info = WorkerInfo {
+        worker_id: worker.user_id().to_string(),
+        host: "ca2-worker-host".into(),
+        os: "linux".into(),
+        arch: "x86_64".into(),
+        cpu_count: 4,
+        memory_total_mb: 8192,
+        disk_available_mb: 40000,
+        tools: vec![],
+        capabilities: vec!["linux".into(), "remote".into()],
+        updated_at: now_secs(),
+    };
+    // Coordinator grants worker power to write state
+    coordinator
+        .send_state_event(
+            room_id,
+            "m.room.power_levels",
+            "",
+            serde_json::json!({
+                "users": {
+                    coordinator.user_id().to_string(): 100,
+                    client.user_id().to_string(): 50,
+                    worker.user_id().to_string(): 50,
+                },
+                "state_default": 50,
+            }),
+        )
+        .await
+        .ok();
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    worker.sync_once().await.ok();
+
+    worker
+        .send_state_event(
+            room_id,
+            "org.mxdx.worker.info",
+            &format!("worker/{}", worker.user_id()),
+            serde_json::to_value(&worker_info).expect("serialize"),
+        )
+        .await
+        .expect("Worker failed to post WorkerInfo");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Client on ca1 submits task
+    let session_uuid = format!("beta-xcoord-{}", uuid::Uuid::new_v4());
+    eprintln!("[6/9] Client (ca1) submitting task to federated coordinator room...");
+    let task_content = serde_json::json!({
+        "type": "org.mxdx.session.task",
+        "content": {
+            "uuid": session_uuid,
+            "sender_id": client.user_id().to_string(),
+            "bin": "date",
+            "args": ["+%s"],
+            "interactive": false,
+            "no_room_output": false,
+            "heartbeat_interval_seconds": 30,
+            "required_capabilities": ["linux"],
+        }
+    });
+    let task_event_id = client
+        .send_event(room_id, task_content)
+        .await
+        .expect("Client failed to send task");
+    eprintln!("  Task sent: {task_event_id}");
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Coordinator on ca1 sees the task
+    eprintln!("[7/9] Coordinator (ca1) receiving task...");
+    coordinator.sync_once().await.ok();
+    let coord_events = coordinator
+        .sync_and_collect_events(room_id, Duration::from_secs(15))
+        .await
+        .expect("Coordinator sync failed");
+    let coord_sees_task = coord_events.iter().any(|e| {
+        e.get("content")
+            .and_then(|c| c.get("uuid"))
+            .and_then(|u| u.as_str())
+            == Some(&session_uuid)
+    });
+    assert!(coord_sees_task, "Coordinator on ca1 should see the task");
+
+    // Worker on ca2 sees the task
+    eprintln!("[8/9] Worker (ca2) receiving task via federation...");
+    worker.sync_once().await.ok();
+    let worker_events = worker
+        .sync_and_collect_events(room_id, Duration::from_secs(15))
+        .await
+        .expect("Worker sync failed");
+    let worker_sees_task = worker_events.iter().any(|e| {
+        e.get("content")
+            .and_then(|c| c.get("uuid"))
+            .and_then(|u| u.as_str())
+            == Some(&session_uuid)
+    });
+    assert!(worker_sees_task, "Worker on ca2 should see the task via federation");
+
+    // Worker on ca2 posts result
+    eprintln!("[9/9] Worker (ca2) posting result...");
+    let result_content = serde_json::json!({
+        "session_uuid": session_uuid,
+        "worker_id": worker.user_id().to_string(),
+        "status": "success",
+        "exit_code": 0,
+        "duration_seconds": 1,
+    });
+    worker
+        .send_threaded_event(room_id, "org.mxdx.session.result", &task_event_id, result_content)
+        .await
+        .expect("Worker failed to send result");
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    // Client on ca1 sees result from worker on ca2
+    client.sync_once().await.ok();
+    let client_events = client
+        .sync_and_collect_events(room_id, Duration::from_secs(15))
+        .await
+        .expect("Client sync failed");
+    let client_sees_result = client_events.iter().any(|e| {
+        e.get("content")
+            .and_then(|c| c.get("status"))
+            .and_then(|s| s.as_str())
+            == Some("success")
+    });
+    assert!(client_sees_result, "Client on ca1 should see result from worker on ca2");
+
+    eprintln!("[ok] Cross-server coordinator routing passed (coordinator+client ca1, worker ca2)");
+}
