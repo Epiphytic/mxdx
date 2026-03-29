@@ -343,6 +343,9 @@ pub async fn connect_multi(
         topology.exec_room_id
     };
 
+    // Bootstrap cross-signing on all servers and sync trust across identities
+    multi.bootstrap_and_sync_trust(&room_id).await;
+
     Ok(MatrixClientRoom::new(multi, room_id))
 }
 

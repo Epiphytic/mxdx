@@ -71,6 +71,11 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
 
     tracing::info!(room_id = %room_id, "worker room ready");
 
+    // Bootstrap cross-signing on all servers and sync trust across identities.
+    // This ensures all identities are verified and trust is propagated so
+    // failover to another server maintains the same trust relationships.
+    multi.bootstrap_and_sync_trust(&room_id).await;
+
     Ok(matrix::MatrixWorkerRoom::new(multi, room_id))
 }
 
@@ -167,8 +172,20 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
     // Track active sessions and their thread root event IDs
     let mut thread_roots: HashMap<String, String> = HashMap::new();
 
+    // Periodic trust sync (every ~60 sync cycles, ~30 minutes at 30s sync timeout)
+    let mut sync_cycle_count: u64 = 0;
+    let trust_sync_interval: u64 = 60;
+
     // Main sync loop
     loop {
+        // Periodic cross-server trust sync (multi-homeserver only)
+        sync_cycle_count += 1;
+        if sync_cycle_count % trust_sync_interval == 0 {
+            let rid = mxdx_matrix::RoomId::parse(&room_id_str).ok();
+            if let Some(rid) = rid.as_ref() {
+                room.multi().sync_trust(rid).await;
+            }
+        }
         let events = room
             .sync_events(std::time::Duration::from_secs(30))
             .await?;

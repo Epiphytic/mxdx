@@ -26,6 +26,7 @@ pub struct ServerAccount {
 struct ServerEntry {
     client: MatrixClient,
     server: String,
+    password: String,
     latency_ms: f64,
 }
 
@@ -118,6 +119,7 @@ impl MultiHsClient {
             entries.push(ServerEntry {
                 client,
                 server: account.homeserver.clone(),
+                password: account.password.clone(),
                 latency_ms,
             });
         }
@@ -166,7 +168,7 @@ impl MultiHsClient {
     /// Create a `MultiHsClient` from pre-connected `MatrixClient` instances.
     ///
     /// This is the test-friendly constructor that skips login. Each entry is
-    /// a `(server_name, client, latency_ms)` tuple.
+    /// a `(server_name, client, latency_ms)` tuple. Password is empty (no UIA).
     pub fn from_clients(
         clients: Vec<(String, MatrixClient, f64)>,
         preferred_server: Option<&str>,
@@ -176,6 +178,7 @@ impl MultiHsClient {
             .map(|(server, client, latency_ms)| ServerEntry {
                 client,
                 server,
+                password: String::new(),
                 latency_ms,
             })
             .collect();
@@ -547,6 +550,158 @@ impl MultiHsClient {
         }
 
         false
+    }
+
+    // ── Cross-Signing Trust Sync ──
+
+    /// Bootstrap cross-signing on ALL connected servers and verify own identity.
+    /// This must be called after connect() to ensure all identities are ready
+    /// for cross-signing operations. Password from each ServerAccount is used
+    /// for UIA if required.
+    pub async fn bootstrap_all_cross_signing(&mut self) -> std::result::Result<(), Vec<(String, MatrixClientError)>> {
+        if self.entries.is_empty() {
+            return Ok(());
+        }
+
+        let mut errors = Vec::new();
+
+        for entry in &self.entries {
+            let password = if entry.password.is_empty() {
+                None
+            } else {
+                Some(entry.password.as_str())
+            };
+
+            // Bootstrap cross-signing keys
+            if let Err(e) = entry.client.bootstrap_cross_signing_if_needed(password).await {
+                warn!(
+                    server = %entry.server,
+                    error = %e,
+                    "Failed to bootstrap cross-signing"
+                );
+                errors.push((entry.server.clone(), e));
+                continue;
+            }
+
+            // Verify own identity
+            if let Err(e) = entry.client.verify_own_identity().await {
+                warn!(
+                    server = %entry.server,
+                    error = %e,
+                    "Failed to verify own identity"
+                );
+                errors.push((entry.server.clone(), e));
+                continue;
+            }
+
+            info!(
+                server = %entry.server,
+                user_id = %entry.client.user_id(),
+                "Cross-signing bootstrapped and own identity verified"
+            );
+        }
+
+        if errors.len() == self.entries.len() {
+            // All servers failed — return the errors
+            return Err(errors);
+        }
+
+        Ok(())
+    }
+
+    /// Synchronize trust across all connected servers.
+    ///
+    /// For each server, collects the set of verified user localparts.
+    /// Then, for any localpart verified on one server but not another,
+    /// verifies the equivalent user on the other server.
+    ///
+    /// This ensures that when `@client:ca1` is verified by `@worker:ca1`,
+    /// `@worker:ca2` will also verify `@client:ca2` — making failover seamless.
+    ///
+    /// Call this after bootstrap and periodically in the event loop.
+    pub async fn sync_trust(&mut self, room_id: &RoomId) {
+        if self.is_single_server() {
+            return;
+        }
+
+        // Phase 1: Collect verified localparts from each server
+        let mut all_verified_localparts: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        for entry in &self.entries {
+            match entry.client.get_verified_user_ids_in_room(room_id).await {
+                Ok(verified_users) => {
+                    for uid in &verified_users {
+                        all_verified_localparts.insert(uid.localpart().to_string());
+                    }
+                }
+                Err(e) => {
+                    debug!(
+                        server = %entry.server,
+                        error = %e,
+                        "Failed to get verified users, skipping"
+                    );
+                }
+            }
+        }
+
+        if all_verified_localparts.is_empty() {
+            return;
+        }
+
+        // Phase 2: Cross-verify — ensure each localpart is verified on all servers
+        for localpart in &all_verified_localparts {
+            for entry in &self.entries {
+                let server_name = entry.client.user_id().server_name();
+                let target_user_id_str = format!("@{localpart}:{server_name}");
+
+                let target_uid = match matrix_sdk::ruma::UserId::parse(&target_user_id_str) {
+                    Ok(uid) => uid,
+                    Err(_) => continue,
+                };
+
+                // Skip if already verified on this server
+                match entry.client.is_user_verified(&target_uid).await {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(_) => continue,
+                }
+
+                // Verify the user on this server
+                match entry.client.verify_user(&target_uid).await {
+                    Ok(()) => {
+                        info!(
+                            server = %entry.server,
+                            user = %target_user_id_str,
+                            "Cross-server trust sync: verified user"
+                        );
+                    }
+                    Err(e) => {
+                        debug!(
+                            server = %entry.server,
+                            user = %target_user_id_str,
+                            error = %e,
+                            "Cross-server trust sync: failed to verify (user may not exist on this server)"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Convenience: bootstrap cross-signing on all servers and sync trust for a room.
+    /// Best-effort — logs warnings but doesn't fail if some servers can't bootstrap.
+    pub async fn bootstrap_and_sync_trust(&mut self, room_id: &RoomId) {
+        if let Err(errors) = self.bootstrap_all_cross_signing().await {
+            for (server, e) in &errors {
+                warn!(
+                    server = %server,
+                    error = %e,
+                    "Cross-signing bootstrap failed on server"
+                );
+            }
+        }
+        self.sync_trust(room_id).await;
     }
 
     // ── Circuit Breaker ──
