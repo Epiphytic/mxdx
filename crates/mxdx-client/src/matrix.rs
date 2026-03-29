@@ -227,7 +227,12 @@ pub async fn connect(
         if let Err(e) = client.join_room(&rid).await {
             tracing::warn!(room_id = %rid, error = %e, "join_room failed (may already be a member)");
         }
-        client.sync_once().await?;
+        // Wait for key exchange so we can decrypt E2EE events
+        tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
+        client
+            .wait_for_key_exchange(&rid, std::time::Duration::from_secs(15))
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         tracing::info!(room_id = %rid, "using direct room ID");
         rid
     } else {

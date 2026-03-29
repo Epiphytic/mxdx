@@ -49,8 +49,11 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
         if let Err(e) = client.join_room(&rid).await {
             tracing::warn!(room_id = %rid, error = %e, "join_room failed (may already be a member)");
         }
-        // Sync again to get room state after join
-        client.sync_once().await?;
+        // Wait for key exchange so we can decrypt E2EE events in this room
+        tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
+        client
+            .wait_for_key_exchange(&rid, std::time::Duration::from_secs(15))
+            .await?;
         tracing::info!(room_id = %rid, "using direct room ID");
         rid
     } else {
