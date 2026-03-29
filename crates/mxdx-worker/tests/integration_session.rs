@@ -130,9 +130,8 @@ async fn full_session_lifecycle_e2e() {
         .unwrap();
 
     // Worker syncs and sees the task
-    worker_mc.sync_once().await.unwrap();
     let events = worker_mc
-        .sync_and_collect_events(&room_id, Duration::from_secs(5))
+        .sync_and_collect_events(&room_id, Duration::from_secs(10))
         .await
         .unwrap();
     let found_task = events.iter().any(|e| {
@@ -257,9 +256,8 @@ async fn full_session_lifecycle_e2e() {
         .unwrap();
 
     // Client syncs and verifies events
-    client_mc.sync_once().await.unwrap();
     let all_events = client_mc
-        .sync_and_collect_events(&room_id, Duration::from_secs(5))
+        .sync_and_collect_events(&room_id, Duration::from_secs(10))
         .await
         .unwrap();
 
@@ -429,9 +427,8 @@ async fn session_cancel_flow_e2e() {
         .unwrap();
 
     // Worker syncs and sees the cancel event
-    worker_mc.sync_once().await.unwrap();
     let events = worker_mc
-        .sync_and_collect_events(&room_id, Duration::from_secs(5))
+        .sync_and_collect_events(&room_id, Duration::from_secs(10))
         .await
         .unwrap();
 
@@ -471,9 +468,8 @@ async fn session_cancel_flow_e2e() {
         .unwrap();
 
     // Client sees cancelled result
-    client_mc.sync_once().await.unwrap();
     let all_events = client_mc
-        .sync_and_collect_events(&room_id, Duration::from_secs(5))
+        .sync_and_collect_events(&room_id, Duration::from_secs(10))
         .await
         .unwrap();
     let found_cancelled = all_events.iter().any(|e| {
@@ -711,9 +707,8 @@ async fn session_events_are_encrypted_e2e() {
         .unwrap();
 
     // Client syncs and uses the decrypting API to read the output
-    client_mc.sync_once().await.unwrap();
     let events = client_mc
-        .sync_and_collect_events(&room_id, Duration::from_secs(5))
+        .sync_and_collect_events(&room_id, Duration::from_secs(10))
         .await
         .unwrap();
 
@@ -786,9 +781,8 @@ async fn interactive_session_flag_e2e() {
         .unwrap();
 
     // Worker syncs and sees the task with interactive=true
-    worker_mc.sync_once().await.unwrap();
     let events = worker_mc
-        .sync_and_collect_events(&room_id, Duration::from_secs(5))
+        .sync_and_collect_events(&room_id, Duration::from_secs(10))
         .await
         .unwrap();
 
@@ -867,9 +861,8 @@ async fn no_room_output_flag_e2e() {
         .unwrap();
 
     // Worker syncs and sees the no_room_output flag
-    worker_mc.sync_once().await.unwrap();
     let events = worker_mc
-        .sync_and_collect_events(&room_id, Duration::from_secs(5))
+        .sync_and_collect_events(&room_id, Duration::from_secs(10))
         .await
         .unwrap();
     let task_content = events
@@ -906,9 +899,8 @@ async fn no_room_output_flag_e2e() {
         .unwrap();
 
     // Client sees result but no output events
-    client_mc.sync_once().await.unwrap();
     let all_events = client_mc
-        .sync_and_collect_events(&room_id, Duration::from_secs(5))
+        .sync_and_collect_events(&room_id, Duration::from_secs(10))
         .await
         .unwrap();
 
@@ -974,9 +966,8 @@ async fn backward_compat_fabric_task_e2e() {
         .unwrap();
 
     // Worker syncs and receives the legacy event
-    worker_mc.sync_once().await.unwrap();
     let events = worker_mc
-        .sync_and_collect_events(&room_id, Duration::from_secs(5))
+        .sync_and_collect_events(&room_id, Duration::from_secs(10))
         .await
         .unwrap();
 

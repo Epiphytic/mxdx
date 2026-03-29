@@ -117,9 +117,10 @@ async fn client_submit_worker_receives_e2e() {
         .unwrap();
 
     // Worker syncs and receives the task
-    worker_mc.sync_once().await.unwrap();
+    // Note: sync_and_collect_events does its own syncing — don't call sync_once
+    // first or it will consume the events from the sync stream.
     let events = worker_mc
-        .sync_and_collect_events(&room_id, Duration::from_secs(5))
+        .sync_and_collect_events(&room_id, Duration::from_secs(10))
         .await
         .unwrap();
 
@@ -199,9 +200,8 @@ async fn client_tail_output_e2e() {
         .unwrap();
 
     // Client syncs and collects events
-    client_mc.sync_once().await.unwrap();
     let events = client_mc
-        .sync_and_collect_events(&room_id, Duration::from_secs(5))
+        .sync_and_collect_events(&room_id, Duration::from_secs(10))
         .await
         .unwrap();
 
@@ -377,9 +377,8 @@ async fn client_logs_reassemble_e2e() {
     }
 
     // Client syncs and collects output events
-    client_mc.sync_once().await.unwrap();
     let events = client_mc
-        .sync_and_collect_events(&room_id, Duration::from_secs(5))
+        .sync_and_collect_events(&room_id, Duration::from_secs(10))
         .await
         .unwrap();
 
@@ -448,9 +447,8 @@ async fn client_cancel_worker_receives_e2e() {
         .unwrap();
 
     // Worker syncs to see the task
-    worker_mc.sync_once().await.unwrap();
     worker_mc
-        .sync_and_collect_events(&room_id, Duration::from_secs(5))
+        .sync_and_collect_events(&room_id, Duration::from_secs(10))
         .await
         .unwrap();
 
@@ -471,9 +469,8 @@ async fn client_cancel_worker_receives_e2e() {
         .unwrap();
 
     // Worker syncs and sees the cancel event
-    worker_mc.sync_once().await.unwrap();
     let events = worker_mc
-        .sync_and_collect_events(&room_id, Duration::from_secs(5))
+        .sync_and_collect_events(&room_id, Duration::from_secs(10))
         .await
         .unwrap();
 
