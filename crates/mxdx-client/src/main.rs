@@ -1,10 +1,27 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use mxdx_client::config::{ClientArgs, ClientRuntimeConfig};
+use mxdx_client::matrix::{self, ClientRoomOps, IncomingClientEvent};
+use mxdx_types::events::session::{
+    SessionOutput, SessionResult, SESSION_CANCEL, SESSION_SIGNAL, SESSION_TASK,
+};
+use std::io::Write;
 
 #[derive(Parser)]
 #[command(name = "mxdx-client", about = "mxdx client CLI")]
 struct Cli {
+    /// Matrix homeserver URL or server name
+    #[arg(long, env = "MXDX_HOMESERVER", global = true)]
+    homeserver: Option<String>,
+    /// Matrix username
+    #[arg(long, env = "MXDX_USERNAME", global = true)]
+    username: Option<String>,
+    /// Matrix password
+    #[arg(long, env = "MXDX_PASSWORD", global = true)]
+    password: Option<String>,
+    /// Direct room ID (bypasses space discovery)
+    #[arg(long, env = "MXDX_ROOM_ID", global = true)]
+    room_id: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -70,6 +87,9 @@ enum Commands {
         /// Include completed sessions
         #[arg(long)]
         all: bool,
+        /// Worker room name
+        #[arg(long)]
+        worker_room: Option<String>,
     },
     /// View session logs
     Logs {
@@ -78,6 +98,9 @@ enum Commands {
         /// Follow output in real-time
         #[arg(short = 'f', long)]
         follow: bool,
+        /// Worker room name
+        #[arg(long)]
+        worker_room: Option<String>,
     },
     /// Cancel a session
     Cancel {
@@ -86,6 +109,9 @@ enum Commands {
         /// Send specific signal
         #[arg(long)]
         signal: Option<String>,
+        /// Worker room name
+        #[arg(long)]
+        worker_room: Option<String>,
     },
     /// Trust management
     Trust {
@@ -117,10 +143,29 @@ enum TrustAction {
     Anchor { user_id: Option<String> },
 }
 
+/// Resolve the worker room name from CLI arg or config.
+/// When a direct room_id is provided, the worker room name is optional (used as a label only).
+fn resolve_worker_room(
+    cli_room: &Option<String>,
+    config: &ClientRuntimeConfig,
+    has_room_id: bool,
+) -> Result<String> {
+    cli_room
+        .clone()
+        .or_else(|| config.client.default_worker_room.clone())
+        .or_else(|| if has_room_id { Some("direct".to_string()) } else { None })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "No worker room specified. Use --worker-room or set default_worker_room in client.toml"
+            )
+        })
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+    let cli_room_id = cli.room_id.clone();
 
     match cli.command {
         Commands::Run {
@@ -142,16 +187,32 @@ async fn main() -> Result<()> {
             worker_room,
         } => {
             let client_args = ClientArgs {
-                worker_room,
+                worker_room: worker_room.clone(),
                 coordinator_room: None,
                 timeout,
                 heartbeat_interval: None,
                 interactive,
                 no_room_output,
+                homeserver: cli.homeserver,
+                username: cli.username,
+                password: cli.password,
             };
             let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
+            let creds = config.require_credentials()?;
+            let room_name = resolve_worker_room(&worker_room, &config, cli_room_id.is_some())?;
 
-            // Build task
+            // Connect to Matrix
+            let mx_room = matrix::connect(
+                &creds.homeserver,
+                &creds.username,
+                &creds.password,
+                &room_name,
+                cli_room_id.as_deref(),
+            )
+            .await?;
+
+            // Build task with actual user ID
+            let sender_id = mx_room.user_id_string();
             let task = mxdx_client::submit::build_task(
                 &command,
                 &args,
@@ -159,33 +220,286 @@ async fn main() -> Result<()> {
                 no_room_output,
                 timeout.or(config.client.session.timeout_seconds),
                 config.client.session.heartbeat_interval,
-                "client", // placeholder sender_id
+                &sender_id,
             );
 
+            let task_uuid = task.uuid.clone();
+            let task_content = matrix::serialize_event(&task)?;
+
+            // Submit the task event to the exec room
+            let event_id = mx_room
+                .post_event(mx_room.room_id().as_str(), SESSION_TASK, task_content)
+                .await?;
+            tracing::info!(uuid = %task_uuid, event_id = %event_id, "task submitted");
+
             if detach {
-                println!("{}", task.uuid);
-                // In detached mode, submit and exit
+                println!("{}", task_uuid);
             } else {
-                tracing::info!(uuid = %task.uuid, cmd = %command, "submitting task");
-                // Submit task -> tail thread -> exit on result
+                // Tail the session: sync for output and result events
+                eprintln!("Session {} submitted, waiting for output...", task_uuid);
+                let mut exit_code: Option<i32> = None;
+
+                loop {
+                    let events = mx_room.sync_events().await?;
+                    for event in events {
+                        match event {
+                            IncomingClientEvent::SessionOutput {
+                                session_uuid,
+                                content,
+                            } => {
+                                if session_uuid != task_uuid {
+                                    continue;
+                                }
+                                if let Ok(output) =
+                                    matrix::deserialize_event::<SessionOutput>(&content)
+                                {
+                                    if let Ok(text) = mxdx_client::tail::format_output(&output) {
+                                        print!("{}", text);
+                                        std::io::stdout().flush().ok();
+                                    }
+                                }
+                            }
+                            IncomingClientEvent::SessionResult {
+                                session_uuid,
+                                content,
+                            } => {
+                                if session_uuid != task_uuid {
+                                    continue;
+                                }
+                                if let Ok(result) =
+                                    matrix::deserialize_event::<SessionResult>(&content)
+                                {
+                                    eprintln!("{}", mxdx_client::tail::format_result(&result));
+                                    exit_code = result.exit_code;
+                                }
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if exit_code.is_some() {
+                        break;
+                    }
+                }
+
+                std::process::exit(exit_code.unwrap_or(1));
             }
         }
         Commands::Attach { uuid, interactive } => {
             tracing::info!(uuid = %uuid, interactive, "attaching to session");
+            eprintln!("attach not yet implemented");
         }
-        Commands::Ls { all } => {
-            tracing::info!(all, "listing sessions");
-        }
-        Commands::Logs { uuid, follow } => {
-            tracing::info!(uuid = %uuid, follow, "viewing logs");
-        }
-        Commands::Cancel { uuid, signal } => {
-            if let Some(sig) = signal {
-                let _event = mxdx_client::cancel::build_signal(&uuid, &sig);
-                tracing::info!(uuid = %uuid, signal = %sig, "sending signal");
+        Commands::Ls { all, worker_room } => {
+            let client_args = ClientArgs {
+                worker_room: worker_room.clone(),
+                coordinator_room: None,
+                timeout: None,
+                heartbeat_interval: None,
+                interactive: false,
+                no_room_output: false,
+                homeserver: cli.homeserver,
+                username: cli.username,
+                password: cli.password,
+            };
+            let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
+            let creds = config.require_credentials()?;
+            let room_name = resolve_worker_room(&worker_room, &config, cli_room_id.is_some())?;
+
+            let mx_room = matrix::connect(
+                &creds.homeserver,
+                &creds.username,
+                &creds.password,
+                &room_name,
+                cli_room_id.as_deref(),
+            )
+            .await?;
+
+            // Sync once to populate room state
+            mx_room.client().sync_once().await?;
+
+            // Read active session state events
+            let active_state = mx_room
+                .read_state_events(
+                    mx_room.room_id().as_str(),
+                    "org.mxdx.session.active",
+                )
+                .await;
+
+            let completed_state = if all {
+                mx_room
+                    .read_state_events(
+                        mx_room.room_id().as_str(),
+                        "org.mxdx.session.completed",
+                    )
+                    .await
+                    .ok()
             } else {
-                let _event = mxdx_client::cancel::build_cancel(&uuid, None, None);
-                tracing::info!(uuid = %uuid, "cancelling session");
+                None
+            };
+
+            let mut entries = Vec::new();
+
+            if let Ok(active_events) = active_state {
+                for (_key, value) in &active_events {
+                    if let Ok(state) =
+                        matrix::deserialize_event::<mxdx_types::events::session::ActiveSessionState>(
+                            value,
+                        )
+                    {
+                        // Use a UUID derived from content if available
+                        let uuid = value
+                            .get("session_uuid")
+                            .and_then(|u| u.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        entries.push(mxdx_client::ls::from_active(uuid, &state));
+                    }
+                }
+            }
+
+            if let Some(Ok(completed_events)) = completed_state.map(|v| Ok::<_, anyhow::Error>(v)) {
+                for (_key, _value) in &completed_events {
+                    // Completed state events require both active + completed state;
+                    // for now we only show what we can parse
+                    tracing::debug!("completed state event found (display pending)");
+                }
+            }
+
+            println!("{}", mxdx_client::ls::format_table(&entries));
+        }
+        Commands::Logs {
+            uuid,
+            follow,
+            worker_room,
+        } => {
+            let client_args = ClientArgs {
+                worker_room: worker_room.clone(),
+                coordinator_room: None,
+                timeout: None,
+                heartbeat_interval: None,
+                interactive: false,
+                no_room_output: false,
+                homeserver: cli.homeserver,
+                username: cli.username,
+                password: cli.password,
+            };
+            let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
+            let creds = config.require_credentials()?;
+            let room_name = resolve_worker_room(&worker_room, &config, cli_room_id.is_some())?;
+
+            let mx_room = matrix::connect(
+                &creds.homeserver,
+                &creds.username,
+                &creds.password,
+                &room_name,
+                cli_room_id.as_deref(),
+            )
+            .await?;
+
+            // Collect events and filter for the session's output
+            let events = mx_room.sync_events().await?;
+            let mut outputs = Vec::new();
+            for event in events {
+                if let IncomingClientEvent::SessionOutput {
+                    session_uuid,
+                    content,
+                } = event
+                {
+                    if session_uuid == uuid {
+                        if let Ok(output) =
+                            matrix::deserialize_event::<SessionOutput>(&content)
+                        {
+                            outputs.push(output);
+                        }
+                    }
+                }
+            }
+
+            let assembled = mxdx_client::logs::reassemble_output_string(outputs)?;
+            print!("{}", assembled);
+            std::io::stdout().flush().ok();
+
+            if follow {
+                eprintln!("(follow mode: watching for new output...)");
+                loop {
+                    let events = mx_room.sync_events().await?;
+                    for event in events {
+                        match event {
+                            IncomingClientEvent::SessionOutput {
+                                session_uuid,
+                                content,
+                            } => {
+                                if session_uuid != uuid {
+                                    continue;
+                                }
+                                if let Ok(output) =
+                                    matrix::deserialize_event::<SessionOutput>(&content)
+                                {
+                                    if let Ok(text) = mxdx_client::tail::format_output(&output) {
+                                        print!("{}", text);
+                                        std::io::stdout().flush().ok();
+                                    }
+                                }
+                            }
+                            IncomingClientEvent::SessionResult {
+                                session_uuid, ..
+                            } => {
+                                if session_uuid == uuid {
+                                    eprintln!("Session completed.");
+                                    return Ok(());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        Commands::Cancel {
+            uuid,
+            signal,
+            worker_room,
+        } => {
+            let client_args = ClientArgs {
+                worker_room: worker_room.clone(),
+                coordinator_room: None,
+                timeout: None,
+                heartbeat_interval: None,
+                interactive: false,
+                no_room_output: false,
+                homeserver: cli.homeserver,
+                username: cli.username,
+                password: cli.password,
+            };
+            let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
+            let creds = config.require_credentials()?;
+            let room_name = resolve_worker_room(&worker_room, &config, cli_room_id.is_some())?;
+
+            let mx_room = matrix::connect(
+                &creds.homeserver,
+                &creds.username,
+                &creds.password,
+                &room_name,
+                cli_room_id.as_deref(),
+            )
+            .await?;
+
+            if let Some(sig) = signal {
+                let event = mxdx_client::cancel::build_signal(&uuid, &sig);
+                let content = matrix::serialize_event(&event)?;
+                let event_id = mx_room
+                    .post_event(mx_room.room_id().as_str(), SESSION_SIGNAL, content)
+                    .await?;
+                tracing::info!(uuid = %uuid, signal = %sig, event_id = %event_id, "signal sent");
+                eprintln!("Signal {} sent to session {}", sig, uuid);
+            } else {
+                let event = mxdx_client::cancel::build_cancel(&uuid, None, None);
+                let content = matrix::serialize_event(&event)?;
+                let event_id = mx_room
+                    .post_event(mx_room.room_id().as_str(), SESSION_CANCEL, content)
+                    .await?;
+                tracing::info!(uuid = %uuid, event_id = %event_id, "cancel sent");
+                eprintln!("Cancel sent for session {}", uuid);
             }
         }
         Commands::Trust { action } => match action {

@@ -1,5 +1,10 @@
 use anyhow::Result;
+use mxdx_matrix::MatrixClient;
+use mxdx_types::events::session::{
+    SESSION_HEARTBEAT, SESSION_OUTPUT, SESSION_RESULT, SESSION_START,
+};
 use serde::{de::DeserializeOwned, Serialize};
+use std::time::Duration;
 
 /// Abstraction over Matrix room operations for the client.
 /// This trait allows testing with mocks without requiring a real Matrix server.
@@ -81,6 +86,158 @@ impl ClientRoom {
     pub fn room_id(&self) -> &str {
         &self.room_id
     }
+}
+
+/// Live Matrix-backed room operations for the client.
+/// Wraps a `MatrixClient` and a specific room to execute commands against.
+pub struct MatrixClientRoom {
+    client: MatrixClient,
+    room_id: mxdx_matrix::OwnedRoomId,
+}
+
+impl MatrixClientRoom {
+    pub fn new(client: MatrixClient, room_id: mxdx_matrix::OwnedRoomId) -> Self {
+        Self { client, room_id }
+    }
+
+    pub fn room_id(&self) -> &mxdx_matrix::RoomId {
+        &self.room_id
+    }
+
+    pub fn client(&self) -> &MatrixClient {
+        &self.client
+    }
+
+    /// Get the user ID of the logged-in user as a string.
+    pub fn user_id_string(&self) -> String {
+        self.client.user_id().to_string()
+    }
+}
+
+impl ClientRoomOps for MatrixClientRoom {
+    async fn find_room(&self, room_name: &str) -> Result<Option<String>> {
+        let topology = self.client.find_launcher_space(room_name).await?;
+        Ok(topology.map(|t| t.exec_room_id.to_string()))
+    }
+
+    async fn post_event(
+        &self,
+        _room_id: &str,
+        event_type: &str,
+        content: serde_json::Value,
+    ) -> Result<String> {
+        let payload = serde_json::json!({
+            "type": event_type,
+            "content": content,
+        });
+        let event_id = self.client.send_event(&self.room_id, payload).await?;
+        Ok(event_id)
+    }
+
+    async fn post_to_thread(
+        &self,
+        _room_id: &str,
+        thread_root: &str,
+        event_type: &str,
+        content: serde_json::Value,
+    ) -> Result<String> {
+        let event_id = self
+            .client
+            .send_threaded_event(&self.room_id, event_type, thread_root, content)
+            .await?;
+        Ok(event_id)
+    }
+
+    async fn read_state_events(
+        &self,
+        _room_id: &str,
+        event_type: &str,
+    ) -> Result<Vec<(String, serde_json::Value)>> {
+        let state = self
+            .client
+            .get_room_state(&self.room_id, event_type)
+            .await?;
+        // get_room_state returns a single JSON value; wrap it as a single entry
+        Ok(vec![("".to_string(), state)])
+    }
+
+    async fn sync_events(&self) -> Result<Vec<IncomingClientEvent>> {
+        let raw_events = self
+            .client
+            .sync_and_collect_events(&self.room_id, Duration::from_secs(5))
+            .await?;
+
+        let mut events = Vec::new();
+        for raw in raw_events {
+            let event_type = raw.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let content = raw.get("content").cloned().unwrap_or_default();
+            let session_uuid = content
+                .get("session_uuid")
+                .and_then(|u| u.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if session_uuid.is_empty() {
+                continue;
+            }
+
+            match event_type {
+                SESSION_START => events.push(IncomingClientEvent::SessionStart {
+                    session_uuid,
+                    content,
+                }),
+                SESSION_OUTPUT => events.push(IncomingClientEvent::SessionOutput {
+                    session_uuid,
+                    content,
+                }),
+                SESSION_HEARTBEAT => events.push(IncomingClientEvent::SessionHeartbeat {
+                    session_uuid,
+                    content,
+                }),
+                SESSION_RESULT => events.push(IncomingClientEvent::SessionResult {
+                    session_uuid,
+                    content,
+                }),
+                _ => {} // Ignore unknown event types
+            }
+        }
+
+        Ok(events)
+    }
+}
+
+/// Connect to Matrix and resolve the worker's exec room.
+/// Returns a `MatrixClientRoom` ready for sending/receiving events.
+pub async fn connect(
+    homeserver: &str,
+    username: &str,
+    password: &str,
+    worker_room: &str,
+    direct_room_id: Option<&str>,
+) -> Result<MatrixClientRoom> {
+    tracing::info!(homeserver = %homeserver, username = %username, worker = %worker_room, "connecting to Matrix");
+    let client = MatrixClient::login_and_connect(homeserver, username, password).await?;
+
+    let room_id = if let Some(rid_str) = direct_room_id {
+        // Use a direct room ID (bypasses space discovery, for E2E tests or pre-arranged rooms)
+        let rid = mxdx_matrix::OwnedRoomId::try_from(rid_str)
+            .map_err(|e| anyhow::anyhow!("Invalid room ID '{}': {}", rid_str, e))?;
+        // Sync to pick up any pending invites, then join
+        client.sync_once().await?;
+        if let Err(e) = client.join_room(&rid).await {
+            tracing::warn!(room_id = %rid, error = %e, "join_room failed (may already be a member)");
+        }
+        client.sync_once().await?;
+        tracing::info!(room_id = %rid, "using direct room ID");
+        rid
+    } else {
+        // Find or create the launcher space
+        let topology = client.get_or_create_launcher_space(worker_room).await?;
+        tracing::info!(exec_room = %topology.exec_room_id, "connected to worker exec room");
+        topology.exec_room_id
+    };
+
+    Ok(MatrixClientRoom::new(client, room_id))
 }
 
 /// Helper to serialize a typed event into a JSON Value for posting.

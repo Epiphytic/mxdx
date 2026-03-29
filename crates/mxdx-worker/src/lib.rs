@@ -23,8 +23,8 @@ use mxdx_types::events::session::{
 };
 
 /// Connect to Matrix and return the worker's room handle.
-/// Logs in with the credentials from config, finds or creates the launcher space,
-/// and returns a `MatrixWorkerRoom` bound to the exec room.
+/// If `config.room_id` is set, uses that room directly (bypasses space creation).
+/// Otherwise, logs in and finds/creates the launcher space.
 pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorkerRoom> {
     let creds = config
         .credentials
@@ -40,10 +40,25 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
 
     tracing::info!(user_id = %client.user_id(), "logged in to Matrix");
 
-    let topology = client
-        .get_or_create_launcher_space(&config.resolved_room_name)
-        .await?;
-    let room_id = topology.exec_room_id;
+    let room_id = if let Some(ref direct_room_id) = config.room_id {
+        // Use a specific room ID directly (for E2E tests or pre-arranged rooms)
+        let rid = mxdx_matrix::OwnedRoomId::try_from(direct_room_id.as_str())
+            .map_err(|e| anyhow::anyhow!("Invalid room ID '{}': {}", direct_room_id, e))?;
+        // Sync to pick up any pending invites, then join the room
+        client.sync_once().await?;
+        if let Err(e) = client.join_room(&rid).await {
+            tracing::warn!(room_id = %rid, error = %e, "join_room failed (may already be a member)");
+        }
+        // Sync again to get room state after join
+        client.sync_once().await?;
+        tracing::info!(room_id = %rid, "using direct room ID");
+        rid
+    } else {
+        let topology = client
+            .get_or_create_launcher_space(&config.resolved_room_name)
+            .await?;
+        topology.exec_room_id
+    };
 
     tracing::info!(room_id = %room_id, "worker room ready");
 

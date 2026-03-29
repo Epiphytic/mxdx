@@ -16,6 +16,8 @@ pub struct WorkerArgs {
     pub history_retention: Option<u64>,
     pub cross_signing_mode: Option<String>,
     pub room_name: Option<String>,
+    /// Direct room ID — bypasses launcher space creation
+    pub room_id: Option<String>,
     pub homeserver: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
@@ -29,6 +31,8 @@ pub struct WorkerRuntimeConfig {
     pub resolved_room_name: String,
     /// Matrix credentials for login. None if not all fields are available.
     pub credentials: Option<WorkerCredentials>,
+    /// Direct room ID — bypasses launcher space creation when set.
+    pub room_id: Option<String>,
 }
 
 impl WorkerRuntimeConfig {
@@ -43,6 +47,7 @@ impl WorkerRuntimeConfig {
             worker,
             resolved_room_name,
             credentials: None,
+            room_id: None,
         })
     }
 
@@ -54,6 +59,7 @@ impl WorkerRuntimeConfig {
             worker,
             resolved_room_name,
             credentials: None,
+            room_id: None,
         }
     }
 
@@ -67,6 +73,9 @@ impl WorkerRuntimeConfig {
         }
         if let Some(ref name) = args.room_name {
             self.resolved_room_name = name.clone();
+        }
+        if let Some(ref id) = args.room_id {
+            self.room_id = Some(id.clone());
         }
 
         // Build credentials: CLI args take highest priority, fall back to first account in defaults.
@@ -145,6 +154,7 @@ mod tests {
             history_retention: Some(7),
             cross_signing_mode: None,
             room_name: Some("cli-room".into()),
+            room_id: None,
             homeserver: None,
             username: None,
             password: None,
@@ -212,6 +222,7 @@ mod tests {
             history_retention: None,
             cross_signing_mode: None,
             room_name: None,
+            room_id: None,
             homeserver: Some("https://matrix.example.com".into()),
             username: Some("bot".into()),
             password: Some("secret".into()),
@@ -241,6 +252,7 @@ mod tests {
             history_retention: None,
             cross_signing_mode: None,
             room_name: None,
+            room_id: None,
             homeserver: None, // not provided — should fall back to defaults
             username: Some("bot".into()),
             password: Some("secret".into()),
@@ -264,6 +276,7 @@ mod tests {
             history_retention: None,
             cross_signing_mode: None,
             room_name: None,
+            room_id: None,
             homeserver: None,
             username: Some("bot".into()),
             password: None,

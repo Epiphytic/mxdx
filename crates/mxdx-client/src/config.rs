@@ -1,6 +1,16 @@
 use anyhow::Result;
 use mxdx_types::config::{ClientConfig, DefaultsConfig, load_merged_config};
 
+/// Matrix credentials for connecting to a homeserver.
+/// These are resolved from CLI flags, environment variables, or config files.
+/// NOTE: Never log or display the password field.
+#[derive(Debug, Clone)]
+pub struct ClientCredentials {
+    pub homeserver: String,
+    pub username: String,
+    pub password: String,
+}
+
 /// CLI arguments that can override config file values.
 pub struct ClientArgs {
     pub worker_room: Option<String>,
@@ -9,12 +19,16 @@ pub struct ClientArgs {
     pub heartbeat_interval: Option<u64>,
     pub interactive: bool,
     pub no_room_output: bool,
+    pub homeserver: Option<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
 }
 
 /// Runtime configuration for the client, combining defaults + client config + CLI overrides.
 pub struct ClientRuntimeConfig {
     pub defaults: DefaultsConfig,
     pub client: ClientConfig,
+    pub credentials: Option<ClientCredentials>,
 }
 
 impl ClientRuntimeConfig {
@@ -23,12 +37,20 @@ impl ClientRuntimeConfig {
     pub fn load() -> Result<Self> {
         let (defaults, client): (DefaultsConfig, ClientConfig) =
             load_merged_config("defaults.toml", "client.toml")?;
-        Ok(Self { defaults, client })
+        Ok(Self {
+            defaults,
+            client,
+            credentials: None,
+        })
     }
 
     /// Construct directly from pre-built configs (useful for testing).
     pub fn from_parts(defaults: DefaultsConfig, client: ClientConfig) -> Self {
-        Self { defaults, client }
+        Self {
+            defaults,
+            client,
+            credentials: None,
+        }
     }
 
     /// Apply CLI argument overrides. CLI values take precedence over file config.
@@ -45,7 +67,27 @@ impl ClientRuntimeConfig {
         if let Some(interval) = args.heartbeat_interval {
             self.client.session.heartbeat_interval = interval;
         }
+        // Build credentials if all three parts are present
+        if let (Some(hs), Some(user), Some(pass)) =
+            (&args.homeserver, &args.username, &args.password)
+        {
+            self.credentials = Some(ClientCredentials {
+                homeserver: hs.clone(),
+                username: user.clone(),
+                password: pass.clone(),
+            });
+        }
         self
+    }
+
+    /// Require credentials or return an error.
+    pub fn require_credentials(&self) -> Result<&ClientCredentials> {
+        self.credentials.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Matrix credentials required. Set --homeserver, --username, --password \
+                 or MXDX_HOMESERVER, MXDX_USERNAME, MXDX_PASSWORD environment variables."
+            )
+        })
     }
 }
 
@@ -71,6 +113,9 @@ mod tests {
             heartbeat_interval: Some(15),
             interactive: true,
             no_room_output: false,
+            homeserver: Some("matrix.example.com".into()),
+            username: Some("alice".into()),
+            password: Some("secret".into()),
         };
         let cfg = cfg.with_cli_overrides(&args);
 
@@ -84,6 +129,10 @@ mod tests {
         );
         assert_eq!(cfg.client.session.timeout_seconds, Some(120));
         assert_eq!(cfg.client.session.heartbeat_interval, 15);
+        assert!(cfg.credentials.is_some());
+        let creds = cfg.credentials.unwrap();
+        assert_eq!(creds.homeserver, "matrix.example.com");
+        assert_eq!(creds.username, "alice");
     }
 
     #[test]
@@ -117,6 +166,9 @@ mod tests {
             heartbeat_interval: None,
             interactive: false,
             no_room_output: false,
+            homeserver: None,
+            username: None,
+            password: None,
         };
         let cfg = cfg.with_cli_overrides(&args);
 

@@ -29,6 +29,10 @@ enum Commands {
         #[arg(long)]
         room_name: Option<String>,
 
+        /// Use a specific room ID directly (bypasses space creation)
+        #[arg(long, env = "MXDX_ROOM_ID")]
+        room_id: Option<String>,
+
         /// Matrix homeserver URL
         #[arg(long, env = "MXDX_HOMESERVER")]
         homeserver: Option<String>,
@@ -55,6 +59,7 @@ async fn main() -> Result<()> {
             history_retention,
             cross_signing_mode,
             room_name,
+            room_id,
             homeserver,
             username,
             password,
@@ -64,6 +69,7 @@ async fn main() -> Result<()> {
                 history_retention,
                 cross_signing_mode,
                 room_name,
+                room_id,
                 homeserver,
                 username,
                 password,
