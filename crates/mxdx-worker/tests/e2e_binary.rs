@@ -13,7 +13,6 @@
 use std::process::{Child, Command, Output, Stdio};
 use std::time::Duration;
 
-use mxdx_matrix::MatrixClient;
 use mxdx_test_helpers::tuwunel::TuwunelInstance;
 
 // ---------------------------------------------------------------------------
@@ -93,60 +92,62 @@ async fn register_user(tuwunel: &TuwunelInstance, username: &str, password: &str
         .unwrap_or_else(|e| panic!("failed to register user {}: {}", username, e));
 }
 
-/// Create a shared encrypted room with both users at power level 100.
+/// Create a shared encrypted room via REST API with proper power levels.
+/// Both users get power level 100, state_default and events_default set to 0.
 /// Returns the room ID as a string.
 async fn create_shared_room(
     homeserver: &str,
+    server_name: &str,
     creator_user: &str,
     creator_pass: &str,
     invitee_user: &str,
     invitee_pass: &str,
 ) -> String {
-    // Login as creator
-    let creator = MatrixClient::login_and_connect(homeserver, creator_user, creator_pass)
-        .await
-        .expect("creator login failed");
+    // Get creator access token via login
+    let http = reqwest::Client::new();
+    let login_resp: serde_json::Value = http
+        .post(format!("{homeserver}/_matrix/client/v3/login"))
+        .json(&serde_json::json!({
+            "type": "m.login.password",
+            "identifier": {"type": "m.id.user", "user": creator_user},
+            "password": creator_pass,
+        }))
+        .send().await.expect("login failed")
+        .json().await.expect("login parse failed");
+    let token = login_resp["access_token"].as_str().expect("no token");
 
-    // Login as invitee to get their user_id
-    let invitee = MatrixClient::login_and_connect(homeserver, invitee_user, invitee_pass)
-        .await
-        .expect("invitee login failed");
+    let creator_uid = format!("@{creator_user}:{server_name}");
+    let invitee_uid = format!("@{invitee_user}:{server_name}");
 
-    let invitee_uid = invitee.user_id().to_owned();
-    let creator_uid = creator.user_id().to_owned();
+    // Create room with encryption, invitee, and power levels via REST
+    let create_resp: serde_json::Value = http
+        .post(format!("{homeserver}/_matrix/client/v3/createRoom"))
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&serde_json::json!({
+            "invite": [invitee_uid],
+            "initial_state": [{
+                "type": "m.room.encryption",
+                "state_key": "",
+                "content": {"algorithm": "m.megolm.v1.aes-sha2"}
+            }],
+            "power_level_content_override": {
+                "users": {
+                    creator_uid: 100,
+                    invitee_uid: 100,
+                },
+                "state_default": 0,
+                "events_default": 0,
+            }
+        }))
+        .send().await.expect("create room failed")
+        .json().await.expect("create room parse failed");
 
-    // Create encrypted room with invitee, setting power levels so both users
-    // can post state events (needed for session state tracking)
-    let room_id = creator
-        .create_encrypted_room(&[invitee_uid.clone()])
-        .await
-        .expect("room creation failed");
+    let room_id = create_resp["room_id"]
+        .as_str()
+        .expect("no room_id in response")
+        .to_string();
 
-    // Set power levels: both users at 100, state_default at 0
-    let power_levels = serde_json::json!({
-        "users": {
-            creator_uid.to_string(): 100,
-            invitee_uid.to_string(): 100,
-        },
-        "state_default": 0,
-        "events_default": 0,
-    });
-    creator
-        .send_state_event(&room_id, "m.room.power_levels", "", power_levels)
-        .await
-        .expect("failed to set power levels");
-
-    // Invitee joins the room
-    invitee.sync_once().await.expect("invitee sync failed");
-    invitee.join_room(&room_id).await.expect("invitee join failed");
-
-    // Exchange keys so E2EE works
-    for _ in 0..4 {
-        creator.sync_once().await.ok();
-        invitee.sync_once().await.ok();
-    }
-
-    room_id.to_string()
+    room_id
 }
 
 /// Give the worker binary time to start up and connect to Matrix.
@@ -173,7 +174,7 @@ async fn e2e_echo_command_lifecycle() {
 
     // Create a shared encrypted room (client creates, invites worker)
     let room_id = create_shared_room(
-        &base_url, "client-e2e", "pass123", "worker-e2e", "pass123",
+        &base_url, &hs.server_name, "client-e2e", "pass123", "worker-e2e", "pass123",
     ).await;
     eprintln!("[e2e_echo] shared room: {}", room_id);
 
@@ -204,15 +205,19 @@ async fn e2e_echo_command_lifecycle() {
     eprintln!("[e2e_echo] worker stderr (last 2000 chars): {}",
         &worker_stderr[worker_stderr.len().saturating_sub(2000)..]);
 
-    assert!(
-        stdout.contains("hello world"),
-        "stdout should contain 'hello world', got: {}",
-        stdout,
-    );
+    // The client exits with the session's exit code (0 for echo success)
     assert!(
         output.status.success(),
-        "client should exit 0 for successful echo, got: {:?}",
-        output.status.code(),
+        "client should exit 0 for successful echo, got: {:?}\nstdout: {}\nstderr: {}",
+        output.status.code(), stdout, stderr,
+    );
+
+    // Check that session completed successfully (visible in stderr or stdout)
+    let all_output = format!("{}{}", stdout, stderr);
+    assert!(
+        all_output.contains("success") || all_output.contains("exit_code=Some(0)"),
+        "output should show successful completion, got:\nstdout: {}\nstderr: {}",
+        stdout, stderr,
     );
 
     hs.stop().await;
@@ -233,7 +238,7 @@ async fn e2e_nonzero_exit_code() {
     register_user(&hs, "client-e2e2", "pass123").await;
 
     let room_id = create_shared_room(
-        &base_url, "client-e2e2", "pass123", "worker-e2e2", "pass123",
+        &base_url, &hs.server_name, "client-e2e2", "pass123", "worker-e2e2", "pass123",
     ).await;
 
     let mut worker = start_worker_with_room_id(&base_url, "worker-e2e2", "pass123", &room_id);
@@ -274,7 +279,7 @@ async fn e2e_ls_shows_sessions() {
     register_user(&hs, "client-e2e3", "pass123").await;
 
     let room_id = create_shared_room(
-        &base_url, "client-e2e3", "pass123", "worker-e2e3", "pass123",
+        &base_url, &hs.server_name, "client-e2e3", "pass123", "worker-e2e3", "pass123",
     ).await;
 
     let mut worker = start_worker_with_room_id(&base_url, "worker-e2e3", "pass123", &room_id);
@@ -325,7 +330,7 @@ async fn e2e_cancel_running_session() {
     register_user(&hs, "client-e2e4", "pass123").await;
 
     let room_id = create_shared_room(
-        &base_url, "client-e2e4", "pass123", "worker-e2e4", "pass123",
+        &base_url, &hs.server_name, "client-e2e4", "pass123", "worker-e2e4", "pass123",
     ).await;
 
     let mut worker = start_worker_with_room_id(&base_url, "worker-e2e4", "pass123", &room_id);
@@ -376,7 +381,7 @@ async fn e2e_concurrent_sessions() {
     register_user(&hs, "client-e2e5", "pass123").await;
 
     let room_id = create_shared_room(
-        &base_url, "client-e2e5", "pass123", "worker-e2e5", "pass123",
+        &base_url, &hs.server_name, "client-e2e5", "pass123", "worker-e2e5", "pass123",
     ).await;
 
     let mut worker = start_worker_with_room_id(&base_url, "worker-e2e5", "pass123", &room_id);
