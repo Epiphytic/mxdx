@@ -9,6 +9,8 @@ use std::path::PathBuf;
 pub struct AccountConfig {
     pub user_id: String,
     pub homeserver: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -235,6 +237,7 @@ homeserver = "https://example.com"
 [[accounts]]
 user_id = "@backup:example.com"
 homeserver = "https://backup.example.com"
+password = "backup-secret"
 
 [trust]
 cross_signing_mode = "manual"
@@ -250,6 +253,8 @@ credential = "pass"
         let cfg: DefaultsConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.accounts.len(), 2);
         assert_eq!(cfg.accounts[0].user_id, "@worker:example.com");
+        assert!(cfg.accounts[0].password.is_none(), "no password field means None");
+        assert_eq!(cfg.accounts[1].password, Some("backup-secret".into()));
         assert_eq!(cfg.trust.cross_signing_mode, CrossSigningMode::Manual);
         assert_eq!(cfg.webrtc.stun_servers, vec!["stun:custom.stun:3478"]);
         assert_eq!(cfg.webrtc.turn_servers.len(), 1);

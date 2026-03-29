@@ -198,14 +198,17 @@ async fn main() -> Result<()> {
                 password: cli.password,
             };
             let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
-            let creds = config.require_credentials()?;
+            let accounts = config.resolve_accounts();
+            if accounts.is_empty() {
+                anyhow::bail!(
+                    "No Matrix accounts configured (use --homeserver/--username/--password or config file)"
+                );
+            }
             let room_name = resolve_worker_room(&worker_room, &config, cli_room_id.is_some())?;
 
-            // Connect to Matrix
-            let mx_room = matrix::connect(
-                &creds.homeserver,
-                &creds.username,
-                &creds.password,
+            // Connect to Matrix with multi-homeserver failover
+            let mut mx_room = matrix::connect_multi(
+                &accounts,
                 &room_name,
                 cli_room_id.as_deref(),
             )
@@ -228,7 +231,7 @@ async fn main() -> Result<()> {
 
             // Submit the task event to the exec room
             let event_id = mx_room
-                .post_event(mx_room.room_id().as_str(), SESSION_TASK, task_content)
+                .post_event_mut(SESSION_TASK, task_content)
                 .await?;
             tracing::info!(uuid = %task_uuid, event_id = %event_id, "task submitted");
 
@@ -240,7 +243,7 @@ async fn main() -> Result<()> {
                 let mut exit_code: Option<i32> = None;
 
                 loop {
-                    let events = mx_room.sync_events().await?;
+                    let events = mx_room.sync_events_mut().await?;
                     for event in events {
                         match event {
                             IncomingClientEvent::SessionOutput {
@@ -302,13 +305,16 @@ async fn main() -> Result<()> {
                 password: cli.password,
             };
             let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
-            let creds = config.require_credentials()?;
+            let accounts = config.resolve_accounts();
+            if accounts.is_empty() {
+                anyhow::bail!(
+                    "No Matrix accounts configured (use --homeserver/--username/--password or config file)"
+                );
+            }
             let room_name = resolve_worker_room(&worker_room, &config, cli_room_id.is_some())?;
 
-            let mx_room = matrix::connect(
-                &creds.homeserver,
-                &creds.username,
-                &creds.password,
+            let mx_room = matrix::connect_multi(
+                &accounts,
                 &room_name,
                 cli_room_id.as_deref(),
             )
@@ -384,20 +390,23 @@ async fn main() -> Result<()> {
                 password: cli.password,
             };
             let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
-            let creds = config.require_credentials()?;
+            let accounts = config.resolve_accounts();
+            if accounts.is_empty() {
+                anyhow::bail!(
+                    "No Matrix accounts configured (use --homeserver/--username/--password or config file)"
+                );
+            }
             let room_name = resolve_worker_room(&worker_room, &config, cli_room_id.is_some())?;
 
-            let mx_room = matrix::connect(
-                &creds.homeserver,
-                &creds.username,
-                &creds.password,
+            let mut mx_room = matrix::connect_multi(
+                &accounts,
                 &room_name,
                 cli_room_id.as_deref(),
             )
             .await?;
 
             // Collect events and filter for the session's output
-            let events = mx_room.sync_events().await?;
+            let events = mx_room.sync_events_mut().await?;
             let mut outputs = Vec::new();
             for event in events {
                 if let IncomingClientEvent::SessionOutput {
@@ -422,7 +431,7 @@ async fn main() -> Result<()> {
             if follow {
                 eprintln!("(follow mode: watching for new output...)");
                 loop {
-                    let events = mx_room.sync_events().await?;
+                    let events = mx_room.sync_events_mut().await?;
                     for event in events {
                         match event {
                             IncomingClientEvent::SessionOutput {
@@ -472,13 +481,16 @@ async fn main() -> Result<()> {
                 password: cli.password,
             };
             let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
-            let creds = config.require_credentials()?;
+            let accounts = config.resolve_accounts();
+            if accounts.is_empty() {
+                anyhow::bail!(
+                    "No Matrix accounts configured (use --homeserver/--username/--password or config file)"
+                );
+            }
             let room_name = resolve_worker_room(&worker_room, &config, cli_room_id.is_some())?;
 
-            let mx_room = matrix::connect(
-                &creds.homeserver,
-                &creds.username,
-                &creds.password,
+            let mut mx_room = matrix::connect_multi(
+                &accounts,
                 &room_name,
                 cli_room_id.as_deref(),
             )
@@ -488,7 +500,7 @@ async fn main() -> Result<()> {
                 let event = mxdx_client::cancel::build_signal(&uuid, &sig);
                 let content = matrix::serialize_event(&event)?;
                 let event_id = mx_room
-                    .post_event(mx_room.room_id().as_str(), SESSION_SIGNAL, content)
+                    .post_event_mut(SESSION_SIGNAL, content)
                     .await?;
                 tracing::info!(uuid = %uuid, signal = %sig, event_id = %event_id, "signal sent");
                 eprintln!("Signal {} sent to session {}", sig, uuid);
@@ -496,7 +508,7 @@ async fn main() -> Result<()> {
                 let event = mxdx_client::cancel::build_cancel(&uuid, None, None);
                 let content = matrix::serialize_event(&event)?;
                 let event_id = mx_room
-                    .post_event(mx_room.room_id().as_str(), SESSION_CANCEL, content)
+                    .post_event_mut(SESSION_CANCEL, content)
                     .await?;
                 tracing::info!(uuid = %uuid, event_id = %event_id, "cancel sent");
                 eprintln!("Cancel sent for session {}", uuid);

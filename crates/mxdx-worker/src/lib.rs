@@ -18,6 +18,7 @@ use anyhow::Result;
 use base64::Engine;
 use config::WorkerRuntimeConfig;
 use matrix::WorkerRoomOps;
+use mxdx_matrix::MultiHsClient;
 use mxdx_types::events::session::{
     OutputStream, SessionResult, SessionStart, SessionStatus, SessionTask,
 };
@@ -25,39 +26,44 @@ use mxdx_types::events::session::{
 /// Connect to Matrix and return the worker's room handle.
 /// If `config.room_id` is set, uses that room directly (bypasses space creation).
 /// Otherwise, logs in and finds/creates the launcher space.
+///
+/// Uses `MultiHsClient` for multi-homeserver failover. When only a single
+/// account is configured, the client operates in single-server mode with
+/// zero overhead (circuit breaker and deduplication are skipped).
 pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorkerRoom> {
-    let creds = config
-        .credentials
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Matrix credentials required (--homeserver, --username, --password)"))?;
+    let accounts = config.resolve_accounts();
+    if accounts.is_empty() {
+        anyhow::bail!(
+            "No Matrix accounts configured (use --homeserver/--username/--password or config file)"
+        );
+    }
 
-    let client = mxdx_matrix::MatrixClient::login_and_connect(
-        &creds.homeserver,
-        &creds.username,
-        &creds.password,
-    )
-    .await?;
-
-    tracing::info!(user_id = %client.user_id(), "logged in to Matrix");
+    let mut multi = MultiHsClient::connect(&accounts, None).await?;
+    tracing::info!(
+        user_id = %multi.user_id(),
+        servers = multi.server_count(),
+        preferred = %multi.preferred_server(),
+        "connected to Matrix"
+    );
 
     let room_id = if let Some(ref direct_room_id) = config.room_id {
         // Use a specific room ID directly (for E2E tests or pre-arranged rooms)
         let rid = mxdx_matrix::OwnedRoomId::try_from(direct_room_id.as_str())
             .map_err(|e| anyhow::anyhow!("Invalid room ID '{}': {}", direct_room_id, e))?;
         // Sync to pick up any pending invites, then join the room
-        client.sync_once().await?;
-        if let Err(e) = client.join_room(&rid).await {
+        multi.sync_once().await?;
+        if let Err(e) = multi.join_room(&rid).await {
             tracing::warn!(room_id = %rid, error = %e, "join_room failed (may already be a member)");
         }
         // Wait for key exchange so we can decrypt E2EE events in this room
         tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
-        client
+        multi
             .wait_for_key_exchange(&rid, std::time::Duration::from_secs(15))
             .await?;
         tracing::info!(room_id = %rid, "using direct room ID");
         rid
     } else {
-        let topology = client
+        let topology = multi
             .get_or_create_launcher_space(&config.resolved_room_name)
             .await?;
         topology.exec_room_id
@@ -65,7 +71,7 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
 
     tracing::info!(room_id = %room_id, "worker room ready");
 
-    Ok(matrix::MatrixWorkerRoom::new(client, room_id))
+    Ok(matrix::MatrixWorkerRoom::new(multi, room_id))
 }
 
 /// Run the worker with the given configuration.
@@ -137,14 +143,14 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
 
     tracing::info!("worker initialized, ready for sessions");
 
-    // If no credentials provided, just initialize and return (for testing)
-    if config.credentials.is_none() {
+    // If no accounts available, just initialize and return (for testing)
+    if config.resolve_accounts().is_empty() {
         tracing::info!("no credentials provided, skipping Matrix connection");
         return Ok(());
     }
 
     // Connect to Matrix
-    let room = connect(&config).await?;
+    let mut room = connect(&config).await?;
     let room_id_str = room.room_id().to_string();
 
     // Post WorkerInfo state event

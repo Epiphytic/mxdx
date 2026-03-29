@@ -7,6 +7,7 @@ async fn worker_starts_with_default_config_and_returns_ok() {
         accounts: vec![AccountConfig {
             user_id: "@test-worker:localhost".into(),
             homeserver: "https://localhost:8448".into(),
+            password: None,
         }],
         ..Default::default()
     };

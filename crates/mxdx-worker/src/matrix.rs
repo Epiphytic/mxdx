@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use anyhow::Result;
-use mxdx_matrix::MatrixClient;
+use mxdx_matrix::{MatrixClient, MultiHsClient};
 use serde::{de::DeserializeOwned, Serialize};
 
 /// Abstraction over Matrix room operations for the worker.
@@ -107,31 +107,51 @@ pub enum IncomingEvent {
 }
 
 /// Live Matrix-backed implementation of `WorkerRoomOps`.
-/// Wraps an `mxdx_matrix::MatrixClient` and a pre-resolved room ID.
+/// Wraps an `mxdx_matrix::MultiHsClient` for multi-homeserver failover
+/// and a pre-resolved room ID.
 pub struct MatrixWorkerRoom {
-    client: MatrixClient,
+    multi: MultiHsClient,
     room_id: mxdx_matrix::OwnedRoomId,
 }
 
 impl MatrixWorkerRoom {
-    pub fn new(client: MatrixClient, room_id: mxdx_matrix::OwnedRoomId) -> Self {
-        Self { client, room_id }
+    pub fn new(multi: MultiHsClient, room_id: mxdx_matrix::OwnedRoomId) -> Self {
+        Self { multi, room_id }
+    }
+
+    /// Construct from a single `MatrixClient` (backward compat / testing).
+    pub fn from_single_client(client: MatrixClient, room_id: mxdx_matrix::OwnedRoomId) -> Self {
+        let server = "single".to_string();
+        let multi = MultiHsClient::from_clients(vec![(server, client, 0.0)], None);
+        Self { multi, room_id }
     }
 
     pub fn room_id(&self) -> &mxdx_matrix::RoomId {
         &self.room_id
     }
 
+    /// Access the preferred (active) `MatrixClient` for operations not
+    /// yet wrapped by `MultiHsClient` (e.g., state reads).
     pub fn client(&self) -> &MatrixClient {
-        &self.client
+        self.multi.preferred()
+    }
+
+    /// Access the `MultiHsClient` mutably (for send operations with failover).
+    pub fn multi(&mut self) -> &mut MultiHsClient {
+        &mut self.multi
+    }
+
+    /// Number of connected homeservers.
+    pub fn server_count(&self) -> usize {
+        self.multi.server_count()
     }
 
     /// Sync and parse incoming events into `IncomingEvent` variants.
     /// This is not part of the `WorkerRoomOps` trait because it is
     /// specific to the live Matrix implementation.
-    pub async fn sync_events(&self, timeout: Duration) -> Result<Vec<IncomingEvent>> {
+    pub async fn sync_events(&mut self, timeout: Duration) -> Result<Vec<IncomingEvent>> {
         let raw_events = self
-            .client
+            .multi
             .sync_and_collect_events(&self.room_id, timeout)
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -227,12 +247,7 @@ impl WorkerRoomOps for MatrixWorkerRoom {
         let rid_str = room_id.to_string();
         let thread_root = thread_root.to_string();
         let event_type = event_type.to_string();
-        // Safety: we need to move these into the async block
-        // but self is borrowed, so capture client ref as owned clone isn't possible.
-        // Instead, we parse room_id eagerly.
-        let client = &self.client;
-        // We can't move &self.client into the future, so we use a helper pattern:
-        // parse room_id now, then call client method.
+        let client = self.multi.preferred();
         async move {
             let rid = <&mxdx_matrix::RoomId>::try_from(rid_str.as_str())
                 .map_err(|e| anyhow::anyhow!("Invalid room ID: {e}"))?;
@@ -253,7 +268,7 @@ impl WorkerRoomOps for MatrixWorkerRoom {
         let rid_str = room_id.to_string();
         let event_type = event_type.to_string();
         let state_key = state_key.to_string();
-        let client = &self.client;
+        let client = self.multi.preferred();
         async move {
             let rid = <&mxdx_matrix::RoomId>::try_from(rid_str.as_str())
                 .map_err(|e| anyhow::anyhow!("Invalid room ID: {e}"))?;
@@ -273,7 +288,7 @@ impl WorkerRoomOps for MatrixWorkerRoom {
         let rid_str = room_id.to_string();
         let event_type = event_type.to_string();
         let state_key = state_key.to_string();
-        let client = &self.client;
+        let client = self.multi.preferred();
         async move {
             let rid = <&mxdx_matrix::RoomId>::try_from(rid_str.as_str())
                 .map_err(|e| anyhow::anyhow!("Invalid room ID: {e}"))?;
@@ -296,7 +311,7 @@ impl WorkerRoomOps for MatrixWorkerRoom {
         let rid_str = room_id.to_string();
         let event_type = event_type.to_string();
         let state_key = state_key.to_string();
-        let client = &self.client;
+        let client = self.multi.preferred();
         async move {
             let rid = <&mxdx_matrix::RoomId>::try_from(rid_str.as_str())
                 .map_err(|e| anyhow::anyhow!("Invalid room ID: {e}"))?;

@@ -89,6 +89,47 @@ impl ClientRuntimeConfig {
             )
         })
     }
+
+    /// Resolve all configured server accounts.
+    /// CLI credentials (if present) become the first/primary account.
+    /// Config file accounts with passwords are added as additional servers.
+    pub fn resolve_accounts(&self) -> Vec<mxdx_matrix::ServerAccount> {
+        let mut accounts = Vec::new();
+
+        // CLI credentials first (highest priority)
+        if let Some(ref creds) = self.credentials {
+            accounts.push(mxdx_matrix::ServerAccount {
+                homeserver: creds.homeserver.clone(),
+                username: creds.username.clone(),
+                password: creds.password.clone(),
+            });
+        }
+
+        // Config file accounts (skip any that match the CLI homeserver)
+        for account in &self.defaults.accounts {
+            if let Some(ref password) = account.password {
+                let homeserver = &account.homeserver;
+                // Don't duplicate CLI account
+                let already_added = accounts.iter().any(|a| a.homeserver == *homeserver);
+                if !already_added {
+                    let username = account
+                        .user_id
+                        .split(':')
+                        .next()
+                        .unwrap_or(&account.user_id)
+                        .trim_start_matches('@')
+                        .to_string();
+                    accounts.push(mxdx_matrix::ServerAccount {
+                        homeserver: homeserver.clone(),
+                        username,
+                        password: password.clone(),
+                    });
+                }
+            }
+        }
+
+        accounts
+    }
 }
 
 #[cfg(test)]
@@ -176,5 +217,68 @@ mod tests {
         assert_eq!(cfg.client.coordinator_room, Some("keep-this-too".into()));
         assert_eq!(cfg.client.session.timeout_seconds, Some(60));
         assert_eq!(cfg.client.session.heartbeat_interval, 30);
+    }
+
+    #[test]
+    fn resolve_accounts_from_cli_credentials() {
+        let defaults = DefaultsConfig::default();
+        let client = ClientConfig::default();
+        let cfg = ClientRuntimeConfig::from_parts(defaults, client);
+
+        let args = ClientArgs {
+            worker_room: None,
+            coordinator_room: None,
+            timeout: None,
+            heartbeat_interval: None,
+            interactive: false,
+            no_room_output: false,
+            homeserver: Some("https://matrix.example.com".into()),
+            username: Some("alice".into()),
+            password: Some("secret".into()),
+        };
+        let cfg = cfg.with_cli_overrides(&args);
+        let accounts = cfg.resolve_accounts();
+
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].homeserver, "https://matrix.example.com");
+        assert_eq!(accounts[0].username, "alice");
+    }
+
+    #[test]
+    fn resolve_accounts_from_config_with_password() {
+        use mxdx_types::config::AccountConfig;
+
+        let defaults = DefaultsConfig {
+            accounts: vec![
+                AccountConfig {
+                    user_id: "@alice:server-a.com".into(),
+                    homeserver: "https://server-a.com".into(),
+                    password: Some("pass-a".into()),
+                },
+                AccountConfig {
+                    user_id: "@alice:server-b.com".into(),
+                    homeserver: "https://server-b.com".into(),
+                    password: Some("pass-b".into()),
+                },
+            ],
+            ..Default::default()
+        };
+        let client = ClientConfig::default();
+        let cfg = ClientRuntimeConfig::from_parts(defaults, client);
+        let accounts = cfg.resolve_accounts();
+
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].username, "alice");
+        assert_eq!(accounts[1].username, "alice");
+    }
+
+    #[test]
+    fn resolve_accounts_empty_when_no_credentials() {
+        let defaults = DefaultsConfig::default();
+        let client = ClientConfig::default();
+        let cfg = ClientRuntimeConfig::from_parts(defaults, client);
+        let accounts = cfg.resolve_accounts();
+
+        assert!(accounts.is_empty());
     }
 }

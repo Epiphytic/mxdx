@@ -97,6 +97,47 @@ impl WorkerRuntimeConfig {
         self
     }
 
+    /// Resolve all configured server accounts.
+    /// CLI credentials (if present) become the first/primary account.
+    /// Config file accounts with passwords are added as additional servers.
+    pub fn resolve_accounts(&self) -> Vec<mxdx_matrix::ServerAccount> {
+        let mut accounts = Vec::new();
+
+        // CLI credentials first (highest priority)
+        if let Some(ref creds) = self.credentials {
+            accounts.push(mxdx_matrix::ServerAccount {
+                homeserver: creds.homeserver.clone(),
+                username: creds.username.clone(),
+                password: creds.password.clone(),
+            });
+        }
+
+        // Config file accounts (skip any that match the CLI homeserver)
+        for account in &self.defaults.accounts {
+            if let Some(ref password) = account.password {
+                let homeserver = &account.homeserver;
+                // Don't duplicate CLI account
+                let already_added = accounts.iter().any(|a| a.homeserver == *homeserver);
+                if !already_added {
+                    let username = account
+                        .user_id
+                        .split(':')
+                        .next()
+                        .unwrap_or(&account.user_id)
+                        .trim_start_matches('@')
+                        .to_string();
+                    accounts.push(mxdx_matrix::ServerAccount {
+                        homeserver: homeserver.clone(),
+                        username,
+                        password: password.clone(),
+                    });
+                }
+            }
+        }
+
+        accounts
+    }
+
     /// Compute the default room name: `{hostname}.{username}.{localpart}`.
     /// If `worker.room_name` is set, use that instead.
     fn compute_room_name(defaults: &DefaultsConfig, worker: &WorkerConfig) -> String {
@@ -184,6 +225,7 @@ mod tests {
             accounts: vec![AccountConfig {
                 user_id: "@worker:example.com".into(),
                 homeserver: "https://example.com".into(),
+                password: None,
             }],
             ..Default::default()
         };
@@ -241,6 +283,7 @@ mod tests {
             accounts: vec![AccountConfig {
                 user_id: "@worker:fallback.com".into(),
                 homeserver: "https://fallback.com".into(),
+                password: None,
             }],
             ..Default::default()
         };
@@ -301,5 +344,115 @@ extra = ["docker", "gpu"]
         assert_eq!(cfg.worker.trust_anchor, Some("@admin:example.com".into()));
         assert_eq!(cfg.worker.history_retention, 30);
         assert_eq!(cfg.worker.capabilities.extra, vec!["docker", "gpu"]);
+    }
+
+    #[test]
+    fn resolve_accounts_from_cli_credentials() {
+        let defaults = DefaultsConfig::default();
+        let worker = WorkerConfig::default();
+        let cfg = WorkerRuntimeConfig::from_parts(defaults, worker);
+
+        let args = WorkerArgs {
+            trust_anchor: None,
+            history_retention: None,
+            cross_signing_mode: None,
+            room_name: None,
+            room_id: None,
+            homeserver: Some("https://matrix.example.com".into()),
+            username: Some("bot".into()),
+            password: Some("secret".into()),
+        };
+        let cfg = cfg.with_cli_overrides(&args);
+        let accounts = cfg.resolve_accounts();
+
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].homeserver, "https://matrix.example.com");
+        assert_eq!(accounts[0].username, "bot");
+        assert_eq!(accounts[0].password, "secret");
+    }
+
+    #[test]
+    fn resolve_accounts_from_config_with_password() {
+        let defaults = DefaultsConfig {
+            accounts: vec![
+                AccountConfig {
+                    user_id: "@worker:server-a.com".into(),
+                    homeserver: "https://server-a.com".into(),
+                    password: Some("pass-a".into()),
+                },
+                AccountConfig {
+                    user_id: "@worker:server-b.com".into(),
+                    homeserver: "https://server-b.com".into(),
+                    password: Some("pass-b".into()),
+                },
+            ],
+            ..Default::default()
+        };
+        let worker = WorkerConfig::default();
+        let cfg = WorkerRuntimeConfig::from_parts(defaults, worker);
+        let accounts = cfg.resolve_accounts();
+
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].homeserver, "https://server-a.com");
+        assert_eq!(accounts[0].username, "worker");
+        assert_eq!(accounts[1].homeserver, "https://server-b.com");
+        assert_eq!(accounts[1].username, "worker");
+    }
+
+    #[test]
+    fn resolve_accounts_skips_config_without_password() {
+        let defaults = DefaultsConfig {
+            accounts: vec![AccountConfig {
+                user_id: "@worker:no-pass.com".into(),
+                homeserver: "https://no-pass.com".into(),
+                password: None,
+            }],
+            ..Default::default()
+        };
+        let worker = WorkerConfig::default();
+        let cfg = WorkerRuntimeConfig::from_parts(defaults, worker);
+        let accounts = cfg.resolve_accounts();
+
+        assert!(accounts.is_empty(), "accounts without password should be skipped");
+    }
+
+    #[test]
+    fn resolve_accounts_cli_plus_config_no_duplicates() {
+        let defaults = DefaultsConfig {
+            accounts: vec![
+                AccountConfig {
+                    user_id: "@worker:server-a.com".into(),
+                    homeserver: "https://server-a.com".into(),
+                    password: Some("pass-a".into()),
+                },
+                AccountConfig {
+                    user_id: "@worker:server-b.com".into(),
+                    homeserver: "https://server-b.com".into(),
+                    password: Some("pass-b".into()),
+                },
+            ],
+            ..Default::default()
+        };
+        let worker = WorkerConfig::default();
+        let cfg = WorkerRuntimeConfig::from_parts(defaults, worker);
+
+        // CLI credentials match server-a — should not duplicate
+        let args = WorkerArgs {
+            trust_anchor: None,
+            history_retention: None,
+            cross_signing_mode: None,
+            room_name: None,
+            room_id: None,
+            homeserver: Some("https://server-a.com".into()),
+            username: Some("cli-user".into()),
+            password: Some("cli-pass".into()),
+        };
+        let cfg = cfg.with_cli_overrides(&args);
+        let accounts = cfg.resolve_accounts();
+
+        assert_eq!(accounts.len(), 2, "CLI + 1 non-duplicate config account");
+        assert_eq!(accounts[0].homeserver, "https://server-a.com");
+        assert_eq!(accounts[0].username, "cli-user"); // CLI takes priority
+        assert_eq!(accounts[1].homeserver, "https://server-b.com");
     }
 }

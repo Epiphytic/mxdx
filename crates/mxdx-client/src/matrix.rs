@@ -1,5 +1,5 @@
 use anyhow::Result;
-use mxdx_matrix::MatrixClient;
+use mxdx_matrix::{MatrixClient, MultiHsClient};
 use mxdx_types::events::session::{
     SESSION_HEARTBEAT, SESSION_OUTPUT, SESSION_RESULT, SESSION_START,
 };
@@ -89,34 +89,115 @@ impl ClientRoom {
 }
 
 /// Live Matrix-backed room operations for the client.
-/// Wraps a `MatrixClient` and a specific room to execute commands against.
+/// Wraps a `MultiHsClient` for multi-homeserver failover
+/// and a specific room to execute commands against.
 pub struct MatrixClientRoom {
-    client: MatrixClient,
+    multi: MultiHsClient,
     room_id: mxdx_matrix::OwnedRoomId,
 }
 
 impl MatrixClientRoom {
-    pub fn new(client: MatrixClient, room_id: mxdx_matrix::OwnedRoomId) -> Self {
-        Self { client, room_id }
+    pub fn new(multi: MultiHsClient, room_id: mxdx_matrix::OwnedRoomId) -> Self {
+        Self { multi, room_id }
+    }
+
+    /// Construct from a single `MatrixClient` (backward compat / testing).
+    pub fn from_single_client(client: MatrixClient, room_id: mxdx_matrix::OwnedRoomId) -> Self {
+        let server = "single".to_string();
+        let multi = MultiHsClient::from_clients(vec![(server, client, 0.0)], None);
+        Self { multi, room_id }
     }
 
     pub fn room_id(&self) -> &mxdx_matrix::RoomId {
         &self.room_id
     }
 
+    /// Access the preferred (active) `MatrixClient` for operations not
+    /// yet wrapped by `MultiHsClient` (e.g., state reads).
     pub fn client(&self) -> &MatrixClient {
-        &self.client
+        self.multi.preferred()
+    }
+
+    /// Access the `MultiHsClient` mutably (for send operations with failover).
+    pub fn multi(&mut self) -> &mut MultiHsClient {
+        &mut self.multi
+    }
+
+    /// Number of connected homeservers.
+    pub fn server_count(&self) -> usize {
+        self.multi.server_count()
     }
 
     /// Get the user ID of the logged-in user as a string.
     pub fn user_id_string(&self) -> String {
-        self.client.user_id().to_string()
+        self.multi.user_id().to_string()
+    }
+
+    /// Post an event with failover through MultiHsClient.
+    pub async fn post_event_mut(
+        &mut self,
+        event_type: &str,
+        content: serde_json::Value,
+    ) -> Result<String> {
+        let payload = serde_json::json!({
+            "type": event_type,
+            "content": content,
+        });
+        let event_id = self.multi.send_event(&self.room_id, payload).await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(event_id)
+    }
+
+    /// Sync events with failover through MultiHsClient.
+    pub async fn sync_events_mut(&mut self) -> Result<Vec<IncomingClientEvent>> {
+        let raw_events = self
+            .multi
+            .sync_and_collect_events(&self.room_id, Duration::from_secs(5))
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        let mut events = Vec::new();
+        for raw in raw_events {
+            let event_type = raw.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let content = raw.get("content").cloned().unwrap_or_default();
+            let session_uuid = content
+                .get("session_uuid")
+                .and_then(|u| u.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            if session_uuid.is_empty() {
+                continue;
+            }
+
+            match event_type {
+                SESSION_START => events.push(IncomingClientEvent::SessionStart {
+                    session_uuid,
+                    content,
+                }),
+                SESSION_OUTPUT => events.push(IncomingClientEvent::SessionOutput {
+                    session_uuid,
+                    content,
+                }),
+                SESSION_HEARTBEAT => events.push(IncomingClientEvent::SessionHeartbeat {
+                    session_uuid,
+                    content,
+                }),
+                SESSION_RESULT => events.push(IncomingClientEvent::SessionResult {
+                    session_uuid,
+                    content,
+                }),
+                _ => {} // Ignore unknown event types
+            }
+        }
+
+        Ok(events)
     }
 }
 
 impl ClientRoomOps for MatrixClientRoom {
     async fn find_room(&self, room_name: &str) -> Result<Option<String>> {
-        let topology = self.client.find_launcher_space(room_name).await?;
+        let topology = self.multi.preferred().find_launcher_space(room_name).await?;
         Ok(topology.map(|t| t.exec_room_id.to_string()))
     }
 
@@ -130,7 +211,7 @@ impl ClientRoomOps for MatrixClientRoom {
             "type": event_type,
             "content": content,
         });
-        let event_id = self.client.send_event(&self.room_id, payload).await?;
+        let event_id = self.multi.preferred().send_event(&self.room_id, payload).await?;
         Ok(event_id)
     }
 
@@ -142,7 +223,7 @@ impl ClientRoomOps for MatrixClientRoom {
         content: serde_json::Value,
     ) -> Result<String> {
         let event_id = self
-            .client
+            .multi.preferred()
             .send_threaded_event(&self.room_id, event_type, thread_root, content)
             .await?;
         Ok(event_id)
@@ -154,7 +235,7 @@ impl ClientRoomOps for MatrixClientRoom {
         event_type: &str,
     ) -> Result<Vec<(String, serde_json::Value)>> {
         let state = self
-            .client
+            .multi.preferred()
             .get_room_state(&self.room_id, event_type)
             .await?;
         // get_room_state returns a single JSON value; wrap it as a single entry
@@ -163,7 +244,7 @@ impl ClientRoomOps for MatrixClientRoom {
 
     async fn sync_events(&self) -> Result<Vec<IncomingClientEvent>> {
         let raw_events = self
-            .client
+            .multi.preferred()
             .sync_and_collect_events(&self.room_id, Duration::from_secs(5))
             .await?;
 
@@ -206,7 +287,66 @@ impl ClientRoomOps for MatrixClientRoom {
     }
 }
 
-/// Connect to Matrix and resolve the worker's exec room.
+/// Connect to Matrix using multiple homeserver accounts and resolve the worker's exec room.
+/// Returns a `MatrixClientRoom` ready for sending/receiving events with failover.
+///
+/// For backward compatibility, also accepts single-server connection parameters.
+pub async fn connect_multi(
+    accounts: &[mxdx_matrix::ServerAccount],
+    worker_room: &str,
+    direct_room_id: Option<&str>,
+) -> Result<MatrixClientRoom> {
+    if accounts.is_empty() {
+        anyhow::bail!(
+            "No Matrix accounts configured (use --homeserver/--username/--password or config file)"
+        );
+    }
+
+    tracing::info!(
+        servers = accounts.len(),
+        worker = %worker_room,
+        "connecting to Matrix"
+    );
+    let mut multi = MultiHsClient::connect(accounts, None).await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    tracing::info!(
+        user_id = %multi.user_id(),
+        servers = multi.server_count(),
+        preferred = %multi.preferred_server(),
+        "connected to Matrix"
+    );
+
+    let room_id = if let Some(rid_str) = direct_room_id {
+        // Use a direct room ID (bypasses space discovery, for E2E tests or pre-arranged rooms)
+        let rid = mxdx_matrix::OwnedRoomId::try_from(rid_str)
+            .map_err(|e| anyhow::anyhow!("Invalid room ID '{}': {}", rid_str, e))?;
+        // Sync to pick up any pending invites, then join
+        multi.sync_once().await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if let Err(e) = multi.join_room(&rid).await {
+            tracing::warn!(room_id = %rid, error = %e, "join_room failed (may already be a member)");
+        }
+        // Wait for key exchange so we can decrypt E2EE events
+        tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
+        multi
+            .wait_for_key_exchange(&rid, std::time::Duration::from_secs(15))
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        tracing::info!(room_id = %rid, "using direct room ID");
+        rid
+    } else {
+        // Find or create the launcher space
+        let topology = multi.get_or_create_launcher_space(worker_room).await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        tracing::info!(exec_room = %topology.exec_room_id, "connected to worker exec room");
+        topology.exec_room_id
+    };
+
+    Ok(MatrixClientRoom::new(multi, room_id))
+}
+
+/// Connect to Matrix and resolve the worker's exec room (single-server backward compat).
 /// Returns a `MatrixClientRoom` ready for sending/receiving events.
 pub async fn connect(
     homeserver: &str,
@@ -215,34 +355,12 @@ pub async fn connect(
     worker_room: &str,
     direct_room_id: Option<&str>,
 ) -> Result<MatrixClientRoom> {
-    tracing::info!(homeserver = %homeserver, username = %username, worker = %worker_room, "connecting to Matrix");
-    let client = MatrixClient::login_and_connect(homeserver, username, password).await?;
-
-    let room_id = if let Some(rid_str) = direct_room_id {
-        // Use a direct room ID (bypasses space discovery, for E2E tests or pre-arranged rooms)
-        let rid = mxdx_matrix::OwnedRoomId::try_from(rid_str)
-            .map_err(|e| anyhow::anyhow!("Invalid room ID '{}': {}", rid_str, e))?;
-        // Sync to pick up any pending invites, then join
-        client.sync_once().await?;
-        if let Err(e) = client.join_room(&rid).await {
-            tracing::warn!(room_id = %rid, error = %e, "join_room failed (may already be a member)");
-        }
-        // Wait for key exchange so we can decrypt E2EE events
-        tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
-        client
-            .wait_for_key_exchange(&rid, std::time::Duration::from_secs(15))
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        tracing::info!(room_id = %rid, "using direct room ID");
-        rid
-    } else {
-        // Find or create the launcher space
-        let topology = client.get_or_create_launcher_space(worker_room).await?;
-        tracing::info!(exec_room = %topology.exec_room_id, "connected to worker exec room");
-        topology.exec_room_id
-    };
-
-    Ok(MatrixClientRoom::new(client, room_id))
+    let accounts = vec![mxdx_matrix::ServerAccount {
+        homeserver: homeserver.to_string(),
+        username: username.to_string(),
+        password: password.to_string(),
+    }];
+    connect_multi(&accounts, worker_room, direct_room_id).await
 }
 
 /// Helper to serialize a typed event into a JSON Value for posting.
