@@ -2,21 +2,53 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use tokio::io::AsyncBufReadExt;
 use tokio::process::Command;
 
 /// Manages a tmux session via a dedicated socket, isolating mxdx sessions
 /// from the user's regular tmux. Socket stored at `/tmp/mxdx-tmux/mxdx-{session_name}`.
+///
+/// Non-interactive commands are launched through `mxdx-exec`, a thin wrapper
+/// that sends the exit code to a Unix domain socket immediately on completion.
+/// The worker awaits this socket instead of polling `is_alive()`.
 pub struct TmuxSession {
     pub session_name: String,
     pub socket_path: PathBuf,
-    /// File where the process exit code is written on completion.
-    pub exit_code_path: PathBuf,
+    /// UDS path where mxdx-exec sends the exit code on completion.
+    pub exit_notify_path: PathBuf,
 }
 
 impl TmuxSession {
-    /// Create a new tmux session running the given command.
-    /// The command is wrapped in a shell that writes the exit code to a temp file,
-    /// so it can be read after the tmux session exits.
+    /// Resolve the full path to the `mxdx-exec` binary.
+    /// Checks the directory of the currently running binary first, then its
+    /// parent (handles test binaries in `target/debug/deps/`).
+    fn mxdx_exec_path() -> PathBuf {
+        if let Ok(exe) = std::env::current_exe() {
+            // Try same directory as current binary
+            let mut candidate = exe.clone();
+            candidate.pop();
+            candidate.push("mxdx-exec");
+            if candidate.exists() {
+                return candidate;
+            }
+            // Try parent directory (for test binaries in deps/)
+            let mut candidate = exe;
+            candidate.pop(); // remove binary name
+            candidate.pop(); // remove deps/
+            candidate.push("mxdx-exec");
+            if candidate.exists() {
+                return candidate;
+            }
+        }
+        // Fallback
+        PathBuf::from("mxdx-exec")
+    }
+
+    /// Create a new tmux session running the given command via `mxdx-exec`.
+    ///
+    /// The command is wrapped: `mxdx-exec --notify <uds_path> -- <bin> <args...>`
+    /// This preserves all tmux features (capture, resize, attach) while giving
+    /// immediate exit code notification through the UDS.
     pub async fn create(
         session_name: &str,
         bin: &str,
@@ -25,21 +57,23 @@ impl TmuxSession {
         env: &HashMap<String, String>,
     ) -> Result<Self> {
         let socket_path = Self::socket_dir().join(format!("mxdx-{session_name}"));
-        let exit_code_path = Self::socket_dir().join(format!("mxdx-{session_name}.exit"));
+        let exit_notify_path = Self::socket_dir().join(format!("mxdx-{session_name}.notify"));
 
-        // Build the actual command string, shell-escaped
-        let mut cmd_parts = vec![bin.to_string()];
-        for arg in args {
-            // Simple shell quoting — wrap in single quotes, escape any internal single quotes
-            cmd_parts.push(format!("'{}'", arg.replace('\'', "'\\''")));
+        // Clean up any stale socket from a previous run
+        let _ = std::fs::remove_file(&exit_notify_path);
+
+        // Create the UDS listener BEFORE starting tmux so mxdx-exec can connect
+        let listener = std::os::unix::net::UnixListener::bind(&exit_notify_path)?;
+        // Set non-blocking so we can convert to tokio later
+        listener.set_nonblocking(true)?;
+
+        let exec_path = Self::mxdx_exec_path();
+        if !exec_path.exists() {
+            anyhow::bail!(
+                "mxdx-exec not found at {}. Build with: cargo build -p mxdx-worker --bin mxdx-exec",
+                exec_path.display()
+            );
         }
-        let cmd_str = cmd_parts.join(" ");
-
-        // Wrap: run command, capture exit code, write to file
-        let wrapper = format!(
-            "{cmd_str}; echo $? > '{}'",
-            exit_code_path.display()
-        );
 
         let mut cmd = Command::new("tmux");
         cmd.args(["-S", socket_path.to_str().unwrap()])
@@ -55,8 +89,73 @@ impl TmuxSession {
             cmd.args(["-c", cwd]);
         }
 
-        // Run via /bin/sh -c so we can capture the exit code
-        cmd.args(["/bin/sh", "-c", &wrapper]);
+        // Launch: mxdx-exec --notify <uds> -- <bin> <args...>
+        cmd.arg(exec_path.to_str().unwrap());
+        cmd.args(["--notify", exit_notify_path.to_str().unwrap()]);
+        cmd.arg("--");
+        cmd.arg(bin);
+        for arg in args {
+            cmd.arg(arg);
+        }
+
+        let output = cmd.output().await?;
+        if !output.status.success() {
+            // Clean up the listener socket on failure
+            let _ = std::fs::remove_file(&exit_notify_path);
+            anyhow::bail!(
+                "tmux new-session failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        // Spawn a background task that accepts the UDS connection from mxdx-exec
+        // and writes the exit code to a file for later retrieval.
+        let exit_file = Self::socket_dir().join(format!("mxdx-{session_name}.exit"));
+        let notify_path_cleanup = exit_notify_path.clone();
+
+        tokio::spawn(async move {
+            let tokio_listener = match tokio::net::UnixListener::from_std(listener) {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!("Failed to convert UDS listener to tokio: {e}");
+                    return;
+                }
+            };
+
+            match tokio_listener.accept().await {
+                Ok((stream, _)) => {
+                    let reader = tokio::io::BufReader::new(stream);
+                    let mut lines = reader.lines();
+                    if let Ok(Some(line)) = lines.next_line().await {
+                        // Write exit code to file for retrieval
+                        let _ = std::fs::write(&exit_file, line.trim());
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("UDS accept failed: {e}");
+                }
+            }
+
+            let _ = tokio::fs::remove_file(&notify_path_cleanup).await;
+        });
+
+        Ok(Self {
+            session_name: session_name.to_string(),
+            socket_path,
+            exit_notify_path,
+        })
+    }
+
+    /// Create an interactive tmux session with a shell.
+    /// Interactive sessions run the shell directly (no mxdx-exec wrapper).
+    pub async fn create_interactive(session_name: &str, shell: &str) -> Result<Self> {
+        let socket_path = Self::socket_dir().join(format!("mxdx-{session_name}"));
+        let exit_notify_path = Self::socket_dir().join(format!("mxdx-{session_name}.notify"));
+
+        let mut cmd = Command::new("tmux");
+        cmd.args(["-S", socket_path.to_str().unwrap()])
+            .args(["new-session", "-d", "-s", session_name])
+            .arg(shell);
 
         let output = cmd.output().await?;
         if !output.status.success() {
@@ -69,19 +168,15 @@ impl TmuxSession {
         Ok(Self {
             session_name: session_name.to_string(),
             socket_path,
-            exit_code_path,
+            exit_notify_path,
         })
     }
 
-    /// Create an interactive tmux session with a shell.
-    pub async fn create_interactive(session_name: &str, shell: &str) -> Result<Self> {
-        Self::create(session_name, shell, &[], None, &HashMap::new()).await
-    }
-
-    /// Read the exit code written by the wrapper shell after the command completed.
-    /// Returns None if the file doesn't exist yet (command still running or no wrapper).
+    /// Read the exit code written by mxdx-exec via UDS -> background task -> file.
+    /// Returns None if the exit code hasn't been received yet.
     pub fn read_exit_code(&self) -> Option<i32> {
-        std::fs::read_to_string(&self.exit_code_path)
+        let exit_file = Self::socket_dir().join(format!("mxdx-{}.exit", self.session_name));
+        std::fs::read_to_string(&exit_file)
             .ok()
             .and_then(|s| s.trim().parse::<i32>().ok())
     }
@@ -163,9 +258,11 @@ impl TmuxSession {
             .args(["kill-session", "-t", &self.session_name])
             .output()
             .await;
-        // Clean up socket and exit code file
+        // Clean up socket and notify files
         let _ = tokio::fs::remove_file(&self.socket_path).await;
-        let _ = tokio::fs::remove_file(&self.exit_code_path).await;
+        let _ = tokio::fs::remove_file(&self.exit_notify_path).await;
+        let exit_file = Self::socket_dir().join(format!("mxdx-{}.exit", self.session_name));
+        let _ = tokio::fs::remove_file(&exit_file).await;
         Ok(())
     }
 
@@ -191,7 +288,6 @@ impl TmuxSession {
 mod tests {
     use super::*;
 
-    /// Returns true if tmux is available on the system.
     async fn tmux_available() -> bool {
         Command::new("which")
             .arg("tmux")
@@ -219,40 +315,55 @@ mod tests {
         .expect("failed to create tmux session");
 
         assert!(session.is_alive().await.expect("is_alive failed"));
-
-        // Cleanup
         session.kill().await.expect("kill failed");
     }
 
     #[tokio::test]
-    async fn test_session_completes() {
+    async fn test_exit_code_nonzero() {
         if !tmux_available().await {
             eprintln!("tmux not available, skipping test");
             return;
         }
 
-        // Run a command that exits quickly
         let session = TmuxSession::create(
-            "test-complete",
-            "echo",
-            &["hello".to_string()],
+            "test-exit-nz",
+            "/bin/false",
+            &[],
             None,
             &HashMap::new(),
         )
         .await
         .expect("failed to create tmux session");
 
-        // Give the command time to complete and the session to close
+        // Wait for the process to exit (mxdx-exec notifies via UDS)
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-        // tmux sessions running a command that exits will remain alive
-        // (showing the shell or exit status), so we just verify no error
-        let alive = session.is_alive().await.expect("is_alive failed");
-        // Session may or may not be alive depending on tmux config;
-        // the important thing is no error was raised.
-        let _ = alive;
+        let exit_code = session.read_exit_code();
+        assert_eq!(exit_code, Some(1), "exit code should be 1 for /bin/false");
+        session.kill().await.expect("kill failed");
+    }
 
-        // Cleanup
+    #[tokio::test]
+    async fn test_exit_code_success() {
+        if !tmux_available().await {
+            eprintln!("tmux not available, skipping test");
+            return;
+        }
+
+        let session = TmuxSession::create(
+            "test-exit-ok",
+            "/bin/true",
+            &[],
+            None,
+            &HashMap::new(),
+        )
+        .await
+        .expect("failed to create tmux session");
+
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let exit_code = session.read_exit_code();
+        assert_eq!(exit_code, Some(0), "exit code should be 0 for /bin/true");
         session.kill().await.expect("kill failed");
     }
 
@@ -267,7 +378,6 @@ mod tests {
             .await
             .expect("failed to create interactive session");
 
-        // Send a command and wait for output
         session
             .send_keys(b"echo MXDX_TEST_OUTPUT\n")
             .await
@@ -285,7 +395,6 @@ mod tests {
             "captured pane should contain test output, got: {captured}"
         );
 
-        // Cleanup
         session.kill().await.expect("kill failed");
     }
 
@@ -307,10 +416,8 @@ mod tests {
         .expect("failed to create tmux session");
 
         assert!(session.is_alive().await.expect("is_alive failed"));
-
         session.kill().await.expect("kill failed");
 
-        // After kill, session should not be alive
         assert!(
             !session.is_alive().await.expect("is_alive after kill failed"),
             "session should not be alive after kill"
@@ -343,7 +450,6 @@ mod tests {
             "session list should contain test-list, got: {sessions:?}"
         );
 
-        // Cleanup
         session.kill().await.expect("kill failed");
     }
 }

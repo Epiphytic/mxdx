@@ -13,6 +13,10 @@ description = "Worker process for mxdx: connects to Matrix, claims tasks, execut
 name = "mxdx-worker"
 path = "src/main.rs"
 
+[[bin]]
+name = "mxdx-exec"
+path = "src/bin/mxdx_exec.rs"
+
 [lib]
 name = "mxdx_worker"
 path = "src/lib.rs"
