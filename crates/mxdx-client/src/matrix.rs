@@ -307,7 +307,8 @@ pub async fn connect_multi(
         worker = %worker_room,
         "connecting to Matrix"
     );
-    let mut multi = MultiHsClient::connect(accounts, None).await
+    let store_base = mxdx_matrix::default_store_base_path("client");
+    let mut multi = MultiHsClient::connect(accounts, None, store_base).await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     tracing::info!(

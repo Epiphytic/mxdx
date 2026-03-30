@@ -1,3 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use matrix_sdk::{
@@ -15,9 +18,44 @@ use serde_json::Value;
 
 use crate::error::{MatrixClientError, Result};
 
+/// Compute a short 16-hex-char hash of the input string.
+/// Used to derive deterministic, filesystem-safe directory names from server
+/// URLs or user IDs without leaking the full identifier.
+pub fn short_hash(input: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    input.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// Compute the default persistent crypto store base path for a given role.
+///
+/// Returns `~/.mxdx/crypto/{role}/` (e.g. `~/.mxdx/crypto/worker/`).
+/// Returns `None` if the home directory cannot be determined.
+pub fn default_store_base_path(role: &str) -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".mxdx").join("crypto").join(role))
+}
+
+/// Manages the lifecycle of the sqlite crypto store directory.
+///
+/// - `Temp`: backed by `tempfile::TempDir`, deleted on drop (for tests).
+/// - `Persistent`: backed by a fixed path, survives process exit (for production).
+pub(crate) enum StoreDir {
+    Temp(tempfile::TempDir),
+    Persistent(PathBuf),
+}
+
+impl StoreDir {
+    pub(crate) fn path(&self) -> &Path {
+        match self {
+            StoreDir::Temp(t) => t.path(),
+            StoreDir::Persistent(p) => p.as_path(),
+        }
+    }
+}
+
 pub struct MatrixClient {
     client: Client,
-    _store_dir: tempfile::TempDir,
+    _store_dir: StoreDir,
     room_creation_delay: Option<Duration>,
     room_creation_timeout: Duration,
 }
@@ -45,7 +83,8 @@ impl MatrixClient {
         password: &str,
         danger_accept_invalid_certs: bool,
     ) -> Result<Self> {
-        let store_dir = tempfile::TempDir::new().map_err(|e| MatrixClientError::Other(e.into()))?;
+        let tmp = tempfile::TempDir::new().map_err(|e| MatrixClientError::Other(e.into()))?;
+        let store_dir = StoreDir::Temp(tmp);
 
         let mut builder = Client::builder().sqlite_store(store_dir.path(), None);
 
@@ -83,6 +122,121 @@ impl MatrixClient {
         })
     }
 
+    /// Login with a persistent crypto store that survives process restarts.
+    /// The `store_path` directory is created (with 0o700 permissions on Unix) if it
+    /// does not exist. E2EE keys are preserved across restarts, avoiding new-device
+    /// creation on every login.
+    pub async fn login_and_connect_persistent(
+        server_name_or_url: &str,
+        username: &str,
+        password: &str,
+        store_path: PathBuf,
+        danger_accept_invalid_certs: bool,
+    ) -> Result<Self> {
+        Self::ensure_store_dir(&store_path)?;
+        let store_dir = StoreDir::Persistent(store_path);
+
+        let mut builder = Client::builder().sqlite_store(store_dir.path(), None);
+
+        if danger_accept_invalid_certs {
+            builder = builder.disable_ssl_verification();
+        }
+
+        let client = if server_name_or_url.contains("://") {
+            builder.homeserver_url(server_name_or_url)
+        } else {
+            builder.server_name_or_homeserver_url(server_name_or_url)
+        }
+        .build()
+        .await?;
+
+        client
+            .matrix_auth()
+            .login_username(username, password)
+            .initial_device_display_name("mxdx")
+            .await?;
+
+        client
+            .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
+            .await?;
+
+        Ok(MatrixClient {
+            client,
+            _store_dir: store_dir,
+            room_creation_delay: None,
+            room_creation_timeout: Duration::from_secs(30),
+        })
+    }
+
+    /// Restore a session from an access token using a persistent crypto store.
+    /// The `store_path` directory is created (with 0o700 permissions on Unix) if it
+    /// does not exist.
+    pub async fn connect_with_token_persistent(
+        homeserver_url: &str,
+        access_token: &str,
+        user_id: &str,
+        device_id: &str,
+        store_path: PathBuf,
+    ) -> Result<Self> {
+        Self::ensure_store_dir(&store_path)?;
+        let store_dir = StoreDir::Persistent(store_path);
+
+        let client = Client::builder()
+            .homeserver_url(homeserver_url)
+            .sqlite_store(store_dir.path(), None)
+            .build()
+            .await?;
+
+        let session = MatrixSession {
+            meta: SessionMeta {
+                user_id: user_id
+                    .try_into()
+                    .map_err(|e: matrix_sdk::IdParseError| MatrixClientError::Other(e.into()))?,
+                device_id: device_id.into(),
+            },
+            tokens: SessionTokens {
+                access_token: access_token.to_string(),
+                refresh_token: None,
+            },
+        };
+
+        client
+            .restore_session(session)
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+
+        client
+            .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
+            .await?;
+
+        Ok(MatrixClient {
+            client,
+            _store_dir: store_dir,
+            room_creation_delay: None,
+            room_creation_timeout: Duration::from_secs(30),
+        })
+    }
+
+    /// Create the store directory with secure permissions if it doesn't exist.
+    fn ensure_store_dir(path: &Path) -> Result<()> {
+        std::fs::create_dir_all(path)
+            .map_err(|e| MatrixClientError::Other(anyhow::anyhow!(
+                "Failed to create crypto store directory {}: {e}", path.display()
+            )))?;
+
+        // Set restrictive permissions on Unix (owner-only read/write/execute).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                .map_err(|e| MatrixClientError::Other(anyhow::anyhow!(
+                    "Failed to set permissions on {}: {e}", path.display()
+                )))?;
+        }
+
+        Ok(())
+    }
+
     /// Connect to a homeserver by restoring a session from an existing access token.
     /// Requires `user_id` (e.g. `@worker:example.com`) and `device_id` (e.g. `FABRICBOT`).
     /// The device_id must match the one that generated the access_token on the server.
@@ -92,7 +246,8 @@ impl MatrixClient {
         user_id: &str,
         device_id: &str,
     ) -> Result<Self> {
-        let store_dir = tempfile::TempDir::new().map_err(|e| MatrixClientError::Other(e.into()))?;
+        let tmp = tempfile::TempDir::new().map_err(|e| MatrixClientError::Other(e.into()))?;
+        let store_dir = StoreDir::Temp(tmp);
 
         let client = Client::builder()
             .homeserver_url(homeserver_url)
@@ -170,7 +325,8 @@ impl MatrixClient {
         }
 
         // Build the matrix-sdk client with sqlite store for E2EE
-        let store_dir = tempfile::TempDir::new().map_err(|e| MatrixClientError::Other(e.into()))?;
+        let tmp = tempfile::TempDir::new().map_err(|e| MatrixClientError::Other(e.into()))?;
+        let store_dir = StoreDir::Temp(tmp);
 
         let client = Client::builder()
             .homeserver_url(homeserver_url)
@@ -610,5 +766,100 @@ impl MatrixClient {
             }
         }
         Ok(verified)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_persistent_store_dir_survives_drop() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir_path = tmp.path().join("persistent_test");
+        std::fs::create_dir_all(&dir_path).unwrap();
+
+        let store = StoreDir::Persistent(dir_path.clone());
+        assert!(dir_path.exists());
+
+        // Drop the StoreDir — persistent variant must NOT delete the directory
+        drop(store);
+        assert!(
+            dir_path.exists(),
+            "Persistent store directory should survive drop"
+        );
+    }
+
+    #[test]
+    fn test_temp_store_dir_cleaned_on_drop() {
+        let store = StoreDir::Temp(tempfile::TempDir::new().unwrap());
+        let path = store.path().to_owned();
+        assert!(path.exists());
+
+        drop(store);
+        assert!(
+            !path.exists(),
+            "Temp store directory should be deleted on drop"
+        );
+    }
+
+    #[test]
+    fn test_store_dir_path_returns_correct_path() {
+        // Temp variant
+        let tmp = tempfile::TempDir::new().unwrap();
+        let expected = tmp.path().to_owned();
+        let store = StoreDir::Temp(tmp);
+        assert_eq!(store.path(), expected);
+
+        // Persistent variant
+        let p = PathBuf::from("/tmp/mxdx-test-persistent");
+        let store = StoreDir::Persistent(p.clone());
+        assert_eq!(store.path(), p);
+    }
+
+    #[test]
+    fn test_ensure_store_dir_creates_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path().join("nested").join("crypto");
+        assert!(!dir.exists());
+
+        MatrixClient::ensure_store_dir(&dir).unwrap();
+        assert!(dir.exists());
+
+        // On Unix, verify permissions are 0o700
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "Directory should have 0o700 permissions");
+        }
+    }
+
+    #[test]
+    fn test_short_hash_deterministic() {
+        let h1 = short_hash("https://matrix.example.com");
+        let h2 = short_hash("https://matrix.example.com");
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 16, "Short hash should be 16 hex chars");
+    }
+
+    #[test]
+    fn test_short_hash_differs_for_different_inputs() {
+        let h1 = short_hash("https://server-a.example.com");
+        let h2 = short_hash("https://server-b.example.com");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_default_store_base_path_has_correct_structure() {
+        // This test may fail in environments without a home directory,
+        // which is acceptable (CI containers, etc.)
+        if let Some(path) = default_store_base_path("worker") {
+            assert!(path.ends_with("worker"));
+            let parent = path.parent().unwrap();
+            assert!(parent.ends_with("crypto"));
+            let grandparent = parent.parent().unwrap();
+            assert!(grandparent.ends_with(".mxdx"));
+        }
     }
 }

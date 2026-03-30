@@ -19,6 +19,7 @@ tracing = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 reqwest = { workspace = true }
+dirs = "6"
 
 [dev-dependencies]
 mxdx-test-helpers = { path = "../../tests/helpers" }

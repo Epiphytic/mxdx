@@ -1,9 +1,11 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tracing::{debug, info, warn};
 
+use crate::client::short_hash;
 use crate::error::{MatrixClientError, Result};
 use crate::rooms::LauncherTopology;
 use crate::MatrixClient;
@@ -86,9 +88,14 @@ impl MultiHsClient {
     /// Logs into each homeserver sequentially via `MatrixClient::login_and_connect()`,
     /// measures latency by timing an initial `sync_once()`, and selects the
     /// preferred server (explicit override or lowest latency).
+    ///
+    /// When `store_base_path` is `Some`, per-server subdirectories are created
+    /// under it (keyed by a hash of the server URL) for persistent crypto stores.
+    /// When `None`, each connection uses a temporary store (keys lost on exit).
     pub async fn connect(
         accounts: &[ServerAccount],
         preferred_server: Option<&str>,
+        store_base_path: Option<PathBuf>,
     ) -> Result<Self> {
         if accounts.is_empty() {
             return Err(MatrixClientError::Other(anyhow::anyhow!(
@@ -99,13 +106,26 @@ impl MultiHsClient {
         let mut entries = Vec::with_capacity(accounts.len());
 
         for account in accounts {
-            let client = MatrixClient::login_and_connect_opts(
-                &account.homeserver,
-                &account.username,
-                &account.password,
-                account.danger_accept_invalid_certs,
-            )
-            .await?;
+            let client = if let Some(ref base) = store_base_path {
+                let server_hash = short_hash(&account.homeserver);
+                let store_path = base.join(&server_hash);
+                MatrixClient::login_and_connect_persistent(
+                    &account.homeserver,
+                    &account.username,
+                    &account.password,
+                    store_path,
+                    account.danger_accept_invalid_certs,
+                )
+                .await?
+            } else {
+                MatrixClient::login_and_connect_opts(
+                    &account.homeserver,
+                    &account.username,
+                    &account.password,
+                    account.danger_accept_invalid_certs,
+                )
+                .await?
+            };
 
             // Measure latency via a sync cycle
             let start = Instant::now();

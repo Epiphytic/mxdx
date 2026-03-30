@@ -38,7 +38,8 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
         );
     }
 
-    let mut multi = MultiHsClient::connect(&accounts, None).await?;
+    let store_base = mxdx_matrix::default_store_base_path("worker");
+    let mut multi = MultiHsClient::connect(&accounts, None, store_base).await?;
     tracing::info!(
         user_id = %multi.user_id(),
         servers = multi.server_count(),

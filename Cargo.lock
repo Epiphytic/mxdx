@@ -2685,6 +2685,7 @@ name = "mxdx-matrix"
 version = "1.1.0"
 dependencies = [
  "anyhow",
+ "dirs 6.0.0",
  "matrix-sdk",
  "mxdx-test-helpers",
  "mxdx-types",
