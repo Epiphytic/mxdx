@@ -8,12 +8,25 @@ use mxdx_types::identity::KeychainBackend;
 
 /// Session data stored in keychain. Matches npm's exported session format
 /// (`packages/core/session.js`) for cross-ecosystem session sharing.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct SessionData {
     pub user_id: String,
     pub device_id: String,
     pub access_token: String,
     pub homeserver_url: String,
+}
+
+// Custom Debug impl that redacts access_token to prevent accidental leakage
+// via {:?} formatting, panic messages, or tracing macros.
+impl std::fmt::Debug for SessionData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionData")
+            .field("user_id", &self.user_id)
+            .field("device_id", &self.device_id)
+            .field("access_token", &"[REDACTED]")
+            .field("homeserver_url", &self.homeserver_url)
+            .finish()
+    }
 }
 
 /// Normalize a server URL for use as a keychain key component.
