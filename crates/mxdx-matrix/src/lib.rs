@@ -10,5 +10,5 @@ pub use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId, RoomId, UserId};
 pub use multi_hs::{MultiHsClient, ServerAccount, ServerHealth, ServerStatus};
 pub use rooms::LauncherTopology;
 pub use session::{
-    connect_with_session, normalize_server, password_key, session_key, SessionData,
+    connect_with_session, normalize_server, password_key, session_key, store_key_key, SessionData,
 };

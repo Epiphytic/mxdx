@@ -2720,6 +2720,7 @@ version = "1.1.0"
 dependencies = [
  "anyhow",
  "dirs 6.0.0",
+ "hostname",
  "matrix-sdk",
  "mxdx-test-helpers",
  "mxdx-types",

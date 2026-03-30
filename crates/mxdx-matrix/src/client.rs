@@ -138,10 +138,29 @@ impl MatrixClient {
         store_path: PathBuf,
         danger_accept_invalid_certs: bool,
     ) -> Result<Self> {
+        Self::login_and_connect_persistent_with_passphrase(
+            server_name_or_url, username, password, store_path,
+            danger_accept_invalid_certs, None,
+        ).await
+    }
+
+    /// Login with a persistent crypto store and an optional passphrase for at-rest encryption.
+    ///
+    /// When `store_passphrase` is `Some`, the SQLite crypto store is encrypted with the
+    /// given passphrase, protecting E2EE private keys on disk. When `None`, the store
+    /// is unencrypted (suitable for tests only).
+    pub async fn login_and_connect_persistent_with_passphrase(
+        server_name_or_url: &str,
+        username: &str,
+        password: &str,
+        store_path: PathBuf,
+        danger_accept_invalid_certs: bool,
+        store_passphrase: Option<&str>,
+    ) -> Result<Self> {
         Self::ensure_store_dir(&store_path)?;
         let store_dir = StoreDir::Persistent(store_path);
 
-        let mut builder = Client::builder().sqlite_store(store_dir.path(), None);
+        let mut builder = Client::builder().sqlite_store(store_dir.path(), store_passphrase);
 
         if danger_accept_invalid_certs {
             builder = builder.disable_ssl_verification();
@@ -183,12 +202,26 @@ impl MatrixClient {
         device_id: &str,
         store_path: PathBuf,
     ) -> Result<Self> {
+        Self::connect_with_token_persistent_with_passphrase(
+            homeserver_url, access_token, user_id, device_id, store_path, None,
+        ).await
+    }
+
+    /// Restore a session with a persistent crypto store and optional passphrase.
+    pub async fn connect_with_token_persistent_with_passphrase(
+        homeserver_url: &str,
+        access_token: &str,
+        user_id: &str,
+        device_id: &str,
+        store_path: PathBuf,
+        store_passphrase: Option<&str>,
+    ) -> Result<Self> {
         Self::ensure_store_dir(&store_path)?;
         let store_dir = StoreDir::Persistent(store_path);
 
         let client = Client::builder()
             .homeserver_url(homeserver_url)
-            .sqlite_store(store_dir.path(), None)
+            .sqlite_store(store_dir.path(), store_passphrase)
             .build()
             .await?;
 
