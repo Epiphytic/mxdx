@@ -8,6 +8,7 @@ pub enum MatrixClientError {
     RoomNotFound(String),
     KeyExchangeTimeout(String),
     RoomCreationTimeout(String),
+    StateRoomRejected(String),
     Other(anyhow::Error),
 }
 
@@ -23,6 +24,7 @@ impl fmt::Display for MatrixClientError {
                 f,
                 "Room creation timeout (server may be rate-limiting): {msg}"
             ),
+            Self::StateRoomRejected(msg) => write!(f, "State room rejected: {msg}"),
             Self::Other(e) => write!(f, "{e}"),
         }
     }

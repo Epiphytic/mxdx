@@ -6,6 +6,7 @@ pub mod output;
 pub mod result;
 pub mod secret;
 pub mod session;
+pub mod state_room;
 pub mod telemetry;
 pub mod terminal;
 pub mod webrtc;

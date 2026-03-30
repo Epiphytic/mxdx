@@ -28,6 +28,11 @@ pub fn trust_store_key(user_id: &str) -> String {
     format!("mxdx/{user_id}/trust-store")
 }
 
+/// Keychain entry for the worker state room ID: mxdx/{user_id}/state-room-id
+pub fn state_room_key(user_id: &str) -> String {
+    format!("mxdx/{user_id}/state-room-id")
+}
+
 // ---------------------------------------------------------------------------
 // Keychain backend trait
 // ---------------------------------------------------------------------------
@@ -110,6 +115,14 @@ mod tests {
         assert_eq!(
             trust_store_key("@user:example.com"),
             "mxdx/@user:example.com/trust-store"
+        );
+    }
+
+    #[test]
+    fn state_room_key_generates_correct_format() {
+        assert_eq!(
+            state_room_key("@user:example.com"),
+            "mxdx/@user:example.com/state-room-id"
         );
     }
 
