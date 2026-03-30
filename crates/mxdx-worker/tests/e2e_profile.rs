@@ -1,6 +1,13 @@
-//! Profiling and federated E2E tests.
+//! Profiling E2E tests — measures steady-state operational latency.
 //!
-//! Three transport variants for each workload:
+//! These tests measure the latency of a **warm** mxdx system: the worker is already
+//! running and the client has an established session (keys exchanged, cross-signing done).
+//! This matches real-world usage where setup happens once and commands are executed many times.
+//!
+//! Each test has an untimed "setup" phase (user registration, room creation, cold start,
+//! warm-up command) and a timed "measurement" phase (session-restored client → command → result).
+//!
+//! Three transport variants:
 //!   - SSH localhost (baseline)
 //!   - mxdx local (single Tuwunel, E2EE)
 //!   - mxdx federated (two TLS Tuwunel instances, E2EE + federation)
@@ -62,8 +69,6 @@ fn run_ssh(args: &[&str]) -> Output {
 }
 
 fn run_ssh_script(script: &str) -> Output {
-    // SSH concatenates all remote args with spaces, which breaks quoting.
-    // Pass the script via stdin to avoid escaping issues.
     use std::io::Write;
     let mut child = Command::new("ssh")
         .args(["-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=no", "localhost", "bash"])
@@ -113,7 +118,6 @@ fn large_file(lines: usize) -> String {
     path
 }
 
-/// Report a benchmark result line for the final table.
 fn report(test: &str, transport: &str, elapsed: Duration, exit_code: Option<i32>, stdout_lines: usize) {
     eprintln!(
         "| {:<30} | {:<12} | {:>8.1}s | {:>4} | {:>8} |",
@@ -123,8 +127,35 @@ fn report(test: &str, transport: &str, elapsed: Duration, exit_code: Option<i32>
     );
 }
 
+/// Warm up a local mxdx setup: start worker, run a throwaway client command
+/// so that both worker and client sessions are established (keys exchanged,
+/// cross-signing done, sessions saved to keychain). Returns the running worker.
+///
+/// After this returns, subsequent `run_client` calls will use session restore
+/// (warm start) — the steady-state path we want to profile.
+async fn warmup_local(url: &str, worker_user: &str, client_user: &str, pass: &str, room_id: &str) -> Child {
+    // Clear any stale sessions from prior test runs
+    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".mxdx").join("crypto"));
+    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".config").join("mxdx"));
+
+    let mut w = start_worker(url, worker_user, pass, room_id);
+    wait_ready().await;
+
+    // Run a warm-up command — this does the cold-start work for the client:
+    // fresh login, key exchange, cross-signing, session save to keychain.
+    let warmup = run_client(url, client_user, pass, room_id, &["run", "/bin/true"]);
+    let stderr = String::from_utf8_lossy(&warmup.stderr);
+    assert!(warmup.status.success(), "warmup failed: {stderr}");
+
+    w
+}
+
+fn md5_script(file_path: &str) -> String {
+    format!("while IFS= read -r line; do printf '%s\\n' \"$line\" | md5sum; done < '{file_path}'")
+}
+
 // ===========================================================================
-// ECHO — simple command, measures session setup latency
+// ECHO — simple command, measures session setup + round-trip latency
 // ===========================================================================
 
 #[tokio::test]
@@ -146,9 +177,9 @@ async fn profile_echo_local() {
     register(&hs, "w-echo", "p").await;
     register(&hs, "c-echo", "p").await;
     let rid = shared_room(&url, &hs.server_name, "c-echo", "p", "w-echo").await;
-    let mut w = start_worker(&url, "w-echo", "p", &rid);
-    wait_ready().await;
+    let mut w = warmup_local(&url, "w-echo", "c-echo", "p", &rid).await;
 
+    // Measured: warm client → echo → result (session restore, no key exchange)
     let start = Instant::now();
     let out = run_client(&url, "c-echo", "p", &rid, &["run", "/bin/echo", "hello", "world"]);
     let elapsed = start.elapsed();
@@ -169,8 +200,14 @@ async fn profile_echo_federated() {
     register(&pair.hs_a, "w-fecho", "p").await;
     register(&pair.hs_b, "c-fecho", "p").await;
     let rid = shared_room(&url_a, &pair.hs_a.server_name, "w-fecho", "p", "c-fecho").await;
+
+    // Warmup: cold-start worker + client on their respective servers
+    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".mxdx").join("crypto"));
+    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".config").join("mxdx"));
     let mut w = start_worker(&url_a, "w-fecho", "p", &rid);
     wait_ready().await;
+    let warmup = run_client(&url_b, "c-fecho", "p", &rid, &["run", "/bin/true"]);
+    assert!(warmup.status.success(), "warmup failed: {}", String::from_utf8_lossy(&warmup.stderr));
 
     let start = Instant::now();
     let out = run_client(&url_b, "c-fecho", "p", &rid, &["run", "/bin/echo", "hello", "world"]);
@@ -205,8 +242,7 @@ async fn profile_exit_code_local() {
     register(&hs, "w-exit", "p").await;
     register(&hs, "c-exit", "p").await;
     let rid = shared_room(&url, &hs.server_name, "c-exit", "p", "w-exit").await;
-    let mut w = start_worker(&url, "w-exit", "p", &rid);
-    wait_ready().await;
+    let mut w = warmup_local(&url, "w-exit", "c-exit", "p", &rid).await;
 
     let start = Instant::now();
     let out = run_client(&url, "c-exit", "p", &rid, &["run", "/bin/false"]);
@@ -226,8 +262,13 @@ async fn profile_exit_code_federated() {
     register(&pair.hs_a, "w-fexit", "p").await;
     register(&pair.hs_b, "c-fexit", "p").await;
     let rid = shared_room(&url_a, &pair.hs_a.server_name, "w-fexit", "p", "c-fexit").await;
+
+    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".mxdx").join("crypto"));
+    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".config").join("mxdx"));
     let mut w = start_worker(&url_a, "w-fexit", "p", &rid);
     wait_ready().await;
+    let warmup = run_client(&url_b, "c-fexit", "p", &rid, &["run", "/bin/true"]);
+    assert!(warmup.status.success(), "warmup failed: {}", String::from_utf8_lossy(&warmup.stderr));
 
     let start = Instant::now();
     let out = run_client(&url_b, "c-fexit", "p", &rid, &["run", "/bin/false"]);
@@ -242,16 +283,11 @@ async fn profile_exit_code_federated() {
 // MD5SUM — 10,000 lines, measures output throughput
 // ===========================================================================
 
-fn md5_script(file_path: &str) -> String {
-    format!("while IFS= read -r line; do printf '%s\\n' \"$line\" | md5sum; done < '{file_path}'")
-}
-
 #[tokio::test]
 #[ignore = "requires passwordless localhost SSH"]
 async fn profile_md5sum_ssh() {
     let fp = large_file(10_000);
     let script = md5_script(&fp);
-
     let start = Instant::now();
     let out = run_ssh_script(&script);
     let elapsed = start.elapsed();
@@ -259,7 +295,6 @@ async fn profile_md5sum_ssh() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "ssh md5sum failed (exit {:?}): {stderr}", out.status.code());
     report("md5sum(10k lines)", "ssh", elapsed, out.status.code(), stdout.lines().count());
-
     let _ = std::fs::remove_file(&fp);
 }
 
@@ -271,12 +306,10 @@ async fn profile_md5sum_local() {
     register(&hs, "w-md5", "p").await;
     register(&hs, "c-md5", "p").await;
     let rid = shared_room(&url, &hs.server_name, "c-md5", "p", "w-md5").await;
-    let mut w = start_worker(&url, "w-md5", "p", &rid);
-    wait_ready().await;
+    let mut w = warmup_local(&url, "w-md5", "c-md5", "p", &rid).await;
 
     let fp = large_file(10_000);
     let script = md5_script(&fp);
-
     let start = Instant::now();
     let out = run_client(&url, "c-md5", "p", &rid, &["run", "--", "/bin/sh", "-c", &script]);
     let elapsed = start.elapsed();
@@ -284,7 +317,6 @@ async fn profile_md5sum_local() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stderr: {stderr}");
     report("md5sum(10k lines)", "mxdx-local", elapsed, out.status.code(), stdout.lines().count());
-
     let _ = std::fs::remove_file(&fp);
     let _ = w.kill(); let _ = w.wait(); hs.stop().await;
 }
@@ -298,12 +330,16 @@ async fn profile_md5sum_federated() {
     register(&pair.hs_a, "w-fmd5", "p").await;
     register(&pair.hs_b, "c-fmd5", "p").await;
     let rid = shared_room(&url_a, &pair.hs_a.server_name, "w-fmd5", "p", "c-fmd5").await;
+
+    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".mxdx").join("crypto"));
+    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".config").join("mxdx"));
     let mut w = start_worker(&url_a, "w-fmd5", "p", &rid);
     wait_ready().await;
+    let warmup = run_client(&url_b, "c-fmd5", "p", &rid, &["run", "/bin/true"]);
+    assert!(warmup.status.success(), "warmup failed: {}", String::from_utf8_lossy(&warmup.stderr));
 
     let fp = large_file(10_000);
     let script = md5_script(&fp);
-
     let start = Instant::now();
     let out = run_client(&url_b, "c-fmd5", "p", &rid, &["run", "--", "/bin/sh", "-c", &script]);
     let elapsed = start.elapsed();
@@ -311,7 +347,6 @@ async fn profile_md5sum_federated() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stderr: {stderr}");
     report("md5sum(10k lines)", "mxdx-federated", elapsed, out.status.code(), stdout.lines().count());
-
     let _ = std::fs::remove_file(&fp);
     let _ = w.kill(); let _ = w.wait(); pair.stop().await;
 }
@@ -339,8 +374,7 @@ async fn profile_ping_local() {
     register(&hs, "w-ping", "p").await;
     register(&hs, "c-ping", "p").await;
     let rid = shared_room(&url, &hs.server_name, "c-ping", "p", "w-ping").await;
-    let mut w = start_worker(&url, "w-ping", "p", &rid);
-    wait_ready().await;
+    let mut w = warmup_local(&url, "w-ping", "c-ping", "p", &rid).await;
 
     let start = Instant::now();
     let out = run_client(&url, "c-ping", "p", &rid, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"]);
@@ -362,8 +396,13 @@ async fn profile_ping_federated() {
     register(&pair.hs_a, "w-fping", "p").await;
     register(&pair.hs_b, "c-fping", "p").await;
     let rid = shared_room(&url_a, &pair.hs_a.server_name, "w-fping", "p", "c-fping").await;
+
+    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".mxdx").join("crypto"));
+    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".config").join("mxdx"));
     let mut w = start_worker(&url_a, "w-fping", "p", &rid);
     wait_ready().await;
+    let warmup = run_client(&url_b, "c-fping", "p", &rid, &["run", "/bin/true"]);
+    assert!(warmup.status.success(), "warmup failed: {}", String::from_utf8_lossy(&warmup.stderr));
 
     let start = Instant::now();
     let out = run_client(&url_b, "c-fping", "p", &rid, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"]);
@@ -388,8 +427,7 @@ async fn profile_long_ping_local() {
     register(&hs, "w-lping", "p").await;
     register(&hs, "c-lping", "p").await;
     let rid = shared_room(&url, &hs.server_name, "c-lping", "p", "w-lping").await;
-    let mut w = start_worker(&url, "w-lping", "p", &rid);
-    wait_ready().await;
+    let mut w = warmup_local(&url, "w-lping", "c-lping", "p", &rid).await;
 
     let start = Instant::now();
     let out = run_client(&url, "c-lping", "p", &rid, &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"]);
@@ -411,8 +449,13 @@ async fn profile_long_ping_federated() {
     register(&pair.hs_a, "w-flping", "p").await;
     register(&pair.hs_b, "c-flping", "p").await;
     let rid = shared_room(&url_a, &pair.hs_a.server_name, "w-flping", "p", "c-flping").await;
+
+    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".mxdx").join("crypto"));
+    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".config").join("mxdx"));
     let mut w = start_worker(&url_a, "w-flping", "p", &rid);
     wait_ready().await;
+    let warmup = run_client(&url_b, "c-flping", "p", &rid, &["run", "/bin/true"]);
+    assert!(warmup.status.success(), "warmup failed: {}", String::from_utf8_lossy(&warmup.stderr));
 
     let start = Instant::now();
     let out = run_client(&url_b, "c-flping", "p", &rid, &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"]);
