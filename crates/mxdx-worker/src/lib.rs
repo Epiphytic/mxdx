@@ -8,12 +8,14 @@ pub mod matrix;
 pub mod output;
 pub mod retention;
 pub mod session;
+pub mod session_persist;
 pub mod telemetry;
 pub mod tmux;
 pub mod trust;
 pub mod webrtc;
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use anyhow::Result;
 use base64::Engine;
@@ -23,6 +25,41 @@ use mxdx_matrix::MultiHsClient;
 use mxdx_types::events::session::{
     OutputStream, SessionResult, SessionStart, SessionStatus, SessionTask,
 };
+
+/// Exponential backoff for sync failures.
+pub struct SyncBackoff {
+    current: Duration,
+    min: Duration,
+    max: Duration,
+}
+
+impl SyncBackoff {
+    pub fn new() -> Self {
+        Self {
+            current: Duration::from_secs(1),
+            min: Duration::from_secs(1),
+            max: Duration::from_secs(30),
+        }
+    }
+
+    /// Record a failure. Returns the duration to sleep before retrying.
+    pub fn fail(&mut self) -> Duration {
+        let wait = self.current;
+        self.current = (self.current * 2).min(self.max);
+        wait
+    }
+
+    /// Record a success. Resets backoff to minimum.
+    pub fn success(&mut self) {
+        self.current = self.min;
+    }
+}
+
+impl Default for SyncBackoff {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Connect to Matrix and return the worker's room handle.
 /// If `config.room_id` is set, uses that room directly (bypasses space creation).
@@ -203,9 +240,26 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
     // Track active sessions and their thread root event IDs
     let mut thread_roots: HashMap<String, String> = HashMap::new();
 
+    // Recover any orphaned sessions from a previous crash
+    match session_persist::recover_sessions(None) {
+        Ok(recovered) if !recovered.is_empty() => {
+            tracing::info!(count = recovered.len(), "recovered orphaned sessions from disk");
+            for s in &recovered {
+                thread_roots.insert(s.uuid.clone(), s.thread_root.clone().unwrap_or_default());
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to recover sessions from disk");
+        }
+    }
+
     // Periodic trust sync (every ~60 sync cycles, ~30 minutes at 30s sync timeout)
     let mut sync_cycle_count: u64 = 0;
     let trust_sync_interval: u64 = 60;
+
+    // Exponential backoff for sync failures
+    let mut backoff = SyncBackoff::new();
 
     // Main sync loop
     loop {
@@ -217,9 +271,25 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
                 room.multi().sync_trust(rid).await;
             }
         }
-        let events = room
+        let events = match room
             .sync_events(std::time::Duration::from_secs(30))
-            .await?;
+            .await
+        {
+            Ok(events) => {
+                backoff.success();
+                events
+            }
+            Err(e) => {
+                let wait = backoff.fail();
+                tracing::error!(
+                    error = %e,
+                    backoff_ms = wait.as_millis(),
+                    "sync error, backing off"
+                );
+                tokio::time::sleep(wait).await;
+                continue;
+            }
+        };
 
         for event in events {
             match event {
@@ -276,6 +346,9 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
                     )
                     .await?;
                     session_manager.mark_running(&task.uuid, None, tmux)?;
+
+                    // Persist active sessions to disk for crash recovery
+                    persist_active_sessions(&session_manager, &thread_roots);
 
                     tracing::info!(uuid = %task.uuid, "session started");
                 }
@@ -401,7 +474,70 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
                 .await?;
 
                 tracing::info!(uuid = %uuid, exit_code = ?exit_code, "session completed");
+
+                // Update persisted sessions after completion
+                persist_active_sessions(&session_manager, &thread_roots);
             }
         }
+    }
+}
+
+/// Persist the current active sessions to disk for crash recovery.
+fn persist_active_sessions(
+    session_manager: &session::SessionManager,
+    thread_roots: &HashMap<String, String>,
+) {
+    let active = session_manager.active_sessions();
+    let persisted: Vec<session_persist::PersistedSession> = active
+        .iter()
+        .map(|s| session_persist::PersistedSession {
+            uuid: s.uuid.clone(),
+            tmux_session: s.uuid.clone(),
+            bin: s.task.bin.clone(),
+            args: s.task.args.clone(),
+            started_at: format!("{}",  s.started_at),
+            thread_root: thread_roots.get(&s.uuid).cloned(),
+        })
+        .collect();
+
+    if persisted.is_empty() {
+        if let Err(e) = session_persist::clear_sessions(None) {
+            tracing::warn!(error = %e, "failed to clear sessions file");
+        }
+    } else if let Err(e) = session_persist::save_sessions(&persisted, None) {
+        tracing::warn!(error = %e, "failed to persist sessions to disk");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sync_backoff_doubles() {
+        let mut backoff = SyncBackoff::new();
+        assert_eq!(backoff.fail(), Duration::from_secs(1));
+        assert_eq!(backoff.fail(), Duration::from_secs(2));
+        assert_eq!(backoff.fail(), Duration::from_secs(4));
+        assert_eq!(backoff.fail(), Duration::from_secs(8));
+        assert_eq!(backoff.fail(), Duration::from_secs(16));
+        // Capped at 30s
+        assert_eq!(backoff.fail(), Duration::from_secs(30));
+        assert_eq!(backoff.fail(), Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_sync_backoff_resets_on_success() {
+        let mut backoff = SyncBackoff::new();
+        // Fail a few times
+        backoff.fail(); // 1s
+        backoff.fail(); // 2s
+        backoff.fail(); // 4s
+
+        // Success resets
+        backoff.success();
+
+        // Next fail should be back to 1s
+        assert_eq!(backoff.fail(), Duration::from_secs(1));
     }
 }
