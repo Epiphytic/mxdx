@@ -11,6 +11,22 @@ const DEFAULT_SESSION_DIR = path.join(os.homedir(), '.mxdx');
 const MAX_DECOMPRESSED_SIZE = 1024 * 1024; // 1MB zlib bomb protection
 
 /**
+ * Unified session event type constants.
+ */
+const SESSION_EVENTS = {
+  TASK: 'org.mxdx.session.task',
+  START: 'org.mxdx.session.start',
+  OUTPUT: 'org.mxdx.session.output',
+  RESULT: 'org.mxdx.session.result',
+  CANCEL: 'org.mxdx.session.cancel',
+  SIGNAL: 'org.mxdx.session.signal',
+  INPUT: 'org.mxdx.session.input',
+  RESIZE: 'org.mxdx.session.resize',
+  ACTIVE: 'org.mxdx.session.active',
+  COMPLETED: 'org.mxdx.session.completed',
+};
+
+/**
  * Structured logger with JSON and text output modes.
  */
 class Logger {
@@ -544,17 +560,41 @@ export class LauncherRuntime {
       //   COMPLETED_SESSION = 'org.mxdx.session.completed'
       //   WORKER_INFO     = 'org.mxdx.worker.info'     — replaces org.mxdx.host_telemetry
 
-      if (eventType !== 'org.mxdx.command' || !eventId) continue;
+      if (!eventId) continue;
       if (this.#processedEvents.has(eventId)) continue;
       this.#processedEvents.add(eventId);
 
       const content = event.content || {};
+      const sender = event.sender;
+
+      // ── Unified session events ──────────────────────────────────
+      if (eventType === SESSION_EVENTS.TASK) {
+        // Skip tasks we submitted ourselves
+        if (sender === this.#client.userId()) continue;
+        await this.#handleSessionTask(content, eventId, sender);
+        continue;
+      }
+
+      if (eventType === SESSION_EVENTS.CANCEL) {
+        if (sender === this.#client.userId()) continue;
+        await this.#handleSessionCancel(content);
+        continue;
+      }
+
+      if (eventType === SESSION_EVENTS.SIGNAL) {
+        if (sender === this.#client.userId()) continue;
+        await this.#handleSessionSignal(content);
+        continue;
+      }
+
+      // ── Legacy org.mxdx.command events (backward compat) ───────
+      if (eventType !== 'org.mxdx.command') continue;
+
       const action = content.action;
       const command = content.command;
       const args = content.args || [];
       const cwd = content.cwd || '/tmp';
       const requestId = content.request_id || eventId;
-      const sender = event.sender;
 
       // Route session management actions
       if (action === 'list_sessions') {
@@ -635,6 +675,233 @@ export class LauncherRuntime {
         this.#activeSessions--;
       }
     }
+  }
+
+  /**
+   * Handle a unified SESSION_TASK event.
+   * Claims the task, executes the command, and posts lifecycle events.
+   */
+  async #handleSessionTask(task, eventId, sender) {
+    const uuid = task.uuid;
+    const bin = task.bin || task.command;
+    const args = task.args || [];
+    const cwd = task.cwd || '/tmp';
+    const interactive = task.interactive || false;
+    const timeoutSeconds = task.timeout_seconds || null;
+    const execRoomId = this.#topology.exec_room_id;
+
+    this.#log.info('Unified session task received', { uuid, bin, sender });
+
+    // Route interactive sessions through existing handler
+    if (interactive) {
+      await this.#handleInteractiveSession({
+        command: bin,
+        args,
+        cwd,
+        action: 'interactive',
+        cols: task.cols || 80,
+        rows: task.rows || 24,
+      }, uuid, sender);
+      return;
+    }
+
+    // Validate command against allowlist
+    if (!this.#isCommandAllowed(bin)) {
+      this.#log.warn(`Session task rejected: ${bin} not in allowlist`, { uuid });
+      await this.#sendSessionResult(execRoomId, uuid, {
+        status: 'failed',
+        exit_code: 1,
+        error: `Command '${bin}' is not allowed`,
+        duration_seconds: 0,
+        tail: [],
+      });
+      return;
+    }
+
+    // Validate cwd
+    if (!this.#isCwdAllowed(cwd)) {
+      this.#log.warn(`Session task CWD rejected: ${cwd}`, { uuid });
+      await this.#sendSessionResult(execRoomId, uuid, {
+        status: 'failed',
+        exit_code: 1,
+        error: `Working directory '${cwd}' is not allowed`,
+        duration_seconds: 0,
+        tail: [],
+      });
+      return;
+    }
+
+    // Check session limit
+    if (this.#activeSessions >= this.#maxSessions) {
+      this.#log.warn('Session limit reached for task', { uuid, active: this.#activeSessions });
+      await this.#sendSessionResult(execRoomId, uuid, {
+        status: 'failed',
+        exit_code: 1,
+        error: `Session limit reached (${this.#maxSessions} max)`,
+        duration_seconds: 0,
+        tail: [],
+      });
+      return;
+    }
+
+    this.#activeSessions++;
+    const startTime = Date.now();
+    let seqNum = 0;
+    const tailLines = [];
+    const MAX_TAIL_LINES = 10;
+
+    try {
+      // Post SESSION_START
+      await this.#client.sendEvent(execRoomId, SESSION_EVENTS.START, JSON.stringify({
+        session_uuid: uuid,
+        worker_id: this.#client.userId(),
+        tmux_session: null,
+        pid: null,
+        started_at: Math.floor(startTime / 1000),
+      }));
+
+      // Write active session state (best-effort)
+      try {
+        await this.#client.sendStateEvent(execRoomId, SESSION_EVENTS.ACTIVE, `session/${uuid}`, JSON.stringify({
+          session_uuid: uuid,
+          worker_id: this.#client.userId(),
+          bin,
+          args,
+          sender_id: sender,
+          started_at: Math.floor(startTime / 1000),
+        }));
+      } catch (err) {
+        this.#log.warn('Failed to write active session state', { uuid, error: err.message });
+      }
+
+      const timeoutMs = timeoutSeconds ? timeoutSeconds * 1000 : 30000;
+
+      const result = await executeCommand(bin, args, {
+        cwd,
+        timeoutMs,
+        onStdout: async (line) => {
+          seqNum++;
+          trackTail(tailLines, line, MAX_TAIL_LINES);
+          await this.#sendSessionOutput(execRoomId, uuid, 'stdout', line, seqNum);
+        },
+        onStderr: async (line) => {
+          seqNum++;
+          trackTail(tailLines, line, MAX_TAIL_LINES);
+          await this.#sendSessionOutput(execRoomId, uuid, 'stderr', line, seqNum);
+        },
+      });
+
+      const durationSeconds = Math.floor((Date.now() - startTime) / 1000);
+      const status = result.exitCode === 0 ? 'success' : 'failed';
+
+      await this.#sendSessionResult(execRoomId, uuid, {
+        status,
+        exit_code: result.exitCode,
+        duration_seconds: durationSeconds,
+        tail: tailLines,
+        timed_out: result.timedOut || false,
+      });
+
+      // Clear active session state, write completed (best-effort)
+      try {
+        await this.#client.sendStateEvent(execRoomId, SESSION_EVENTS.ACTIVE, `session/${uuid}`, JSON.stringify({}));
+        await this.#client.sendStateEvent(execRoomId, SESSION_EVENTS.COMPLETED, `session/${uuid}`, JSON.stringify({
+          session_uuid: uuid,
+          worker_id: this.#client.userId(),
+          status,
+          exit_code: result.exitCode,
+          duration_seconds: durationSeconds,
+        }));
+      } catch (err) {
+        this.#log.warn('Failed to update session state', { uuid, error: err.message });
+      }
+    } catch (err) {
+      const durationSeconds = Math.floor((Date.now() - startTime) / 1000);
+      await this.#sendSessionResult(execRoomId, uuid, {
+        status: 'failed',
+        exit_code: 1,
+        error: err.message,
+        duration_seconds: durationSeconds,
+        tail: tailLines,
+      });
+    } finally {
+      this.#activeSessions--;
+    }
+  }
+
+  /**
+   * Handle a unified SESSION_CANCEL event.
+   * Finds the matching session and sends SIGTERM to its process.
+   */
+  async #handleSessionCancel(content) {
+    const uuid = content.session_uuid;
+    const graceSeconds = content.grace_seconds || 5;
+    if (!uuid) return;
+
+    this.#log.info('Session cancel received', { uuid, grace_seconds: graceSeconds });
+
+    const entry = this.#sessionRegistry.get(uuid);
+    if (entry && entry.pty && entry.pty.alive) {
+      entry.pty.kill('SIGTERM');
+      // If grace period elapses and still alive, force kill
+      setTimeout(() => {
+        if (entry.pty && entry.pty.alive) {
+          this.#log.warn('Grace period expired, sending SIGKILL', { uuid });
+          entry.pty.kill('SIGKILL');
+        }
+      }, graceSeconds * 1000);
+    } else {
+      this.#log.warn('Cancel target session not found or not alive', { uuid });
+    }
+  }
+
+  /**
+   * Handle a unified SESSION_SIGNAL event.
+   * Forwards the specified signal to the session process.
+   */
+  async #handleSessionSignal(content) {
+    const uuid = content.session_uuid;
+    const signal = content.signal;
+    if (!uuid || !signal) return;
+
+    this.#log.info('Session signal received', { uuid, signal });
+
+    const entry = this.#sessionRegistry.get(uuid);
+    if (entry && entry.pty && entry.pty.alive) {
+      entry.pty.kill(signal);
+    } else {
+      this.#log.warn('Signal target session not found or not alive', { uuid, signal });
+    }
+  }
+
+  /**
+   * Post a SESSION_OUTPUT event to the exec room.
+   */
+  async #sendSessionOutput(roomId, uuid, stream, data, seq) {
+    try {
+      await this.#client.sendEvent(roomId, SESSION_EVENTS.OUTPUT, JSON.stringify({
+        session_uuid: uuid,
+        worker_id: this.#client.userId(),
+        stream,
+        data: Buffer.from(data).toString('base64'),
+        encoding: 'base64',
+        seq,
+        timestamp: Math.floor(Date.now() / 1000),
+      }));
+    } catch {
+      // Best effort — don't stop execution on send failure
+    }
+  }
+
+  /**
+   * Post a SESSION_RESULT event to the exec room.
+   */
+  async #sendSessionResult(roomId, uuid, result) {
+    await this.#client.sendEvent(roomId, SESSION_EVENTS.RESULT, JSON.stringify({
+      session_uuid: uuid,
+      worker_id: this.#client.userId(),
+      ...result,
+    }));
   }
 
   async #handleInteractiveSession(content, requestId, sender) {
@@ -1408,5 +1675,18 @@ export class LauncherRuntime {
       }
     }
     return ips;
+  }
+}
+
+/**
+ * Track the last N lines of output for the tail field of SESSION_RESULT.
+ * @param {string[]} tailLines - Mutable array of tail lines
+ * @param {string} line - New output line
+ * @param {number} maxLines - Maximum lines to retain
+ */
+function trackTail(tailLines, line, maxLines) {
+  tailLines.push(line);
+  if (tailLines.length > maxLines) {
+    tailLines.shift();
   }
 }
