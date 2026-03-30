@@ -299,6 +299,8 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
             room.client(),
             room.room_id(),
             identity.device_id(),
+            &host,
+            &os_user,
         )
         .await
     {

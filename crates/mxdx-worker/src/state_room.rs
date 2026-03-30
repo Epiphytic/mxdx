@@ -12,9 +12,9 @@
 use anyhow::Result;
 use mxdx_matrix::{MatrixClient, OwnedRoomId, OwnedUserId, RoomId};
 use mxdx_types::events::state_room::{
-    StateRoomEntry, StateRoomSession, StateRoomTopology, TrustedEntity, WorkerStateConfig,
-    WorkerStateIdentity, WORKER_STATE_CONFIG, WORKER_STATE_IDENTITY, WORKER_STATE_ROOM,
-    WORKER_STATE_ROOM_POINTER, WORKER_STATE_SESSION, WORKER_STATE_TOPOLOGY,
+    StateRoomEntry, StateRoomPointer, StateRoomSession, StateRoomTopology, TrustedEntity,
+    WorkerStateConfig, WorkerStateIdentity, WORKER_STATE_CONFIG, WORKER_STATE_IDENTITY,
+    WORKER_STATE_ROOM, WORKER_STATE_ROOM_POINTER, WORKER_STATE_SESSION, WORKER_STATE_TOPOLOGY,
     WORKER_STATE_TRUSTED_CLIENT, WORKER_STATE_TRUSTED_COORDINATOR,
 };
 use mxdx_types::identity::{state_room_key, KeychainBackend};
@@ -410,18 +410,29 @@ impl WorkerStateRoom {
     /// Advertise this worker's state room in the exec room.
     ///
     /// Writes a `org.mxdx.worker.state_room` state event to the exec room with
-    /// state key `{device_id}` and content `{ "room_id": "<state_room_id>" }`.
+    /// state key `{device_id}` and a `StateRoomPointer` content containing the
+    /// state room ID, device ID, hostname, and OS user for coordinator discovery.
     pub async fn advertise_in_exec_room(
         &self,
         client: &MatrixClient,
         exec_room_id: &RoomId,
         device_id: &str,
+        hostname: &str,
+        os_user: &str,
     ) -> Result<()> {
-        let content = serde_json::json!({
-            "room_id": self.room_id.as_str(),
-        });
+        let pointer = StateRoomPointer {
+            room_id: self.room_id.to_string(),
+            device_id: device_id.to_string(),
+            hostname: hostname.to_string(),
+            os_user: os_user.to_string(),
+        };
         client
-            .send_state_event(exec_room_id, WORKER_STATE_ROOM_POINTER, device_id, content)
+            .send_state_event(
+                exec_room_id,
+                WORKER_STATE_ROOM_POINTER,
+                device_id,
+                serde_json::to_value(&pointer)?,
+            )
             .await?;
         Ok(())
     }
@@ -657,12 +668,18 @@ mod tests {
 
     #[test]
     fn worker_state_room_advertise_content_format() {
-        // Verify the JSON content format for exec room advertisement
-        let state_room_id = "!state:example.com";
-        let content = serde_json::json!({
-            "room_id": state_room_id,
-        });
-        assert_eq!(content["room_id"], state_room_id);
+        // Verify the StateRoomPointer serialization format for exec room advertisement
+        let pointer = mxdx_types::events::state_room::StateRoomPointer {
+            room_id: "!state:example.com".into(),
+            device_id: "DEVICE123".into(),
+            hostname: "node-01".into(),
+            os_user: "deploy".into(),
+        };
+        let value = serde_json::to_value(&pointer).unwrap();
+        assert_eq!(value["room_id"], "!state:example.com");
+        assert_eq!(value["device_id"], "DEVICE123");
+        assert_eq!(value["hostname"], "node-01");
+        assert_eq!(value["os_user"], "deploy");
     }
 
     // ── Event type constant coverage ─────────────────────────────────────

@@ -74,6 +74,28 @@ pub struct StateRoomTopology {
     pub logs_room_id: String,
 }
 
+/// Content written to exec room to advertise the worker's state room.
+/// State key: `{device_id}`
+/// Event type: `org.mxdx.worker.state_room`
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StateRoomPointer {
+    pub room_id: String,
+    pub device_id: String,
+    pub hostname: String,
+    pub os_user: String,
+}
+
+/// Content written by coordinator to assign a room to a worker.
+/// Stored in the worker's state room with event type `org.mxdx.worker.room`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CoordinatorRoomAssignment {
+    pub room_id: String,
+    pub room_name: Option<String>,
+    pub assigned_by: String,
+    pub assigned_at: u64,
+    pub role: String,
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -222,6 +244,48 @@ mod tests {
         let json = serde_json::to_string(&topology).unwrap();
         let back: StateRoomTopology = serde_json::from_str(&json).unwrap();
         assert_eq!(topology, back);
+    }
+
+    #[test]
+    fn state_room_pointer_roundtrip() {
+        let pointer = StateRoomPointer {
+            room_id: "!state:example.com".into(),
+            device_id: "ABCDEF123".into(),
+            hostname: "node-01.prod".into(),
+            os_user: "deploy".into(),
+        };
+        let json = serde_json::to_string(&pointer).unwrap();
+        let back: StateRoomPointer = serde_json::from_str(&json).unwrap();
+        assert_eq!(pointer, back);
+    }
+
+    #[test]
+    fn coordinator_room_assignment_roundtrip() {
+        let assignment = CoordinatorRoomAssignment {
+            room_id: "!exec:example.com".into(),
+            room_name: Some("prod-exec".into()),
+            assigned_by: "@coordinator:example.com".into(),
+            assigned_at: 1742572800,
+            role: "exec".into(),
+        };
+        let json = serde_json::to_string(&assignment).unwrap();
+        let back: CoordinatorRoomAssignment = serde_json::from_str(&json).unwrap();
+        assert_eq!(assignment, back);
+    }
+
+    #[test]
+    fn coordinator_room_assignment_no_name() {
+        let assignment = CoordinatorRoomAssignment {
+            room_id: "!room:example.com".into(),
+            room_name: None,
+            assigned_by: "@admin:example.com".into(),
+            assigned_at: 0,
+            role: "logs".into(),
+        };
+        let json = serde_json::to_string(&assignment).unwrap();
+        assert!(json.contains("\"room_name\":null"));
+        let back: CoordinatorRoomAssignment = serde_json::from_str(&json).unwrap();
+        assert_eq!(assignment, back);
     }
 
     #[test]
