@@ -343,7 +343,7 @@ async fn profile_ping_local() {
     wait_ready().await;
 
     let start = Instant::now();
-    let out = run_client(&url, "c-ping", "p", &rid, &["run", "ping", "-c", "30", "-i", "1", "1.1.1.1"]);
+    let out = run_client(&url, "c-ping", "p", &rid, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"]);
     let elapsed = start.elapsed();
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -366,7 +366,7 @@ async fn profile_ping_federated() {
     wait_ready().await;
 
     let start = Instant::now();
-    let out = run_client(&url_b, "c-fping", "p", &rid, &["run", "ping", "-c", "30", "-i", "1", "1.1.1.1"]);
+    let out = run_client(&url_b, "c-fping", "p", &rid, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"]);
     let elapsed = start.elapsed();
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -392,7 +392,7 @@ async fn profile_long_ping_local() {
     wait_ready().await;
 
     let start = Instant::now();
-    let out = run_client(&url, "c-lping", "p", &rid, &["run", "ping", "-c", "300", "-i", "1", "1.1.1.1"]);
+    let out = run_client(&url, "c-lping", "p", &rid, &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"]);
     let elapsed = start.elapsed();
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -415,7 +415,7 @@ async fn profile_long_ping_federated() {
     wait_ready().await;
 
     let start = Instant::now();
-    let out = run_client(&url_b, "c-flping", "p", &rid, &["run", "ping", "-c", "300", "-i", "1", "1.1.1.1"]);
+    let out = run_client(&url_b, "c-flping", "p", &rid, &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"]);
     let elapsed = start.elapsed();
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);

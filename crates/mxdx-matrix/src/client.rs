@@ -1,5 +1,3 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -18,13 +16,20 @@ use serde_json::Value;
 
 use crate::error::{MatrixClientError, Result};
 
-/// Compute a short 16-hex-char hash of the input string.
+/// Compute a short 16-hex-char hash of the input string using FNV-1a.
 /// Used to derive deterministic, filesystem-safe directory names from server
 /// URLs or user IDs without leaking the full identifier.
+///
+/// Uses FNV-1a (not `DefaultHasher`) because `DefaultHasher` output is not
+/// stable across Rust versions or platforms, which would silently orphan
+/// persistent crypto store directories after a toolchain upgrade.
 pub fn short_hash(input: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    input.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let mut hash: u64 = 14695981039346656037; // FNV offset basis
+    for byte in input.as_bytes() {
+        hash ^= *byte as u64;
+        hash = hash.wrapping_mul(1099511628211); // FNV prime
+    }
+    format!("{:016x}", hash)
 }
 
 /// Compute the default persistent crypto store base path for a given role.
@@ -841,6 +846,13 @@ mod tests {
         let h2 = short_hash("https://matrix.example.com");
         assert_eq!(h1, h2);
         assert_eq!(h1.len(), 16, "Short hash should be 16 hex chars");
+    }
+
+    #[test]
+    fn test_short_hash_stable_across_versions() {
+        // FNV-1a must produce the same output forever (persistent directory names).
+        // If this test fails after a code change, existing crypto stores will be orphaned.
+        assert_eq!(short_hash("https://matrix.example.com"), "c43cb7cfa4a1fda8");
     }
 
     #[test]
