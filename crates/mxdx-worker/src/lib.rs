@@ -38,8 +38,11 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
         );
     }
 
-    let store_base = mxdx_matrix::default_store_base_path("worker");
-    let mut multi = MultiHsClient::connect(&accounts, None, store_base).await?;
+    // NOTE: Persistent crypto store (Phase 1) is available but not wired here yet.
+    // It will be activated in Phase 3 (Session Restore) when we can properly
+    // match stored sessions to device IDs. Using temp stores for now to avoid
+    // stale crypto store conflicts when logging in fresh each time.
+    let mut multi = MultiHsClient::connect(&accounts, None, None).await?;
     tracing::info!(
         user_id = %multi.user_id(),
         servers = multi.server_count(),
