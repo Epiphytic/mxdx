@@ -1,5 +1,4 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { connectWithSession, TerminalDataEvent, saveIndexedDB, BatchedSender, fetchTurnCredentials, turnToIceServers, NodeWebRTCChannel, P2PSignaling, P2PTransport, generateSessionKey, createP2PCrypto } from '@mxdx/core';
@@ -8,8 +7,6 @@ import { PtyBridge } from './pty-bridge.js';
 import { inflateSync } from 'node:zlib';
 
 const DEFAULT_SESSION_DIR = path.join(os.homedir(), '.mxdx');
-const SESSIONS_FILE = 'sessions.json';
-const SESSION_ROOMS_FILE = 'session-rooms.json';
 
 const MAX_DECOMPRESSED_SIZE = 1024 * 1024; // 1MB zlib bomb protection
 
@@ -172,6 +169,7 @@ export class LauncherRuntime {
   #client;
   #config;
   #topology;
+  #stateRoomId;
   #running = false;
   #processedEvents = new Set();
   #activeSessions = 0;
@@ -199,90 +197,71 @@ export class LauncherRuntime {
     return this.#config.tmuxSocketDir || path.join(this.#sessionDir, 'tmux');
   }
 
-  get #sessionsFilePath() {
-    return path.join(this.#sessionDir, SESSIONS_FILE);
-  }
-
-  #saveSessionsFile() {
-    const data = {};
-    for (const [id, entry] of this.#sessionRegistry) {
-      if (entry.persistent && entry.tmuxName) {
-        data[id] = {
-          tmuxName: entry.tmuxName,
-          dmRoomId: entry.dmRoomId,
-          sender: entry.sender,
-          persistent: true,
-          createdAt: entry.createdAt,
-        };
-      }
-    }
-    try {
-      fs.mkdirSync(this.#sessionDir, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(this.#sessionsFilePath, JSON.stringify(data, null, 2), { mode: 0o600 });
-    } catch (err) {
-      this.#log.warn('Failed to save sessions file', { error: err.message });
-    }
-  }
-
-  #loadSessionsFile() {
-    try {
-      if (!fs.existsSync(this.#sessionsFilePath)) return {};
-      return JSON.parse(fs.readFileSync(this.#sessionsFilePath, 'utf8'));
-    } catch {
-      return {};
-    }
-  }
-
-  get #sessionRoomsFilePath() {
-    return path.join(this.#sessionDir, SESSION_ROOMS_FILE);
-  }
-
   #sessionRoomKey(clientUserId) {
     return `${this.#config.username}:${clientUserId}`;
   }
 
-  #saveSessionRooms() {
+  async #recoverSessions() {
+    // Load tracked rooms from state room
     try {
-      const data = Object.fromEntries(this.#sessionRooms);
-      fs.mkdirSync(this.#sessionDir, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(this.#sessionRoomsFilePath, JSON.stringify(data, null, 2), { mode: 0o600 });
-    } catch (err) {
-      this.#log.warn('Failed to save session rooms file', { error: err.message });
-    }
-  }
-
-  #loadSessionRooms() {
-    try {
-      if (!fs.existsSync(this.#sessionRoomsFilePath)) return;
-      const data = JSON.parse(fs.readFileSync(this.#sessionRoomsFilePath, 'utf8'));
-      for (const [key, roomId] of Object.entries(data)) {
-        this.#sessionRooms.set(key, roomId);
+      const roomsJson = await this.#client.readRooms(this.#stateRoomId);
+      const rooms = JSON.parse(roomsJson);
+      for (const entry of rooms) {
+        if (entry.content?.room_id && entry.content?.role === 'dm') {
+          // Reconstruct session room key from room name or sender info
+          const roomId = entry.content.room_id;
+          const roomKey = entry.content.room_key;
+          if (roomKey) {
+            this.#sessionRooms.set(roomKey, roomId);
+          }
+        }
       }
-    } catch { /* ignore */ }
-  }
+    } catch (err) {
+      this.#log.warn('Failed to load rooms from state room', { error: err.message });
+    }
 
-  #recoverSessions() {
-    this.#loadSessionRooms();
-
-    const saved = this.#loadSessionsFile();
+    // Load sessions from state room
+    const deviceId = this.#client.deviceId();
     const liveTmux = PtyBridge.list(this.#socketDir);
     let recovered = 0;
 
-    for (const [sessionId, entry] of Object.entries(saved)) {
-      if (liveTmux.includes(entry.tmuxName)) {
-        this.#sessionRegistry.set(sessionId, {
-          tmuxName: entry.tmuxName,
-          dmRoomId: entry.dmRoomId,
-          sender: entry.sender,
-          persistent: true,
-          pty: null, // no attached PtyBridge yet — will attach on reconnect
-          createdAt: entry.createdAt,
-        });
-        recovered++;
-        this.#log.info('Recovered tmux session', { session_id: sessionId, tmux: entry.tmuxName });
-      } else {
-        this.#log.info('Stale session removed (tmux gone)', { session_id: sessionId, tmux: entry.tmuxName });
+    try {
+      const sessionsJson = await this.#client.readSessions(this.#stateRoomId);
+      const sessions = JSON.parse(sessionsJson);
+
+      for (const entry of sessions) {
+        const content = entry.content || {};
+        const stateKey = entry.state_key || '';
+        // State key format: {device_id}/{uuid}
+        const sessionId = content.uuid || stateKey.split('/')[1];
+
+        // Skip empty (removed) entries
+        if (!sessionId || !content.tmuxName) continue;
+
+        // Only recover sessions for this device
+        if (stateKey && !stateKey.startsWith(`${deviceId}/`)) continue;
+
+        if (liveTmux.includes(content.tmuxName)) {
+          this.#sessionRegistry.set(sessionId, {
+            tmuxName: content.tmuxName,
+            dmRoomId: content.dmRoomId,
+            sender: content.sender,
+            persistent: true,
+            pty: null, // no attached PtyBridge yet — will attach on reconnect
+            createdAt: content.createdAt,
+          });
+          recovered++;
+          this.#log.info('Recovered tmux session', { session_id: sessionId, tmux: content.tmuxName });
+        } else {
+          this.#log.info('Stale session removed (tmux gone)', { session_id: sessionId, tmux: content.tmuxName });
+          // Best-effort cleanup of stale state room entry
+          this.#client.removeSession(this.#stateRoomId, deviceId, sessionId).catch((err) => {
+            this.#log.warn('Failed to remove stale session from state room', { session_id: sessionId, error: err.message });
+          });
+        }
       }
+    } catch (err) {
+      this.#log.warn('Failed to load sessions from state room', { error: err.message });
     }
 
     // Rebuild session rooms cache from recovered sessions
@@ -293,11 +272,6 @@ export class LauncherRuntime {
           this.#sessionRooms.set(key, session.dmRoomId);
         }
       }
-    }
-
-    // Clean up sessions file to remove stale entries
-    if (recovered > 0 || Object.keys(saved).length > 0) {
-      this.#saveSessionsFile();
     }
 
     return recovered;
@@ -327,7 +301,19 @@ export class LauncherRuntime {
     }));
 
     this.#sessionRooms.set(key, roomId);
-    this.#saveSessionRooms();
+
+    // Persist to state room (best-effort)
+    try {
+      await this.#client.writeRoom(this.#stateRoomId, roomId, JSON.stringify({
+        room_id: roomId,
+        room_key: key,
+        role: 'dm',
+        joined_at: new Date().toISOString(),
+      }));
+    } catch (err) {
+      this.#log.warn('Failed to persist session room to state room', { room_id: roomId, error: err.message });
+    }
+
     return roomId;
   }
 
@@ -396,6 +382,12 @@ export class LauncherRuntime {
     this.#topology = await this.#client.getOrCreateLauncherSpace(username);
     log(`Rooms ready: space=${this.#topology.space_id} exec=${this.#topology.exec_room_id}`);
 
+    // ── 4. Set up state room for persistence ────────────────────
+    const hostname = os.hostname();
+    const osUser = os.userInfo().username;
+    this.#stateRoomId = await this.#client.getOrCreateStateRoom(hostname, osUser, username);
+    log(`State room ready: ${this.#stateRoomId}`);
+
     // Invite admin users to all rooms
     if (this.#config.adminUsers && this.#config.adminUsers.length > 0) {
       log(`Inviting admin users: ${this.#config.adminUsers.join(', ')}`);
@@ -415,7 +407,7 @@ export class LauncherRuntime {
     }
 
     // Recover tmux sessions from previous launcher instance
-    const recovered = this.#recoverSessions();
+    const recovered = await this.#recoverSessions();
     if (recovered > 0) {
       log(`Recovered ${recovered} tmux session(s) from previous instance`);
     }
@@ -465,8 +457,25 @@ export class LauncherRuntime {
     }
     this.#roomTransports.clear();
 
-    // Save session metadata for recovery on next start
-    this.#saveSessionsFile();
+    // Persist session metadata to state room for recovery on next start
+    const deviceId = this.#client.deviceId();
+    for (const [id, entry] of this.#sessionRegistry) {
+      if (entry.persistent && entry.tmuxName) {
+        try {
+          await this.#client.writeSession(this.#stateRoomId, deviceId, id, JSON.stringify({
+            uuid: id,
+            tmuxName: entry.tmuxName,
+            dmRoomId: entry.dmRoomId,
+            sender: entry.sender,
+            persistent: true,
+            createdAt: entry.createdAt,
+            state: 'detached',
+          }));
+        } catch (err) {
+          this.#log.warn('Failed to persist session on shutdown', { session_id: id, error: err.message });
+        }
+      }
+    }
   }
 
   get topology() {
@@ -686,15 +695,31 @@ export class LauncherRuntime {
         socketDir: this.#socketDir,
       });
 
+      const createdAt = new Date().toISOString();
       this.#sessionRegistry.set(sessionId, {
         tmuxName: pty.tmuxName,
         dmRoomId,
         sender,
         persistent: pty.persistent,
         pty,
-        createdAt: new Date().toISOString(),
+        createdAt,
       });
-      this.#saveSessionsFile();
+
+      // Persist session to state room (best-effort)
+      try {
+        const deviceId = this.#client.deviceId();
+        await this.#client.writeSession(this.#stateRoomId, deviceId, sessionId, JSON.stringify({
+          uuid: sessionId,
+          tmuxName: pty.tmuxName,
+          dmRoomId,
+          sender,
+          persistent: pty.persistent,
+          createdAt,
+          state: 'running',
+        }));
+      } catch (err) {
+        this.#log.warn('Failed to persist session to state room', { session_id: sessionId, error: err.message });
+      }
 
       // Respond with DM room ID and negotiated batch window
       await this.#sendSessionResponse(requestId, 'started', dmRoomId, {
@@ -752,7 +777,11 @@ export class LauncherRuntime {
           });
         } else {
           this.#sessionRegistry.delete(sessionId);
-          this.#saveSessionsFile();
+          // Remove session from state room (best-effort)
+          const deviceId = this.#client.deviceId();
+          this.#client.removeSession(this.#stateRoomId, deviceId, sessionId).catch((err) => {
+            this.#log.warn('Failed to remove session from state room', { session_id: sessionId, error: err.message });
+          });
           this.#log.info('Interactive session ended', { request_id: requestId, session_id: sessionId });
         }
         this.#sendSessionResponse(requestId, 'ended', dmRoomId).catch(() => {});
@@ -865,7 +894,11 @@ export class LauncherRuntime {
           this.#log.info('Reconnected session bridge detached', { session_id: sessionId });
         } else {
           this.#sessionRegistry.delete(sessionId);
-          this.#saveSessionsFile();
+          // Remove session from state room (best-effort)
+          const deviceId = this.#client.deviceId();
+          this.#client.removeSession(this.#stateRoomId, deviceId, sessionId).catch((err) => {
+            this.#log.warn('Failed to remove session from state room', { session_id: sessionId, error: err.message });
+          });
         }
         this.#sendSessionResponse(requestId, 'ended', entry.dmRoomId).catch(() => {});
         this.#activeSessions--;
