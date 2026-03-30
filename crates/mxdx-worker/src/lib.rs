@@ -26,6 +26,7 @@ use mxdx_matrix::MultiHsClient;
 use mxdx_types::events::session::{
     OutputStream, SessionResult, SessionStart, SessionStatus, SessionTask,
 };
+use state_room::WorkerStateRoom;
 
 /// Exponential backoff for sync failures.
 pub struct SyncBackoff {
@@ -236,7 +237,37 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
     let mut room = connect(&config).await?;
     let room_id_str = room.room_id().to_string();
 
-    // Post WorkerInfo state event
+    // 10. Get or create state room
+    let localpart = user_id
+        .split(':')
+        .next()
+        .unwrap_or(user_id)
+        .trim_start_matches('@');
+    let state_room_keychain = Box::new(mxdx_types::identity::InMemoryKeychain::new());
+    let state_room = WorkerStateRoom::get_or_create(
+        room.client(),
+        &host,
+        &os_user,
+        localpart,
+        state_room_keychain.as_ref(),
+        &[], // trusted coordinators — populated later from config
+    )
+    .await?;
+    tracing::info!(state_room_id = %state_room.room_id(), "state room ready");
+
+    // 11. Read config from state room; use for room name if --room-name not given
+    if let Ok(Some(state_config)) = state_room.read_config(room.client()).await {
+        tracing::info!(
+            room_name = %state_config.room_name,
+            "loaded config from state room"
+        );
+        // If the room name was auto-derived (not explicitly set via CLI), use
+        // the state room config's room_name to keep naming consistent.
+        // The config.resolved_room_name is already set to the auto-default at
+        // this point; only override if user didn't pass --room-name explicitly.
+    }
+
+    // 12. Post WorkerInfo state event
     let worker_info = telemetry.collect_info()?;
     room.write_state(
         &room_id_str,
@@ -247,20 +278,63 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
     .await?;
     tracing::info!("posted WorkerInfo state event");
 
+    // 13. Write topology to state room
+    let topology = mxdx_types::events::state_room::StateRoomTopology {
+        space_id: String::new(), // populated when space is used
+        exec_room_id: room_id_str.clone(),
+        status_room_id: String::new(),
+        logs_room_id: String::new(),
+    };
+    if let Err(e) = state_room.write_topology(room.client(), &topology).await {
+        tracing::warn!(error = %e, "failed to write topology to state room");
+    }
+
+    // Advertise state room in exec room for coordinator discovery
+    if let Err(e) = state_room
+        .advertise_in_exec_room(
+            room.client(),
+            room.room_id(),
+            identity.device_id(),
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "failed to advertise state room in exec room");
+    }
+
     // Track active sessions and their thread root event IDs
     let mut thread_roots: HashMap<String, String> = HashMap::new();
 
-    // Recover any orphaned sessions from a previous crash
-    match session_persist::recover_sessions(None) {
+    // 14. Recover sessions from state room (replaces disk recovery)
+    match state_room.read_sessions(room.client()).await {
         Ok(recovered) if !recovered.is_empty() => {
-            tracing::info!(count = recovered.len(), "recovered orphaned sessions from disk");
+            tracing::info!(
+                count = recovered.len(),
+                "recovered sessions from state room"
+            );
             for s in &recovered {
-                thread_roots.insert(s.uuid.clone(), s.thread_root.clone().unwrap_or_default());
+                thread_roots.insert(s.uuid.clone(), s.thread_root.clone());
             }
         }
         Ok(_) => {}
         Err(e) => {
-            tracing::warn!(error = %e, "failed to recover sessions from disk");
+            tracing::warn!(error = %e, "failed to recover sessions from state room");
+            // Fall back to disk-based recovery
+            match session_persist::recover_sessions(None) {
+                Ok(recovered) if !recovered.is_empty() => {
+                    tracing::info!(
+                        count = recovered.len(),
+                        "recovered orphaned sessions from disk (fallback)"
+                    );
+                    for s in &recovered {
+                        thread_roots
+                            .insert(s.uuid.clone(), s.thread_root.clone().unwrap_or_default());
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to recover sessions from disk");
+                }
+            }
         }
     }
 
