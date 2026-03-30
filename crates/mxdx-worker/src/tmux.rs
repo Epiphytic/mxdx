@@ -9,10 +9,14 @@ use tokio::process::Command;
 pub struct TmuxSession {
     pub session_name: String,
     pub socket_path: PathBuf,
+    /// File where the process exit code is written on completion.
+    pub exit_code_path: PathBuf,
 }
 
 impl TmuxSession {
     /// Create a new tmux session running the given command.
+    /// The command is wrapped in a shell that writes the exit code to a temp file,
+    /// so it can be read after the tmux session exits.
     pub async fn create(
         session_name: &str,
         bin: &str,
@@ -21,6 +25,22 @@ impl TmuxSession {
         env: &HashMap<String, String>,
     ) -> Result<Self> {
         let socket_path = Self::socket_dir().join(format!("mxdx-{session_name}"));
+        let exit_code_path = Self::socket_dir().join(format!("mxdx-{session_name}.exit"));
+
+        // Build the actual command string, shell-escaped
+        let mut cmd_parts = vec![bin.to_string()];
+        for arg in args {
+            // Simple shell quoting — wrap in single quotes, escape any internal single quotes
+            cmd_parts.push(format!("'{}'", arg.replace('\'', "'\\''")));
+        }
+        let cmd_str = cmd_parts.join(" ");
+
+        // Wrap: run command, capture exit code, write to file
+        let wrapper = format!(
+            "{cmd_str}; echo $? > '{}'",
+            exit_code_path.display()
+        );
+
         let mut cmd = Command::new("tmux");
         cmd.args(["-S", socket_path.to_str().unwrap()])
             .args(["new-session", "-d", "-s", session_name]);
@@ -35,11 +55,8 @@ impl TmuxSession {
             cmd.args(["-c", cwd]);
         }
 
-        // The command to run
-        cmd.arg(bin);
-        for arg in args {
-            cmd.arg(arg);
-        }
+        // Run via /bin/sh -c so we can capture the exit code
+        cmd.args(["/bin/sh", "-c", &wrapper]);
 
         let output = cmd.output().await?;
         if !output.status.success() {
@@ -52,12 +69,21 @@ impl TmuxSession {
         Ok(Self {
             session_name: session_name.to_string(),
             socket_path,
+            exit_code_path,
         })
     }
 
     /// Create an interactive tmux session with a shell.
     pub async fn create_interactive(session_name: &str, shell: &str) -> Result<Self> {
         Self::create(session_name, shell, &[], None, &HashMap::new()).await
+    }
+
+    /// Read the exit code written by the wrapper shell after the command completed.
+    /// Returns None if the file doesn't exist yet (command still running or no wrapper).
+    pub fn read_exit_code(&self) -> Option<i32> {
+        std::fs::read_to_string(&self.exit_code_path)
+            .ok()
+            .and_then(|s| s.trim().parse::<i32>().ok())
     }
 
     /// Send data to the tmux session's stdin.
@@ -137,8 +163,9 @@ impl TmuxSession {
             .args(["kill-session", "-t", &self.session_name])
             .output()
             .await;
-        // Clean up socket
+        // Clean up socket and exit code file
         let _ = tokio::fs::remove_file(&self.socket_path).await;
+        let _ = tokio::fs::remove_file(&self.exit_code_path).await;
         Ok(())
     }
 

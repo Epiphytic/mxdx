@@ -317,18 +317,30 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
                     }
                 }
 
-                // Determine exit code (tmux doesn't directly provide it, default to 0)
-                let exit_code = Some(0i32);
+                // Read exit code from the wrapper shell's exit code file
+                let exit_code = {
+                    let session = session_manager.get(&uuid).unwrap();
+                    session
+                        .tmux
+                        .as_ref()
+                        .and_then(|t| t.read_exit_code())
+                        .or(Some(0))
+                };
 
+                let status = if exit_code == Some(0) {
+                    SessionStatus::Success
+                } else {
+                    SessionStatus::Failed
+                };
                 let completed =
-                    session_manager.complete(&uuid, SessionStatus::Success, exit_code)?;
+                    session_manager.complete(&uuid, status.clone(), exit_code)?;
 
                 // Post SessionResult
                 if let Some(thread_root) = thread_roots.get(&uuid) {
                     let result = SessionResult {
                         session_uuid: uuid.clone(),
                         worker_id: identity.device_id().to_string(),
-                        status: SessionStatus::Success,
+                        status,
                         exit_code,
                         duration_seconds: completed.duration_seconds,
                         tail: Some(final_output.chars().take(1024).collect()),

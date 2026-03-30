@@ -37,6 +37,7 @@ fn make_tmux_session(name: &str) -> TmuxSession {
     TmuxSession {
         session_name: name.to_string(),
         socket_path: std::path::PathBuf::from(format!("/tmp/mxdx-tmux/mxdx-{name}")),
+        exit_code_path: std::path::PathBuf::from(format!("/tmp/mxdx-tmux/mxdx-{name}.exit")),
     }
 }
 

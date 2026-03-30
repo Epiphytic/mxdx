@@ -168,6 +168,7 @@ mod tests {
         TmuxSession {
             session_name: name.to_string(),
             socket_path: std::path::PathBuf::from(format!("/tmp/mxdx-tmux/mxdx-{name}")),
+            exit_code_path: std::path::PathBuf::from(format!("/tmp/mxdx-tmux/mxdx-{name}.exit")),
         }
     }
 
