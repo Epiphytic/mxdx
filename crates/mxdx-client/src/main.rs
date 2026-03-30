@@ -290,7 +290,75 @@ async fn main() -> Result<()> {
         }
         Commands::Attach { uuid, interactive } => {
             tracing::info!(uuid = %uuid, interactive, "attaching to session");
-            eprintln!("attach not yet implemented");
+            let client_args = ClientArgs {
+                worker_room: None,
+                coordinator_room: None,
+                timeout: None,
+                heartbeat_interval: None,
+                interactive,
+                no_room_output: false,
+                homeserver: cli.homeserver,
+                username: cli.username,
+                password: cli.password,
+            };
+            let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
+            let accounts = config.resolve_accounts();
+            if accounts.is_empty() {
+                anyhow::bail!(
+                    "No Matrix accounts configured (use --homeserver/--username/--password or config file)"
+                );
+            }
+            let room_name = config
+                .client
+                .default_worker_room
+                .clone()
+                .or_else(|| if cli_room_id.is_some() { Some("direct".to_string()) } else { None })
+                .unwrap_or_else(|| "default".to_string());
+
+            let mut mx_room = matrix::connect_multi(
+                &accounts,
+                &room_name,
+                cli_room_id.as_deref(),
+            )
+            .await?;
+
+            // Sync to get room events and find SessionStart for this UUID
+            let events = mx_room.sync_events_mut().await?;
+            let dm_room_id = events.iter().find_map(|e| {
+                if let IncomingClientEvent::SessionStart {
+                    session_uuid,
+                    content,
+                } = e
+                {
+                    if session_uuid == &uuid {
+                        content
+                            .get("dm_room_id")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
+
+            if let Some(ref dm_id) = dm_room_id {
+                eprintln!("Attaching to session {} in DM room {}...", uuid, dm_id);
+                eprintln!("Interactive terminal attach not yet fully implemented.");
+                eprintln!("Press Ctrl-] to detach.");
+                // TODO: Enter terminal raw mode, pipe stdin/stdout via DM room
+                // - Read stdin -> send as SESSION_INPUT to DM room
+                // - Receive SESSION_OUTPUT from DM room -> write to stdout
+                // - Handle SIGWINCH -> send SESSION_RESIZE
+                // - Ctrl-] to detach
+            } else {
+                eprintln!(
+                    "No interactive DM room found for session {}. Falling back to thread tail mode.",
+                    uuid
+                );
+                // TODO: Fall back to thread tailing (same as logs --follow)
+            }
         }
         Commands::Ls { all, worker_room } => {
             let client_args = ClientArgs {

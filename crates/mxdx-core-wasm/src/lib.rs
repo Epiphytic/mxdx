@@ -952,6 +952,86 @@ impl WasmMatrixClient {
 
         Ok("null".to_string())
     }
+
+    // -----------------------------------------------------------------------
+    // Interactive session methods
+    // -----------------------------------------------------------------------
+
+    /// Create an E2EE DM room for an interactive session.
+    /// Returns the room_id as a string. The room has E2EE enabled and
+    /// history_visibility: joined so only participants who join see messages.
+    /// This is a thin wrapper around createDmRoom.
+    #[wasm_bindgen(js_name = "createInteractiveSessionRoom")]
+    pub async fn create_interactive_session_room(
+        &self,
+        client_user_id: &str,
+    ) -> Result<String, JsValue> {
+        self.create_dm_room(client_user_id).await
+    }
+
+    /// Send terminal input to a DM room for a specific session.
+    #[wasm_bindgen(js_name = "sendTerminalInput")]
+    pub async fn send_terminal_input(
+        &self,
+        dm_room_id: &str,
+        session_id: &str,
+        data: &str,
+    ) -> Result<(), JsValue> {
+        let content = serde_json::json!({
+            "session_uuid": session_id,
+            "data": data,
+        });
+        self.send_event(
+            dm_room_id,
+            "org.mxdx.session.input",
+            &serde_json::to_string(&content).map_err(to_js_err)?,
+        )
+        .await
+    }
+
+    /// Send terminal resize to a DM room for a specific session.
+    #[wasm_bindgen(js_name = "sendTerminalResize")]
+    pub async fn send_terminal_resize(
+        &self,
+        dm_room_id: &str,
+        session_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), JsValue> {
+        let content = serde_json::json!({
+            "session_uuid": session_id,
+            "cols": cols,
+            "rows": rows,
+        });
+        self.send_event(
+            dm_room_id,
+            "org.mxdx.session.resize",
+            &serde_json::to_string(&content).map_err(to_js_err)?,
+        )
+        .await
+    }
+
+    /// Post terminal output to a DM room for a specific session.
+    #[wasm_bindgen(js_name = "postTerminalOutput")]
+    pub async fn post_terminal_output(
+        &self,
+        dm_room_id: &str,
+        session_id: &str,
+        data: &str,
+        seq: u32,
+    ) -> Result<(), JsValue> {
+        let content = serde_json::json!({
+            "session_uuid": session_id,
+            "data": data,
+            "seq": seq,
+        });
+        self.send_event(
+            dm_room_id,
+            "org.mxdx.session.output",
+            &serde_json::to_string(&content).map_err(to_js_err)?,
+        )
+        .await
+    }
 }
 
 // ---------------------------------------------------------------------------

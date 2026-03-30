@@ -53,6 +53,9 @@ pub struct SessionStart {
     pub tmux_session: Option<String>,
     pub pid: Option<u32>,
     pub started_at: u64,
+    /// DM room ID for interactive terminal I/O (None for non-interactive sessions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dm_room_id: Option<String>,
 }
 
 /// Batched output event — stdout/stderr from the process.
@@ -249,6 +252,7 @@ mod tests {
             tmux_session: Some("tmux-abc".into()),
             pid: Some(12345),
             started_at: 1742572800,
+            dm_room_id: None,
         };
         let json = serde_json::to_string(&evt).unwrap();
         let back: SessionStart = serde_json::from_str(&json).unwrap();
@@ -257,6 +261,7 @@ mod tests {
         assert_eq!(back.tmux_session, Some("tmux-abc".into()));
         assert_eq!(back.pid, Some(12345));
         assert_eq!(back.started_at, 1742572800);
+        assert_eq!(back.dm_room_id, None);
     }
 
     #[test]
@@ -267,6 +272,7 @@ mod tests {
             tmux_session: None,
             pid: None,
             started_at: 0,
+            dm_room_id: None,
         };
         let json = serde_json::to_string(&evt).unwrap();
         assert!(json.contains("session_uuid"));

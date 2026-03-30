@@ -1,5 +1,14 @@
 use anyhow::Result;
 use mxdx_types::events::webrtc::{WebRtcAnswer, WebRtcIce, WebRtcOffer, WebRtcSdp};
+use serde::{Deserialize, Serialize};
+
+/// TURN relay configuration, populated from the state room.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TurnConfig {
+    pub uris: Vec<String>,
+    pub username: Option<String>,
+    pub password: Option<String>,
+}
 
 /// WebRTC acceleration manager for interactive sessions.
 ///
@@ -19,11 +28,25 @@ use mxdx_types::events::webrtc::{WebRtcAnswer, WebRtcIce, WebRtcOffer, WebRtcSdp
 /// - On reconnect: fresh key exchange, new DataChannel
 pub struct WebRtcManager {
     available: bool,
+    turn_config: Option<TurnConfig>,
 }
 
 impl WebRtcManager {
     pub fn new() -> Self {
-        Self { available: false }
+        Self {
+            available: false,
+            turn_config: None,
+        }
+    }
+
+    /// Set the TURN relay configuration from the state room.
+    pub fn set_turn_config(&mut self, config: TurnConfig) {
+        self.turn_config = Some(config);
+    }
+
+    /// Get the current TURN relay configuration, if any.
+    pub fn turn_config(&self) -> Option<&TurnConfig> {
+        self.turn_config.as_ref()
     }
 
     /// Check if WebRTC is available on this platform
@@ -149,5 +172,41 @@ mod tests {
     async fn close_succeeds_even_when_unavailable() {
         let mgr = WebRtcManager::new();
         assert!(mgr.close("test-session").await.is_ok());
+    }
+
+    #[test]
+    fn turn_config_none_by_default() {
+        let mgr = WebRtcManager::new();
+        assert!(mgr.turn_config().is_none());
+    }
+
+    #[test]
+    fn set_and_get_turn_config() {
+        let mut mgr = WebRtcManager::new();
+        let config = TurnConfig {
+            uris: vec!["turn:relay.example.com:3478".into()],
+            username: Some("user".into()),
+            password: Some("pass".into()),
+        };
+        mgr.set_turn_config(config);
+
+        let stored = mgr.turn_config().unwrap();
+        assert_eq!(stored.uris.len(), 1);
+        assert_eq!(stored.uris[0], "turn:relay.example.com:3478");
+        assert_eq!(stored.username, Some("user".into()));
+        assert_eq!(stored.password, Some("pass".into()));
+    }
+
+    #[test]
+    fn turn_config_serializes() {
+        let config = TurnConfig {
+            uris: vec!["turn:relay.example.com:3478".into()],
+            username: None,
+            password: None,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: TurnConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.uris.len(), 1);
+        assert!(back.username.is_none());
     }
 }

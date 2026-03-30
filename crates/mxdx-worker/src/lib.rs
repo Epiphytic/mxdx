@@ -8,6 +8,7 @@ pub mod matrix;
 pub mod output;
 pub mod retention;
 pub mod session;
+pub mod session_mux;
 pub mod session_persist;
 pub mod state_room;
 pub mod telemetry;
@@ -223,7 +224,10 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
     let _retention = retention::RetentionSweeper::new(config.worker.history_retention);
 
     // 8. Initialize WebRTC manager
-    let _webrtc = webrtc::WebRtcManager::new();
+    let mut _webrtc_mgr = webrtc::WebRtcManager::new();
+
+    // 9. Initialize session mux for interactive DM routing
+    let mut session_mux = session_mux::SessionMux::new();
 
     tracing::info!("worker initialized, ready for sessions");
 
@@ -409,6 +413,7 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
                         tmux_session: Some(task.uuid.clone()),
                         pid: None,
                         started_at: now,
+                        dm_room_id: None, // Set by interactive handler below
                     };
                     room.post_to_thread(
                         &room_id_str,
@@ -434,7 +439,27 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
                     // Persist active sessions to disk for crash recovery
                     persist_active_sessions(&session_manager, &thread_roots);
 
-                    tracing::info!(uuid = %task.uuid, "session started");
+                    // Interactive session handling: if the task is interactive,
+                    // create a DM room for terminal I/O and register with the mux.
+                    if task.interactive {
+                        tracing::info!(
+                            uuid = %task.uuid,
+                            sender = %task.sender_id,
+                            "interactive session detected, DM room creation pending"
+                        );
+                        // TODO: Create E2EE DM room with task.sender_id via
+                        // room.create_terminal_session_dm() and register in session_mux.
+                        // Then set up background PTY bridge task.
+                        // For now, register a placeholder so the mux knows about
+                        // the session.
+                        session_mux.add_session(
+                            &task.uuid,
+                            &room_id_str, // placeholder — will be DM room_id
+                            &task.sender_id,
+                        );
+                    }
+
+                    tracing::info!(uuid = %task.uuid, interactive = task.interactive, "session started");
                 }
                 matrix::IncomingEvent::SessionCancel {
                     session_uuid,
@@ -556,6 +581,9 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
                     &format!("session/{uuid}/active"),
                 )
                 .await?;
+
+                // Remove from session mux if registered
+                session_mux.remove_session(&uuid);
 
                 tracing::info!(uuid = %uuid, exit_code = ?exit_code, "session completed");
 

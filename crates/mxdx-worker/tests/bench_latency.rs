@@ -454,6 +454,7 @@ async fn bench_local_latency() {
             tmux_session: Some(format!("mxdx-{uuid}")),
             pid: Some(20000 + i as u32),
             started_at: now_secs(),
+            dm_room_id: None,
         };
         worker_mc
             .send_threaded_event(
@@ -1121,6 +1122,7 @@ async fn bench_beta_federated_latency() {
             tmux_session: Some(format!("mxdx-{uuid}")),
             pid: Some(50000 + i as u32),
             started_at: now_secs(),
+            dm_room_id: None,
         };
         worker_mc
             .send_threaded_event(

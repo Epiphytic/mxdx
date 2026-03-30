@@ -173,6 +173,7 @@ async fn full_session_lifecycle_e2e() {
         tmux_session: Some("mxdx-e2e-session-001".into()),
         pid: Some(12345),
         started_at: now_secs(),
+        dm_room_id: None,
     };
     worker_mc
         .send_threaded_event(
@@ -399,6 +400,7 @@ async fn session_cancel_flow_e2e() {
         tmux_session: Some("mxdx-e2e-cancel-001".into()),
         pid: Some(99999),
         started_at: now_secs(),
+        dm_room_id: None,
     };
     worker_mc
         .send_threaded_event(
