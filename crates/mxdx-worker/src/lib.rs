@@ -9,6 +9,7 @@ pub mod output;
 pub mod retention;
 pub mod session;
 pub mod session_persist;
+pub mod state_room;
 pub mod telemetry;
 pub mod tmux;
 pub mod trust;
