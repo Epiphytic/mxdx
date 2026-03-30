@@ -346,22 +346,31 @@ pub async fn connect_multi(
         }
     }
 
+    let any_fresh = fresh_logins.iter().any(|&f| f);
+
     let room_id = if let Some(rid_str) = direct_room_id {
         // Use a direct room ID (bypasses space discovery, for E2E tests or pre-arranged rooms)
         let rid = mxdx_matrix::OwnedRoomId::try_from(rid_str)
             .map_err(|e| anyhow::anyhow!("Invalid room ID '{}': {}", rid_str, e))?;
-        // Sync to pick up any pending invites, then join
-        multi.sync_once().await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        if let Err(e) = multi.join_room(&rid).await {
-            tracing::warn!(room_id = %rid, error = %e, "join_room failed (may already be a member)");
+
+        if any_fresh {
+            // Fresh login: need to sync, join, and exchange keys from scratch
+            multi.sync_once().await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if let Err(e) = multi.join_room(&rid).await {
+                tracing::warn!(room_id = %rid, error = %e, "join_room failed (may already be a member)");
+            }
+            tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
+            multi
+                .wait_for_key_exchange(&rid, std::time::Duration::from_secs(15))
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        } else {
+            // Session restore: device already has keys, just do a quick sync
+            // to catch up on any events we missed while offline
+            multi.sync_once().await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
         }
-        // Wait for key exchange so we can decrypt E2EE events
-        tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
-        multi
-            .wait_for_key_exchange(&rid, std::time::Duration::from_secs(15))
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
         tracing::info!(room_id = %rid, "using direct room ID");
         rid
     } else {
@@ -372,8 +381,11 @@ pub async fn connect_multi(
         topology.exec_room_id
     };
 
-    // Bootstrap cross-signing on all servers and sync trust across identities
-    multi.bootstrap_and_sync_trust(&room_id).await;
+    // Bootstrap cross-signing: on fresh login this sets up keys;
+    // on session restore this no-ops quickly (keys already exist)
+    if any_fresh {
+        multi.bootstrap_and_sync_trust(&room_id).await;
+    }
 
     Ok(MatrixClientRoom::new(multi, room_id))
 }
