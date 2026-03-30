@@ -210,16 +210,7 @@ impl MatrixClient {
             .access_token()
             .expect("Client is not logged in \u{2014} no access_token");
 
-        let encoded_state_key: String = state_key
-            .bytes()
-            .flat_map(|b| {
-                if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
-                    vec![b as char]
-                } else {
-                    format!("%{:02X}", b).chars().collect()
-                }
-            })
-            .collect();
+        let encoded_state_key = percent_encode_path_segment(state_key);
         let url = format!(
             "{}_matrix/client/v3/rooms/{}/state/{}/{}",
             homeserver, room_id, event_type, encoded_state_key,
@@ -387,9 +378,11 @@ impl MatrixClient {
 
     /// Validate a state room: check creator and encryption.
     ///
-    /// - Fetches `m.room.create` state event and verifies the creator is either
-    ///   the own account or a trusted coordinator.
-    /// - Fetches `m.room.encryption` state event and verifies it exists.
+    /// - Fetches all room state and finds the `m.room.create` event envelope.
+    ///   Checks `content.creator` first (room versions < 11), falls back to
+    ///   `sender` (room version 11+, where `creator` is deprecated).
+    /// - Verifies the creator/sender is either the own account or a trusted coordinator.
+    /// - Checks that `m.room.encryption` state event exists (room must be E2EE).
     /// - Returns `Err(StateRoomRejected)` if either check fails.
     pub async fn validate_state_room(
         &self,
@@ -397,12 +390,22 @@ impl MatrixClient {
         own_user_id: &UserId,
         trusted_coordinators: &[OwnedUserId],
     ) -> Result<()> {
-        // Check m.room.create
-        let create_event = self.get_room_state(room_id, "m.room.create").await?;
-        let creator = create_event
-            .get("creator")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        // Fetch all state events (full envelopes with sender, type, content, state_key)
+        let all_state = self.get_all_room_state(room_id).await?;
+
+        // Find m.room.create event
+        let create_event = all_state
+            .iter()
+            .find(|e| e.get("type").and_then(|v| v.as_str()) == Some("m.room.create"))
+            .ok_or_else(|| {
+                MatrixClientError::StateRoomRejected(
+                    "m.room.create state event not found in room".into(),
+                )
+            })?;
+
+        // Room version 11+ deprecates content.creator in favour of the event sender.
+        // Try content.creator first, fall back to event.sender.
+        let creator = extract_room_creator(create_event);
 
         let is_own = creator == own_user_id.as_str();
         let is_trusted_coordinator = trusted_coordinators
@@ -416,8 +419,11 @@ impl MatrixClient {
         }
 
         // Check m.room.encryption exists
-        let encryption_event = self.get_room_state(room_id, "m.room.encryption").await?;
-        if encryption_event.get("errcode").is_some() || encryption_event.is_null() {
+        let has_encryption = all_state
+            .iter()
+            .any(|e| e.get("type").and_then(|v| v.as_str()) == Some("m.room.encryption"));
+
+        if !has_encryption {
             return Err(MatrixClientError::StateRoomRejected(
                 "Room is not encrypted — m.room.encryption state event missing".into(),
             ));
@@ -436,22 +442,7 @@ impl MatrixClient {
             .access_token()
             .expect("Client is not logged in — no access_token");
 
-        // Percent-encode the alias (# and : need encoding)
-        let encoded_alias: String = alias
-            .bytes()
-            .flat_map(|b| {
-                if b.is_ascii_alphanumeric()
-                    || b == b'-'
-                    || b == b'_'
-                    || b == b'.'
-                    || b == b'~'
-                {
-                    vec![b as char]
-                } else {
-                    format!("%{:02X}", b).chars().collect()
-                }
-            })
-            .collect();
+        let encoded_alias = percent_encode_path_segment(alias);
 
         let url = format!(
             "{}_matrix/client/v3/directory/room/{}",
@@ -470,6 +461,14 @@ impl MatrixClient {
             return Ok(None);
         }
 
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(MatrixClientError::Other(anyhow::anyhow!(
+                "Room alias resolution failed (HTTP {status}): {body}"
+            )));
+        }
+
         let body: Value = resp
             .json()
             .await
@@ -485,16 +484,11 @@ impl MatrixClient {
         }
     }
 
-    /// Fetch all state events of a given type from a room.
+    /// Fetch all state events from a room as full event envelopes.
     ///
-    /// Uses `GET /_matrix/client/v3/rooms/{roomId}/state` to get ALL state,
-    /// then filters by the specified event type.
-    /// Returns a Vec of (state_key, content) pairs.
-    pub async fn get_all_state_events_of_type(
-        &self,
-        room_id: &RoomId,
-        event_type: &str,
-    ) -> Result<Vec<(String, Value)>> {
+    /// Uses `GET /_matrix/client/v3/rooms/{roomId}/state` which returns an array
+    /// of full event objects (with `type`, `state_key`, `sender`, `content`, etc.).
+    async fn get_all_room_state(&self, room_id: &RoomId) -> Result<Vec<Value>> {
         let homeserver = self.inner().homeserver();
         let access_token = self
             .inner()
@@ -514,18 +508,67 @@ impl MatrixClient {
             .await
             .map_err(|e| MatrixClientError::Other(e.into()))?;
 
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(MatrixClientError::Other(anyhow::anyhow!(
+                "Failed to fetch room state for {room_id} (HTTP {status}): {body}"
+            )));
+        }
+
         let body: Value = resp
             .json()
             .await
             .map_err(|e| MatrixClientError::Other(e.into()))?;
 
-        let events = body
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
+        Ok(body.as_array().cloned().unwrap_or_default())
+    }
 
+    /// Fetch all state events of a given type from a room.
+    ///
+    /// Uses `GET /_matrix/client/v3/rooms/{roomId}/state` to get ALL state,
+    /// then filters by the specified event type.
+    /// Returns a Vec of (state_key, content) pairs.
+    pub async fn get_all_state_events_of_type(
+        &self,
+        room_id: &RoomId,
+        event_type: &str,
+    ) -> Result<Vec<(String, Value)>> {
+        let events = self.get_all_room_state(room_id).await?;
         Ok(filter_state_events_by_type(&events, event_type))
     }
+}
+
+/// Percent-encode a string for use as a URL path segment.
+///
+/// Encodes all characters except unreserved characters (RFC 3986):
+/// ALPHA, DIGIT, '-', '_', '.', '~'.
+fn percent_encode_path_segment(input: &str) -> String {
+    input
+        .bytes()
+        .flat_map(|b| {
+            if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
+                vec![b as char]
+            } else {
+                format!("%{:02X}", b).chars().collect()
+            }
+        })
+        .collect()
+}
+
+/// Extract the room creator from an `m.room.create` event envelope.
+///
+/// In room versions < 11, the creator is in `content.creator`.
+/// In room version 11+, `content.creator` is deprecated and the event `sender`
+/// is the authoritative creator.
+/// Returns the creator user ID string, or empty string if neither is present.
+fn extract_room_creator(create_event: &Value) -> &str {
+    create_event
+        .get("content")
+        .and_then(|c| c.get("creator"))
+        .and_then(|v| v.as_str())
+        .or_else(|| create_event.get("sender").and_then(|v| v.as_str()))
+        .unwrap_or("")
 }
 
 /// Filter a list of state events (as JSON values) by event type.
@@ -628,5 +671,86 @@ mod tests {
         let results = filter_state_events_by_type(&events, "org.mxdx.worker.config");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1, json!({}));
+    }
+
+    // ── percent_encode_path_segment tests ─────────────────────────────
+
+    #[test]
+    fn percent_encode_unreserved_chars_unchanged() {
+        assert_eq!(
+            percent_encode_path_segment("abc-DEF_012.~"),
+            "abc-DEF_012.~"
+        );
+    }
+
+    #[test]
+    fn percent_encode_room_alias() {
+        // #mxdx-state-host.user.local:example.com
+        // '#' -> %23, ':' -> %3A
+        assert_eq!(
+            percent_encode_path_segment("#mxdx-state-host.user.local:example.com"),
+            "%23mxdx-state-host.user.local%3Aexample.com"
+        );
+    }
+
+    #[test]
+    fn percent_encode_state_key_with_special_chars() {
+        // @user:example.com -> %40user%3Aexample.com
+        assert_eq!(
+            percent_encode_path_segment("@user:example.com"),
+            "%40user%3Aexample.com"
+        );
+    }
+
+    #[test]
+    fn percent_encode_empty_string() {
+        assert_eq!(percent_encode_path_segment(""), "");
+    }
+
+    // ── extract_room_creator tests ────────────────────────────────────
+
+    #[test]
+    fn extract_creator_from_content_creator_field() {
+        // Room version < 11: content.creator is authoritative
+        let event = json!({
+            "type": "m.room.create",
+            "sender": "@someone:example.com",
+            "content": {
+                "creator": "@owner:example.com",
+                "room_version": "10"
+            }
+        });
+        assert_eq!(extract_room_creator(&event), "@owner:example.com");
+    }
+
+    #[test]
+    fn extract_creator_falls_back_to_sender_when_no_content_creator() {
+        // Room version 11+: content.creator is absent, sender is authoritative
+        let event = json!({
+            "type": "m.room.create",
+            "sender": "@owner:example.com",
+            "content": {
+                "room_version": "11"
+            }
+        });
+        assert_eq!(extract_room_creator(&event), "@owner:example.com");
+    }
+
+    #[test]
+    fn extract_creator_falls_back_to_sender_when_content_missing() {
+        let event = json!({
+            "type": "m.room.create",
+            "sender": "@owner:example.com"
+        });
+        assert_eq!(extract_room_creator(&event), "@owner:example.com");
+    }
+
+    #[test]
+    fn extract_creator_returns_empty_when_neither_present() {
+        let event = json!({
+            "type": "m.room.create",
+            "content": {}
+        });
+        assert_eq!(extract_room_creator(&event), "");
     }
 }
