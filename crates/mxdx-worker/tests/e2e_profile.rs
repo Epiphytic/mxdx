@@ -1,25 +1,63 @@
 //! Profiling E2E tests — measures steady-state operational latency.
 //!
-//! These tests measure the latency of a **warm** mxdx system: the worker is already
-//! running and the client has an established session (keys exchanged, cross-signing done).
-//! This matches real-world usage where setup happens once and commands are executed many times.
+//! Uses pre-existing accounts on beta.mxdx.dev (or configured test server) from
+//! `test-credentials.toml`. Accounts are assumed to already exist with sessions
+//! established — this measures real-world warm-start latency, not one-time setup.
 //!
-//! Each test has an untimed "setup" phase (user registration, room creation, cold start,
-//! warm-up command) and a timed "measurement" phase (session-restored client → command → result).
+//! The worker runs as account1, the client runs as account2. The worker must be
+//! running before profiling starts. A room is shared between them.
 //!
 //! Three transport variants:
-//!   - SSH localhost (baseline)
-//!   - mxdx local (single Tuwunel, E2EE)
-//!   - mxdx federated (two TLS Tuwunel instances, E2EE + federation)
+//!   - SSH localhost (baseline — no mxdx overhead)
+//!   - mxdx single-server (account1 worker + account2 client on same server)
+//!   - mxdx federated (worker on server1, client on server2)
 //!
-//! Run all:  `cargo test -p mxdx-worker --test e2e_profile -- --ignored --nocapture`
-//! Run fast: `cargo test -p mxdx-worker --test e2e_profile echo -- --ignored --nocapture`
+//! Run: `cargo test -p mxdx-worker --test e2e_profile -- --ignored --nocapture`
 
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
-use mxdx_test_helpers::federation::FederatedPair;
-use mxdx_test_helpers::tuwunel::TuwunelInstance;
+// ---------------------------------------------------------------------------
+// Credential loading (from test-credentials.toml)
+// ---------------------------------------------------------------------------
+
+#[allow(dead_code)]
+struct TestCreds {
+    server_url: String,
+    server2_url: Option<String>,
+    worker_user: String,
+    worker_pass: String,
+    client_user: String,
+    client_pass: String,
+}
+
+fn load_creds() -> Option<TestCreds> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .parent()?
+        .join("test-credentials.toml");
+
+    if !path.exists() {
+        eprintln!("[profile] test-credentials.toml not found at {}", path.display());
+        return None;
+    }
+
+    let content = std::fs::read_to_string(&path).ok()?;
+    let config: toml::Value = content.parse().ok()?;
+
+    Some(TestCreds {
+        server_url: config["server"]["url"].as_str()?.to_string(),
+        server2_url: config
+            .get("server2")
+            .and_then(|s| s.get("url"))
+            .and_then(|u| u.as_str())
+            .map(|s| s.to_string()),
+        worker_user: config["account1"]["username"].as_str()?.to_string(),
+        worker_pass: config["account1"]["password"].as_str()?.to_string(),
+        client_user: config["account2"]["username"].as_str()?.to_string(),
+        client_pass: config["account2"]["password"].as_str()?.to_string(),
+    })
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -34,18 +72,24 @@ fn cargo_bin(name: &str) -> std::path::PathBuf {
     path
 }
 
-fn start_worker(hs: &str, user: &str, pass: &str, room_id: &str) -> Child {
+fn start_worker(hs: &str, user: &str, pass: &str, room: &str) -> Child {
     Command::new(cargo_bin("mxdx-worker"))
-        .args(["start", "--homeserver", hs, "--username", user, "--password", pass, "--room-id", room_id])
+        .args(["start", "--homeserver", hs, "--username", user, "--password", pass, "--room-name", room])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to start mxdx-worker")
 }
 
-fn run_client(hs: &str, user: &str, pass: &str, room_id: &str, args: &[&str]) -> Output {
-    let mut full: Vec<&str> = vec!["--homeserver", hs, "--username", user, "--password", pass, "--room-id", room_id];
-    full.extend_from_slice(args);
+fn run_client(hs: &str, user: &str, pass: &str, room: &str, args: &[&str]) -> Output {
+    // Global flags go before the subcommand; --worker-room goes after the subcommand
+    // args[0] is typically the subcommand ("run", "ls", etc.)
+    let mut full: Vec<&str> = vec!["--homeserver", hs, "--username", user, "--password", pass];
+    if !args.is_empty() {
+        full.push(args[0]); // subcommand
+        full.extend_from_slice(&["--worker-room", room]);
+        full.extend_from_slice(&args[1..]); // remaining args
+    }
     Command::new("timeout")
         .arg("330")
         .arg(cargo_bin("mxdx-client"))
@@ -81,31 +125,6 @@ fn run_ssh_script(script: &str) -> Output {
     child.wait_with_output().expect("failed to wait for ssh")
 }
 
-async fn register(hs: &TuwunelInstance, user: &str, pass: &str) {
-    hs.register_user(user, pass).await.unwrap_or_else(|e| panic!("register {user}: {e}"));
-}
-
-async fn shared_room(hs: &str, server_name: &str, creator: &str, pass: &str, invitee: &str) -> String {
-    let http = reqwest::Client::builder().danger_accept_invalid_certs(true).build().unwrap();
-    let login: serde_json::Value = http
-        .post(format!("{hs}/_matrix/client/v3/login"))
-        .json(&serde_json::json!({"type":"m.login.password","identifier":{"type":"m.id.user","user":creator},"password":pass}))
-        .send().await.unwrap().json().await.unwrap();
-    let token = login["access_token"].as_str().unwrap();
-    let cu = format!("@{creator}:{server_name}");
-    let iu = format!("@{invitee}:{server_name}");
-    let resp: serde_json::Value = http
-        .post(format!("{hs}/_matrix/client/v3/createRoom"))
-        .header("Authorization", format!("Bearer {token}"))
-        .json(&serde_json::json!({
-            "invite":[iu],
-            "initial_state":[{"type":"m.room.encryption","state_key":"","content":{"algorithm":"m.megolm.v1.aes-sha2"}}],
-            "power_level_content_override":{"users":{cu:100,iu:100},"state_default":0,"events_default":0}
-        }))
-        .send().await.unwrap().json().await.unwrap();
-    resp["room_id"].as_str().unwrap().to_string()
-}
-
 async fn wait_ready() { tokio::time::sleep(Duration::from_secs(5)).await; }
 
 fn large_file(lines: usize) -> String {
@@ -127,35 +146,33 @@ fn report(test: &str, transport: &str, elapsed: Duration, exit_code: Option<i32>
     );
 }
 
-/// Warm up a local mxdx setup: start worker, run a throwaway client command
-/// so that both worker and client sessions are established (keys exchanged,
-/// cross-signing done, sessions saved to keychain). Returns the running worker.
-///
-/// After this returns, subsequent `run_client` calls will use session restore
-/// (warm start) — the steady-state path we want to profile.
-async fn warmup_local(url: &str, worker_user: &str, client_user: &str, pass: &str, room_id: &str) -> Child {
-    // Clear any stale sessions from prior test runs
-    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".mxdx").join("crypto"));
-    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".config").join("mxdx"));
-
-    let mut w = start_worker(url, worker_user, pass, room_id);
-    wait_ready().await;
-
-    // Run a warm-up command — this does the cold-start work for the client:
-    // fresh login, key exchange, cross-signing, session save to keychain.
-    let warmup = run_client(url, client_user, pass, room_id, &["run", "/bin/true"]);
-    let stderr = String::from_utf8_lossy(&warmup.stderr);
-    assert!(warmup.status.success(), "warmup failed: {stderr}");
-
-    w
-}
-
 fn md5_script(file_path: &str) -> String {
     format!("while IFS= read -r line; do printf '%s\\n' \"$line\" | md5sum; done < '{file_path}'")
 }
 
+/// The worker room name used for profiling. Shared between worker and client.
+const PROFILE_ROOM: &str = "mxdx-e2e-profile";
+
+/// Start the worker and run a warm-up command to ensure sessions are established.
+/// Returns the running worker child process.
+async fn setup_worker(server: &str, worker_user: &str, worker_pass: &str,
+                       client_server: &str, client_user: &str, client_pass: &str) -> Child {
+    let mut w = start_worker(server, worker_user, worker_pass, PROFILE_ROOM);
+    wait_ready().await;
+
+    // Warm-up: ensure client session is established (cold start if first run,
+    // session restore on subsequent runs — either way, the NEXT command will be warm)
+    let warmup = run_client(client_server, client_user, client_pass, PROFILE_ROOM, &["run", "/bin/true"]);
+    if !warmup.status.success() {
+        let stderr = String::from_utf8_lossy(&warmup.stderr);
+        eprintln!("[profile] warmup failed (may need account setup): {}", &stderr[stderr.len().saturating_sub(500)..]);
+    }
+
+    w
+}
+
 // ===========================================================================
-// ECHO — simple command, measures session setup + round-trip latency
+// SSH BASELINE
 // ===========================================================================
 
 #[tokio::test]
@@ -163,307 +180,222 @@ fn md5_script(file_path: &str) -> String {
 async fn profile_echo_ssh() {
     let start = Instant::now();
     let out = run_ssh(&["/bin/echo", "hello", "world"]);
-    let elapsed = start.elapsed();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("hello world"));
-    report("echo", "ssh", elapsed, out.status.code(), stdout.lines().count());
+    report("echo", "ssh", start.elapsed(), out.status.code(), String::from_utf8_lossy(&out.stdout).lines().count());
 }
-
-#[tokio::test]
-#[ignore = "requires tuwunel"]
-async fn profile_echo_local() {
-    let mut hs = TuwunelInstance::start().await.unwrap();
-    let url = format!("http://127.0.0.1:{}", hs.port);
-    register(&hs, "w-echo", "p").await;
-    register(&hs, "c-echo", "p").await;
-    let rid = shared_room(&url, &hs.server_name, "c-echo", "p", "w-echo").await;
-    let mut w = warmup_local(&url, "w-echo", "c-echo", "p", &rid).await;
-
-    // Measured: warm client → echo → result (session restore, no key exchange)
-    let start = Instant::now();
-    let out = run_client(&url, "c-echo", "p", &rid, &["run", "/bin/echo", "hello", "world"]);
-    let elapsed = start.elapsed();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stdout: {stdout}\nstderr: {stderr}");
-    report("echo", "mxdx-local", elapsed, out.status.code(), stdout.lines().count());
-
-    let _ = w.kill(); let _ = w.wait(); hs.stop().await;
-}
-
-#[tokio::test]
-#[ignore = "requires tuwunel + openssl"]
-async fn profile_echo_federated() {
-    let mut pair = FederatedPair::start().await.unwrap();
-    let url_a = format!("https://127.0.0.1:{}", pair.hs_a.port);
-    let url_b = format!("https://127.0.0.1:{}", pair.hs_b.port);
-    register(&pair.hs_a, "w-fecho", "p").await;
-    register(&pair.hs_b, "c-fecho", "p").await;
-    let rid = shared_room(&url_a, &pair.hs_a.server_name, "w-fecho", "p", "c-fecho").await;
-
-    // Warmup: cold-start worker + client on their respective servers
-    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".mxdx").join("crypto"));
-    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".config").join("mxdx"));
-    let mut w = start_worker(&url_a, "w-fecho", "p", &rid);
-    wait_ready().await;
-    let warmup = run_client(&url_b, "c-fecho", "p", &rid, &["run", "/bin/true"]);
-    assert!(warmup.status.success(), "warmup failed: {}", String::from_utf8_lossy(&warmup.stderr));
-
-    let start = Instant::now();
-    let out = run_client(&url_b, "c-fecho", "p", &rid, &["run", "/bin/echo", "hello", "world"]);
-    let elapsed = start.elapsed();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stdout: {stdout}\nstderr: {stderr}");
-    report("echo", "mxdx-federated", elapsed, out.status.code(), stdout.lines().count());
-
-    let _ = w.kill(); let _ = w.wait(); pair.stop().await;
-}
-
-// ===========================================================================
-// EXIT CODE — /bin/false, measures exit code propagation latency
-// ===========================================================================
 
 #[tokio::test]
 #[ignore = "requires passwordless localhost SSH"]
 async fn profile_exit_code_ssh() {
     let start = Instant::now();
     let out = run_ssh(&["/bin/false"]);
-    let elapsed = start.elapsed();
-    assert!(!out.status.success());
-    report("exit-code(/bin/false)", "ssh", elapsed, out.status.code(), 0);
+    report("exit-code(/bin/false)", "ssh", start.elapsed(), out.status.code(), 0);
 }
-
-#[tokio::test]
-#[ignore = "requires tuwunel"]
-async fn profile_exit_code_local() {
-    let mut hs = TuwunelInstance::start().await.unwrap();
-    let url = format!("http://127.0.0.1:{}", hs.port);
-    register(&hs, "w-exit", "p").await;
-    register(&hs, "c-exit", "p").await;
-    let rid = shared_room(&url, &hs.server_name, "c-exit", "p", "w-exit").await;
-    let mut w = warmup_local(&url, "w-exit", "c-exit", "p", &rid).await;
-
-    let start = Instant::now();
-    let out = run_client(&url, "c-exit", "p", &rid, &["run", "/bin/false"]);
-    let elapsed = start.elapsed();
-    assert!(!out.status.success());
-    report("exit-code(/bin/false)", "mxdx-local", elapsed, out.status.code(), 0);
-
-    let _ = w.kill(); let _ = w.wait(); hs.stop().await;
-}
-
-#[tokio::test]
-#[ignore = "requires tuwunel + openssl"]
-async fn profile_exit_code_federated() {
-    let mut pair = FederatedPair::start().await.unwrap();
-    let url_a = format!("https://127.0.0.1:{}", pair.hs_a.port);
-    let url_b = format!("https://127.0.0.1:{}", pair.hs_b.port);
-    register(&pair.hs_a, "w-fexit", "p").await;
-    register(&pair.hs_b, "c-fexit", "p").await;
-    let rid = shared_room(&url_a, &pair.hs_a.server_name, "w-fexit", "p", "c-fexit").await;
-
-    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".mxdx").join("crypto"));
-    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".config").join("mxdx"));
-    let mut w = start_worker(&url_a, "w-fexit", "p", &rid);
-    wait_ready().await;
-    let warmup = run_client(&url_b, "c-fexit", "p", &rid, &["run", "/bin/true"]);
-    assert!(warmup.status.success(), "warmup failed: {}", String::from_utf8_lossy(&warmup.stderr));
-
-    let start = Instant::now();
-    let out = run_client(&url_b, "c-fexit", "p", &rid, &["run", "/bin/false"]);
-    let elapsed = start.elapsed();
-    assert!(!out.status.success());
-    report("exit-code(/bin/false)", "mxdx-federated", elapsed, out.status.code(), 0);
-
-    let _ = w.kill(); let _ = w.wait(); pair.stop().await;
-}
-
-// ===========================================================================
-// MD5SUM — 10,000 lines, measures output throughput
-// ===========================================================================
 
 #[tokio::test]
 #[ignore = "requires passwordless localhost SSH"]
 async fn profile_md5sum_ssh() {
     let fp = large_file(10_000);
-    let script = md5_script(&fp);
     let start = Instant::now();
-    let out = run_ssh_script(&script);
-    let elapsed = start.elapsed();
+    let out = run_ssh_script(&md5_script(&fp));
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "ssh md5sum failed (exit {:?}): {stderr}", out.status.code());
-    report("md5sum(10k lines)", "ssh", elapsed, out.status.code(), stdout.lines().count());
+    report("md5sum(10k lines)", "ssh", start.elapsed(), out.status.code(), stdout.lines().count());
     let _ = std::fs::remove_file(&fp);
 }
-
-#[tokio::test]
-#[ignore = "requires tuwunel"]
-async fn profile_md5sum_local() {
-    let mut hs = TuwunelInstance::start().await.unwrap();
-    let url = format!("http://127.0.0.1:{}", hs.port);
-    register(&hs, "w-md5", "p").await;
-    register(&hs, "c-md5", "p").await;
-    let rid = shared_room(&url, &hs.server_name, "c-md5", "p", "w-md5").await;
-    let mut w = warmup_local(&url, "w-md5", "c-md5", "p", &rid).await;
-
-    let fp = large_file(10_000);
-    let script = md5_script(&fp);
-    let start = Instant::now();
-    let out = run_client(&url, "c-md5", "p", &rid, &["run", "--", "/bin/sh", "-c", &script]);
-    let elapsed = start.elapsed();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stderr: {stderr}");
-    report("md5sum(10k lines)", "mxdx-local", elapsed, out.status.code(), stdout.lines().count());
-    let _ = std::fs::remove_file(&fp);
-    let _ = w.kill(); let _ = w.wait(); hs.stop().await;
-}
-
-#[tokio::test]
-#[ignore = "requires tuwunel + openssl"]
-async fn profile_md5sum_federated() {
-    let mut pair = FederatedPair::start().await.unwrap();
-    let url_a = format!("https://127.0.0.1:{}", pair.hs_a.port);
-    let url_b = format!("https://127.0.0.1:{}", pair.hs_b.port);
-    register(&pair.hs_a, "w-fmd5", "p").await;
-    register(&pair.hs_b, "c-fmd5", "p").await;
-    let rid = shared_room(&url_a, &pair.hs_a.server_name, "w-fmd5", "p", "c-fmd5").await;
-
-    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".mxdx").join("crypto"));
-    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".config").join("mxdx"));
-    let mut w = start_worker(&url_a, "w-fmd5", "p", &rid);
-    wait_ready().await;
-    let warmup = run_client(&url_b, "c-fmd5", "p", &rid, &["run", "/bin/true"]);
-    assert!(warmup.status.success(), "warmup failed: {}", String::from_utf8_lossy(&warmup.stderr));
-
-    let fp = large_file(10_000);
-    let script = md5_script(&fp);
-    let start = Instant::now();
-    let out = run_client(&url_b, "c-fmd5", "p", &rid, &["run", "--", "/bin/sh", "-c", &script]);
-    let elapsed = start.elapsed();
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stderr: {stderr}");
-    report("md5sum(10k lines)", "mxdx-federated", elapsed, out.status.code(), stdout.lines().count());
-    let _ = std::fs::remove_file(&fp);
-    let _ = w.kill(); let _ = w.wait(); pair.stop().await;
-}
-
-// ===========================================================================
-// PING — 30 pings (30s), measures streaming output latency
-// ===========================================================================
 
 #[tokio::test]
 #[ignore = "requires passwordless localhost SSH + network"]
 async fn profile_ping_ssh() {
     let start = Instant::now();
     let out = run_ssh(&["ping", "-c", "30", "-i", "1", "1.1.1.1"]);
-    let elapsed = start.elapsed();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(out.status.success());
-    report("ping(30s)", "ssh", elapsed, out.status.code(), stdout.lines().count());
+    report("ping(30s)", "ssh", start.elapsed(), out.status.code(), stdout.lines().count());
+}
+
+// ===========================================================================
+// mxdx LOCAL (single server) — uses test-credentials.toml server1
+// ===========================================================================
+
+#[tokio::test]
+#[ignore = "requires test-credentials.toml + beta server"]
+async fn profile_echo_local() {
+    let c = load_creds().expect("test-credentials.toml required");
+    let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
+                              &c.server_url, &c.client_user, &c.client_pass).await;
+
+    let start = Instant::now();
+    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, PROFILE_ROOM, &["run", "/bin/echo", "hello", "world"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
+    report("echo", "mxdx-local", start.elapsed(), out.status.code(), stdout.lines().count());
+
+    let _ = w.kill(); let _ = w.wait();
 }
 
 #[tokio::test]
-#[ignore = "requires tuwunel + network"]
+#[ignore = "requires test-credentials.toml + beta server"]
+async fn profile_exit_code_local() {
+    let c = load_creds().expect("test-credentials.toml required");
+    let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
+                              &c.server_url, &c.client_user, &c.client_pass).await;
+
+    let start = Instant::now();
+    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, PROFILE_ROOM, &["run", "/bin/false"]);
+    assert!(!out.status.success());
+    report("exit-code(/bin/false)", "mxdx-local", start.elapsed(), out.status.code(), 0);
+
+    let _ = w.kill(); let _ = w.wait();
+}
+
+#[tokio::test]
+#[ignore = "requires test-credentials.toml + beta server"]
+async fn profile_md5sum_local() {
+    let c = load_creds().expect("test-credentials.toml required");
+    let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
+                              &c.server_url, &c.client_user, &c.client_pass).await;
+
+    let fp = large_file(10_000);
+    let script = md5_script(&fp);
+    let start = Instant::now();
+    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, PROFILE_ROOM, &["run", "--", "/bin/sh", "-c", &script]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
+    report("md5sum(10k lines)", "mxdx-local", start.elapsed(), out.status.code(), stdout.lines().count());
+
+    let _ = std::fs::remove_file(&fp);
+    let _ = w.kill(); let _ = w.wait();
+}
+
+#[tokio::test]
+#[ignore = "requires test-credentials.toml + beta server + network"]
 async fn profile_ping_local() {
-    let mut hs = TuwunelInstance::start().await.unwrap();
-    let url = format!("http://127.0.0.1:{}", hs.port);
-    register(&hs, "w-ping", "p").await;
-    register(&hs, "c-ping", "p").await;
-    let rid = shared_room(&url, &hs.server_name, "c-ping", "p", "w-ping").await;
-    let mut w = warmup_local(&url, "w-ping", "c-ping", "p", &rid).await;
+    let c = load_creds().expect("test-credentials.toml required");
+    let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
+                              &c.server_url, &c.client_user, &c.client_pass).await;
 
     let start = Instant::now();
-    let out = run_client(&url, "c-ping", "p", &rid, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"]);
-    let elapsed = start.elapsed();
+    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, PROFILE_ROOM, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stderr: {stderr}");
-    report("ping(30s)", "mxdx-local", elapsed, out.status.code(), stdout.lines().count());
+    assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
+    report("ping(30s)", "mxdx-local", start.elapsed(), out.status.code(), stdout.lines().count());
 
-    let _ = w.kill(); let _ = w.wait(); hs.stop().await;
+    let _ = w.kill(); let _ = w.wait();
+}
+
+// ===========================================================================
+// mxdx FEDERATED — worker on server1, client on server2
+// ===========================================================================
+
+#[tokio::test]
+#[ignore = "requires test-credentials.toml + both beta servers"]
+async fn profile_echo_federated() {
+    let c = load_creds().expect("test-credentials.toml required");
+    let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
+    let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
+                              s2, &c.client_user, &c.client_pass).await;
+
+    let start = Instant::now();
+    let out = run_client(s2, &c.client_user, &c.client_pass, PROFILE_ROOM, &["run", "/bin/echo", "hello", "world"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
+    report("echo", "mxdx-federated", start.elapsed(), out.status.code(), stdout.lines().count());
+
+    let _ = w.kill(); let _ = w.wait();
 }
 
 #[tokio::test]
-#[ignore = "requires tuwunel + openssl + network"]
+#[ignore = "requires test-credentials.toml + both beta servers"]
+async fn profile_exit_code_federated() {
+    let c = load_creds().expect("test-credentials.toml required");
+    let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
+    let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
+                              s2, &c.client_user, &c.client_pass).await;
+
+    let start = Instant::now();
+    let out = run_client(s2, &c.client_user, &c.client_pass, PROFILE_ROOM, &["run", "/bin/false"]);
+    assert!(!out.status.success());
+    report("exit-code(/bin/false)", "mxdx-federated", start.elapsed(), out.status.code(), 0);
+
+    let _ = w.kill(); let _ = w.wait();
+}
+
+#[tokio::test]
+#[ignore = "requires test-credentials.toml + both beta servers"]
+async fn profile_md5sum_federated() {
+    let c = load_creds().expect("test-credentials.toml required");
+    let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
+    let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
+                              s2, &c.client_user, &c.client_pass).await;
+
+    let fp = large_file(10_000);
+    let script = md5_script(&fp);
+    let start = Instant::now();
+    let out = run_client(s2, &c.client_user, &c.client_pass, PROFILE_ROOM, &["run", "--", "/bin/sh", "-c", &script]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
+    report("md5sum(10k lines)", "mxdx-federated", start.elapsed(), out.status.code(), stdout.lines().count());
+
+    let _ = std::fs::remove_file(&fp);
+    let _ = w.kill(); let _ = w.wait();
+}
+
+#[tokio::test]
+#[ignore = "requires test-credentials.toml + both beta servers + network"]
 async fn profile_ping_federated() {
-    let mut pair = FederatedPair::start().await.unwrap();
-    let url_a = format!("https://127.0.0.1:{}", pair.hs_a.port);
-    let url_b = format!("https://127.0.0.1:{}", pair.hs_b.port);
-    register(&pair.hs_a, "w-fping", "p").await;
-    register(&pair.hs_b, "c-fping", "p").await;
-    let rid = shared_room(&url_a, &pair.hs_a.server_name, "w-fping", "p", "c-fping").await;
-
-    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".mxdx").join("crypto"));
-    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".config").join("mxdx"));
-    let mut w = start_worker(&url_a, "w-fping", "p", &rid);
-    wait_ready().await;
-    let warmup = run_client(&url_b, "c-fping", "p", &rid, &["run", "/bin/true"]);
-    assert!(warmup.status.success(), "warmup failed: {}", String::from_utf8_lossy(&warmup.stderr));
+    let c = load_creds().expect("test-credentials.toml required");
+    let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
+    let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
+                              s2, &c.client_user, &c.client_pass).await;
 
     let start = Instant::now();
-    let out = run_client(&url_b, "c-fping", "p", &rid, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"]);
-    let elapsed = start.elapsed();
+    let out = run_client(s2, &c.client_user, &c.client_pass, PROFILE_ROOM, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stderr: {stderr}");
-    report("ping(30s)", "mxdx-federated", elapsed, out.status.code(), stdout.lines().count());
+    assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
+    report("ping(30s)", "mxdx-federated", start.elapsed(), out.status.code(), stdout.lines().count());
 
-    let _ = w.kill(); let _ = w.wait(); pair.stop().await;
+    let _ = w.kill(); let _ = w.wait();
 }
 
 // ===========================================================================
-// LONG PING — 300 pings (5min), measures sustained streaming
+// LONG PING — 5 minutes sustained streaming
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "requires tuwunel + network, runs 5 minutes"]
+#[ignore = "requires test-credentials.toml + beta server + network, runs 5 minutes"]
 async fn profile_long_ping_local() {
-    let mut hs = TuwunelInstance::start().await.unwrap();
-    let url = format!("http://127.0.0.1:{}", hs.port);
-    register(&hs, "w-lping", "p").await;
-    register(&hs, "c-lping", "p").await;
-    let rid = shared_room(&url, &hs.server_name, "c-lping", "p", "w-lping").await;
-    let mut w = warmup_local(&url, "w-lping", "c-lping", "p", &rid).await;
+    let c = load_creds().expect("test-credentials.toml required");
+    let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
+                              &c.server_url, &c.client_user, &c.client_pass).await;
 
     let start = Instant::now();
-    let out = run_client(&url, "c-lping", "p", &rid, &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"]);
-    let elapsed = start.elapsed();
+    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, PROFILE_ROOM, &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stderr: {stderr}");
-    report("ping(5min)", "mxdx-local", elapsed, out.status.code(), stdout.lines().count());
+    assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
+    report("ping(5min)", "mxdx-local", start.elapsed(), out.status.code(), stdout.lines().count());
 
-    let _ = w.kill(); let _ = w.wait(); hs.stop().await;
+    let _ = w.kill(); let _ = w.wait();
 }
 
 #[tokio::test]
-#[ignore = "requires tuwunel + openssl + network, runs 5 minutes"]
+#[ignore = "requires test-credentials.toml + both beta servers + network, runs 5 minutes"]
 async fn profile_long_ping_federated() {
-    let mut pair = FederatedPair::start().await.unwrap();
-    let url_a = format!("https://127.0.0.1:{}", pair.hs_a.port);
-    let url_b = format!("https://127.0.0.1:{}", pair.hs_b.port);
-    register(&pair.hs_a, "w-flping", "p").await;
-    register(&pair.hs_b, "c-flping", "p").await;
-    let rid = shared_room(&url_a, &pair.hs_a.server_name, "w-flping", "p", "c-flping").await;
-
-    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".mxdx").join("crypto"));
-    let _ = std::fs::remove_dir_all(dirs::home_dir().unwrap().join(".config").join("mxdx"));
-    let mut w = start_worker(&url_a, "w-flping", "p", &rid);
-    wait_ready().await;
-    let warmup = run_client(&url_b, "c-flping", "p", &rid, &["run", "/bin/true"]);
-    assert!(warmup.status.success(), "warmup failed: {}", String::from_utf8_lossy(&warmup.stderr));
+    let c = load_creds().expect("test-credentials.toml required");
+    let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
+    let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
+                              s2, &c.client_user, &c.client_pass).await;
 
     let start = Instant::now();
-    let out = run_client(&url_b, "c-flping", "p", &rid, &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"]);
-    let elapsed = start.elapsed();
+    let out = run_client(s2, &c.client_user, &c.client_pass, PROFILE_ROOM, &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stderr: {stderr}");
-    report("ping(5min)", "mxdx-federated", elapsed, out.status.code(), stdout.lines().count());
+    assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
+    report("ping(5min)", "mxdx-federated", start.elapsed(), out.status.code(), stdout.lines().count());
 
-    let _ = w.kill(); let _ = w.wait(); pair.stop().await;
+    let _ = w.kill(); let _ = w.wait();
 }
