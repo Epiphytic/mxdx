@@ -2828,6 +2828,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs 6.0.0",
+ "flate2",
  "hostname",
  "libc",
  "mxdx-matrix",

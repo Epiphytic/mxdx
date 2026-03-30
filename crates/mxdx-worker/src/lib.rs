@@ -1,3 +1,4 @@
+pub mod batched_sender;
 pub mod compat;
 pub mod config;
 pub mod executor;
@@ -68,6 +69,13 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
         fresh_logins = ?fresh_logins,
         "connected to Matrix"
     );
+
+    // After fresh login, remove passwords from config (now saved in keychain)
+    if fresh_logins.iter().any(|&f| f) {
+        if let Err(e) = mxdx_types::config::remove_passwords_from_config("defaults.toml", None) {
+            tracing::warn!(error = %e, "failed to remove passwords from config");
+        }
+    }
 
     let room_id = if let Some(ref direct_room_id) = config.room_id {
         // Use a specific room ID directly (for E2E tests or pre-arranged rooms)

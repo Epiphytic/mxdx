@@ -219,6 +219,55 @@ pub fn load_merged_config<D: DeserializeOwned + Default, M: DeserializeOwned + D
     Ok((defaults, mode))
 }
 
+/// Remove password fields from accounts in a TOML config file.
+/// After credentials are saved to the keychain, plaintext passwords should
+/// be stripped from config files for security.
+///
+/// Preserves all other fields and formatting where possible.
+/// Sets file permissions to 0o600 on Unix.
+///
+/// The `base_dir` parameter allows overriding the config directory for testing.
+/// Pass `None` to use the default `config_dir()`.
+pub fn remove_passwords_from_config(
+    filename: &str,
+    base_dir: Option<&std::path::Path>,
+) -> anyhow::Result<()> {
+    let dir = match base_dir {
+        Some(d) => d.to_path_buf(),
+        None => config_dir(),
+    };
+    let path = dir.join(filename);
+    if !path.exists() {
+        return Ok(()); // Nothing to do
+    }
+
+    let content = std::fs::read_to_string(&path)?;
+    let mut doc: toml::Value = toml::from_str(&content)?;
+
+    // Remove password from [[accounts]] array
+    if let Some(accounts) = doc.get_mut("accounts") {
+        if let Some(arr) = accounts.as_array_mut() {
+            for account in arr.iter_mut() {
+                if let Some(table) = account.as_table_mut() {
+                    table.remove("password");
+                }
+            }
+        }
+    }
+
+    let new_content = toml::to_string_pretty(&doc)?;
+    std::fs::write(&path, new_content)?;
+
+    // Set file permissions to 0o600 on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -345,6 +394,138 @@ credential = "c"
 
         let coord: CoordinatorConfig = toml::from_str(empty).unwrap();
         assert_eq!(coord.default_on_timeout, "escalate");
+    }
+
+    #[test]
+    fn test_remove_passwords_strips_password_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_content = r#"
+[[accounts]]
+user_id = "@alice:example.com"
+homeserver = "https://example.com"
+password = "super-secret"
+
+[[accounts]]
+user_id = "@bob:example.com"
+homeserver = "https://backup.example.com"
+password = "also-secret"
+"#;
+        std::fs::write(dir.path().join("defaults.toml"), toml_content).unwrap();
+
+        remove_passwords_from_config("defaults.toml", Some(dir.path())).unwrap();
+
+        let result = std::fs::read_to_string(dir.path().join("defaults.toml")).unwrap();
+        let parsed: DefaultsConfig = toml::from_str(&result).unwrap();
+
+        assert_eq!(parsed.accounts.len(), 2);
+        assert!(parsed.accounts[0].password.is_none(), "password should be stripped");
+        assert!(parsed.accounts[1].password.is_none(), "password should be stripped");
+        assert_eq!(parsed.accounts[0].user_id, "@alice:example.com");
+        assert_eq!(parsed.accounts[1].user_id, "@bob:example.com");
+        assert_eq!(parsed.accounts[0].homeserver, "https://example.com");
+        assert_eq!(parsed.accounts[1].homeserver, "https://backup.example.com");
+    }
+
+    #[test]
+    fn test_remove_passwords_preserves_non_account_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_content = r#"
+[[accounts]]
+user_id = "@worker:example.com"
+homeserver = "https://example.com"
+password = "secret"
+
+[trust]
+cross_signing_mode = "manual"
+
+[webrtc]
+stun_servers = ["stun:custom.stun:3478"]
+"#;
+        std::fs::write(dir.path().join("defaults.toml"), toml_content).unwrap();
+
+        remove_passwords_from_config("defaults.toml", Some(dir.path())).unwrap();
+
+        let result = std::fs::read_to_string(dir.path().join("defaults.toml")).unwrap();
+        let parsed: DefaultsConfig = toml::from_str(&result).unwrap();
+
+        assert!(parsed.accounts[0].password.is_none());
+        assert_eq!(parsed.trust.cross_signing_mode, CrossSigningMode::Manual);
+        assert_eq!(parsed.webrtc.stun_servers, vec!["stun:custom.stun:3478"]);
+    }
+
+    #[test]
+    fn test_remove_passwords_noop_when_no_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // File does not exist — should return Ok(())
+        let result = remove_passwords_from_config("nonexistent.toml", Some(dir.path()));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_remove_passwords_noop_when_no_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_content = r#"
+[trust]
+cross_signing_mode = "auto"
+
+[webrtc]
+stun_servers = ["stun:stun.l.google.com:19302"]
+"#;
+        let path = dir.path().join("defaults.toml");
+        std::fs::write(&path, toml_content).unwrap();
+
+        remove_passwords_from_config("defaults.toml", Some(dir.path())).unwrap();
+
+        let result = std::fs::read_to_string(&path).unwrap();
+        let parsed: DefaultsConfig = toml::from_str(&result).unwrap();
+        assert_eq!(parsed.trust.cross_signing_mode, CrossSigningMode::Auto);
+        assert_eq!(
+            parsed.webrtc.stun_servers,
+            vec!["stun:stun.l.google.com:19302"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_remove_passwords_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let toml_content = r#"
+[[accounts]]
+user_id = "@worker:example.com"
+homeserver = "https://example.com"
+password = "secret"
+"#;
+        let path = dir.path().join("defaults.toml");
+        std::fs::write(&path, toml_content).unwrap();
+
+        remove_passwords_from_config("defaults.toml", Some(dir.path())).unwrap();
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "file should have 0o600 permissions, got {:o}", mode);
+    }
+
+    #[test]
+    fn test_remove_passwords_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml_content = r#"
+[[accounts]]
+user_id = "@worker:example.com"
+homeserver = "https://example.com"
+password = "secret"
+"#;
+        std::fs::write(dir.path().join("defaults.toml"), toml_content).unwrap();
+
+        // Call twice — second call should be a no-op
+        remove_passwords_from_config("defaults.toml", Some(dir.path())).unwrap();
+        remove_passwords_from_config("defaults.toml", Some(dir.path())).unwrap();
+
+        let result = std::fs::read_to_string(dir.path().join("defaults.toml")).unwrap();
+        let parsed: DefaultsConfig = toml::from_str(&result).unwrap();
+        assert!(parsed.accounts[0].password.is_none());
+        assert_eq!(parsed.accounts[0].user_id, "@worker:example.com");
     }
 
     #[test]

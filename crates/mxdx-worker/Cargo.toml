@@ -37,6 +37,7 @@ whoami = "1"
 sysinfo = { workspace = true }
 base64 = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
+flate2 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

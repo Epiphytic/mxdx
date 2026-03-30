@@ -339,6 +339,13 @@ pub async fn connect_multi(
         "connected to Matrix"
     );
 
+    // After fresh login, remove passwords from config (now saved in keychain)
+    if fresh_logins.iter().any(|&f| f) {
+        if let Err(e) = mxdx_types::config::remove_passwords_from_config("defaults.toml", None) {
+            tracing::warn!(error = %e, "failed to remove passwords from config");
+        }
+    }
+
     let room_id = if let Some(rid_str) = direct_room_id {
         // Use a direct room ID (bypasses space discovery, for E2E tests or pre-arranged rooms)
         let rid = mxdx_matrix::OwnedRoomId::try_from(rid_str)
