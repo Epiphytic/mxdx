@@ -362,6 +362,7 @@ pub async fn connect(
         homeserver: homeserver.to_string(),
         username: username.to_string(),
         password: password.to_string(),
+        danger_accept_invalid_certs: false,
     }];
     connect_multi(&accounts, worker_room, direct_room_id).await
 }

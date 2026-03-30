@@ -109,6 +109,7 @@ impl WorkerRuntimeConfig {
                 homeserver: creds.homeserver.clone(),
                 username: creds.username.clone(),
                 password: creds.password.clone(),
+                danger_accept_invalid_certs: false,
             });
         }
 
@@ -130,6 +131,7 @@ impl WorkerRuntimeConfig {
                         homeserver: homeserver.clone(),
                         username,
                         password: password.clone(),
+                        danger_accept_invalid_certs: false,
                     });
                 }
             }

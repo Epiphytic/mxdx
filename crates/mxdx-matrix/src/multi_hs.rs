@@ -20,6 +20,9 @@ pub struct ServerAccount {
     pub homeserver: String,
     pub username: String,
     pub password: String,
+    /// Accept invalid TLS certificates (for self-signed certs in testing).
+    /// Defaults to false. NEVER enable in production.
+    pub danger_accept_invalid_certs: bool,
 }
 
 /// Entry for a connected server with its measured latency.
@@ -96,10 +99,11 @@ impl MultiHsClient {
         let mut entries = Vec::with_capacity(accounts.len());
 
         for account in accounts {
-            let client = MatrixClient::login_and_connect(
+            let client = MatrixClient::login_and_connect_opts(
                 &account.homeserver,
                 &account.username,
                 &account.password,
+                account.danger_accept_invalid_certs,
             )
             .await?;
 

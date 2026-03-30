@@ -34,9 +34,24 @@ impl MatrixClient {
         username: &str,
         password: &str,
     ) -> Result<Self> {
+        Self::login_and_connect_opts(server_name_or_url, username, password, false).await
+    }
+
+    /// Login with option to accept invalid TLS certificates (for self-signed certs
+    /// in federated testing). NEVER use `danger_accept_invalid_certs: true` in production.
+    pub async fn login_and_connect_opts(
+        server_name_or_url: &str,
+        username: &str,
+        password: &str,
+        danger_accept_invalid_certs: bool,
+    ) -> Result<Self> {
         let store_dir = tempfile::TempDir::new().map_err(|e| MatrixClientError::Other(e.into()))?;
 
-        let builder = Client::builder().sqlite_store(store_dir.path(), None);
+        let mut builder = Client::builder().sqlite_store(store_dir.path(), None);
+
+        if danger_accept_invalid_certs {
+            builder = builder.disable_ssl_verification();
+        }
 
         // If it looks like a URL (has ://), use it directly.
         // Otherwise treat it as a server name and let the SDK do .well-known discovery.
