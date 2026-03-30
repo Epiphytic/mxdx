@@ -165,7 +165,7 @@ async fn wait_for_worker_ready() {
 /// run client `run /bin/echo hello world`, assert stdout contains "hello world"
 /// and exit code is 0, then kill the worker.
 #[tokio::test]
-#[ignore = "requires tuwunel binary and compiled mxdx-worker/mxdx-client"]
+#[ignore = "local-dev: requires tuwunel binary and compiled mxdx-worker/mxdx-client"]
 async fn e2e_echo_command_lifecycle() {
     let mut hs = TuwunelInstance::start().await.unwrap();
     let base_url = format!("http://127.0.0.1:{}", hs.port);
@@ -231,7 +231,7 @@ async fn e2e_echo_command_lifecycle() {
 
 /// Client runs `/bin/false` which exits 1. The client binary should propagate the non-zero exit.
 #[tokio::test]
-#[ignore = "requires tuwunel binary and compiled mxdx-worker/mxdx-client"]
+#[ignore = "local-dev: requires tuwunel binary and compiled mxdx-worker/mxdx-client"]
 async fn e2e_nonzero_exit_code() {
     let mut hs = TuwunelInstance::start().await.unwrap();
     let base_url = format!("http://127.0.0.1:{}", hs.port);
@@ -272,7 +272,7 @@ async fn e2e_nonzero_exit_code() {
 
 /// Start worker, client `run --detach sleep 300` to get a UUID, then `ls` to see the session.
 #[tokio::test]
-#[ignore = "requires tuwunel binary and compiled mxdx-worker/mxdx-client"]
+#[ignore = "local-dev: requires tuwunel binary and compiled mxdx-worker/mxdx-client"]
 async fn e2e_ls_shows_sessions() {
     let mut hs = TuwunelInstance::start().await.unwrap();
     let base_url = format!("http://127.0.0.1:{}", hs.port);
@@ -323,7 +323,7 @@ async fn e2e_ls_shows_sessions() {
 
 /// Start worker, submit a detached `sleep 300`, get UUID, cancel it, verify cancellation.
 #[tokio::test]
-#[ignore = "requires tuwunel binary and compiled mxdx-worker/mxdx-client"]
+#[ignore = "local-dev: requires tuwunel binary and compiled mxdx-worker/mxdx-client"]
 async fn e2e_cancel_running_session() {
     let mut hs = TuwunelInstance::start().await.unwrap();
     let base_url = format!("http://127.0.0.1:{}", hs.port);
@@ -374,7 +374,7 @@ async fn e2e_cancel_running_session() {
 
 /// Start worker, submit 2 detached tasks, `ls` should show both sessions.
 #[tokio::test]
-#[ignore = "requires tuwunel binary and compiled mxdx-worker/mxdx-client"]
+#[ignore = "local-dev: requires tuwunel binary and compiled mxdx-worker/mxdx-client"]
 async fn e2e_concurrent_sessions() {
     let mut hs = TuwunelInstance::start().await.unwrap();
     let base_url = format!("http://127.0.0.1:{}", hs.port);
@@ -469,7 +469,7 @@ fn extract_device_id_from_stderr(stderr: &str) -> Option<String> {
 /// We verify by running an echo command through the worker twice. If session
 /// restore fails, the second run would crash with a "store account mismatch" error.
 #[tokio::test]
-#[ignore = "requires tuwunel binary and compiled mxdx-worker/mxdx-client"]
+#[ignore = "local-dev: requires tuwunel binary and compiled mxdx-worker/mxdx-client"]
 async fn e2e_device_reuse_on_restart() {
     let mut hs = TuwunelInstance::start().await.unwrap();
     let base_url = format!("http://127.0.0.1:{}", hs.port);
