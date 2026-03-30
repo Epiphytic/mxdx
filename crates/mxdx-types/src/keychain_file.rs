@@ -55,18 +55,19 @@ impl FileKeychain {
     }
 
     fn ensure_dir(&self) -> Result<()> {
-        if !self.config_dir.exists() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(&self.config_dir)
+                .context("failed to create keychain config directory")?;
+        }
+        #[cfg(not(unix))]
+        {
             std::fs::create_dir_all(&self.config_dir)
                 .context("failed to create keychain config directory")?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(
-                    &self.config_dir,
-                    std::fs::Permissions::from_mode(0o700),
-                )
-                .context("failed to set directory permissions to 0o700")?;
-            }
         }
         Ok(())
     }

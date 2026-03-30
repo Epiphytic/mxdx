@@ -48,18 +48,12 @@ impl KeychainBackend for ChainedKeychain {
     }
 
     fn set(&self, key: &str, value: &[u8]) -> Result<()> {
-        // Try primary; if it fails, use fallback only
-        let primary_ok = self.primary.set(key, value).is_ok();
-
-        // Always write to fallback for redundancy
-        let fallback_result = self.fallback.set(key, value);
-
-        if primary_ok {
-            Ok(())
-        } else {
-            // Primary failed — fallback result is what matters
-            fallback_result
+        // Try primary; if it succeeds, return immediately (no disk write needed).
+        // Only fall back to file storage when the OS keychain is unavailable.
+        if self.primary.set(key, value).is_ok() {
+            return Ok(());
         }
+        self.fallback.set(key, value)
     }
 
     fn delete(&self, key: &str) -> Result<()> {
@@ -146,27 +140,26 @@ mod tests {
     }
 
     #[test]
-    fn test_chained_keychain_set_writes_to_both() {
+    fn test_chained_keychain_set_only_writes_primary_on_success() {
         let primary = SharedKeychain::new();
         let fallback = SharedKeychain::new();
 
-        // Keep clones so we can inspect after moving into ChainedKeychain
         let primary_clone = primary.clone();
         let fallback_clone = fallback.clone();
 
         let chain = ChainedKeychain::new(Box::new(primary), Box::new(fallback));
-        chain.set("k", b"shared-value").unwrap();
+        chain.set("k", b"secret").unwrap();
 
-        // Both backends should have the value
+        // Primary should have the value
         assert_eq!(
             primary_clone.get_value("k"),
-            Some(b"shared-value".to_vec()),
+            Some(b"secret".to_vec()),
             "primary should have the value"
         );
-        assert_eq!(
-            fallback_clone.get_value("k"),
-            Some(b"shared-value".to_vec()),
-            "fallback should have the value"
+        // Fallback should NOT have the value (primary succeeded, no disk write)
+        assert!(
+            !fallback_clone.contains("k"),
+            "fallback should NOT receive writes when primary succeeds"
         );
     }
 
