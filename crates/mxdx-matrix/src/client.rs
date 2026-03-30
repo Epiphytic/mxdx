@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use matrix_sdk::{
-    authentication::{matrix::MatrixSession, SessionTokens},
+    authentication::{matrix::MatrixSession, AuthSession, SessionTokens},
     config::SyncSettings,
     room::MessagesOptions,
     ruma::{
@@ -635,6 +635,47 @@ impl MatrixClient {
                 self.room_creation_timeout.as_secs()
             ))),
         }
+    }
+
+    // ── Session export ─────────────────────────────────────────────────
+
+    /// Export session data for keychain storage.
+    /// Returns the current session's user_id, device_id, access_token, and homeserver_url.
+    ///
+    /// The `homeserver_url` parameter is the original server URL used to connect
+    /// (before any .well-known redirection), ensuring keychain keys are consistent.
+    ///
+    /// **Security**: The returned `SessionData` contains the access token.
+    /// Callers must store it encrypted (e.g., via `KeychainBackend`).
+    pub fn export_session(&self, homeserver_url: &str) -> Result<crate::session::SessionData> {
+        let user_id = self
+            .client
+            .user_id()
+            .ok_or_else(|| MatrixClientError::Other(anyhow::anyhow!("not logged in")))?
+            .to_string();
+        let device_id = self
+            .client
+            .device_id()
+            .ok_or_else(|| MatrixClientError::Other(anyhow::anyhow!("no device id")))?
+            .to_string();
+        let session = self
+            .client
+            .session()
+            .ok_or_else(|| MatrixClientError::Other(anyhow::anyhow!("no active session")))?;
+        let access_token = match session {
+            AuthSession::Matrix(ms) => ms.tokens.access_token.clone(),
+            _ => {
+                return Err(MatrixClientError::Other(anyhow::anyhow!(
+                    "unsupported auth type (expected Matrix auth)"
+                )))
+            }
+        };
+        Ok(crate::session::SessionData {
+            user_id,
+            device_id,
+            access_token,
+            homeserver_url: homeserver_url.to_string(),
+        })
     }
 
     // ── Cross-signing ──────────────────────────────────────────────────

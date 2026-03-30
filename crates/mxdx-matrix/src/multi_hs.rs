@@ -10,6 +10,7 @@ use crate::error::{MatrixClientError, Result};
 use crate::rooms::LauncherTopology;
 use crate::MatrixClient;
 use matrix_sdk::ruma::RoomId;
+use mxdx_types::identity::KeychainBackend;
 
 const FAIL_WINDOW: Duration = Duration::from_secs(5 * 60);
 const FAIL_THRESHOLD: usize = 5;
@@ -187,6 +188,140 @@ impl MultiHsClient {
             seen_order: Vec::new(),
             on_preferred_change: None,
         })
+    }
+
+    /// Connect to multiple homeservers with optional session restore via keychain.
+    ///
+    /// When a keychain is provided and `store_base_path` is `Some`, each account
+    /// uses [`connect_with_session`](crate::session::connect_with_session) to
+    /// attempt session restore before falling back to fresh login. This reuses
+    /// the same Matrix device ID across process restarts, preserving E2EE keys.
+    ///
+    /// When `keychain` is `None`, behaves identically to [`connect()`](Self::connect).
+    ///
+    /// Returns a tuple of `(MultiHsClient, Vec<bool>)` where the `Vec<bool>` indicates
+    /// which accounts performed fresh logins (true) vs session restores (false).
+    pub async fn connect_with_keychain(
+        accounts: &[ServerAccount],
+        preferred_server: Option<&str>,
+        store_base_path: Option<PathBuf>,
+        keychain: Option<&dyn KeychainBackend>,
+    ) -> Result<(Self, Vec<bool>)> {
+        if accounts.is_empty() {
+            return Err(MatrixClientError::Other(anyhow::anyhow!(
+                "MultiHsClient::connect_with_keychain requires at least one server account"
+            )));
+        }
+
+        let mut entries = Vec::with_capacity(accounts.len());
+        let mut fresh_logins = Vec::with_capacity(accounts.len());
+
+        for account in accounts {
+            let (client, is_fresh) = match (&store_base_path, keychain) {
+                (Some(base), Some(kc)) => {
+                    // Session restore path: persistent store + keychain
+                    let server_hash = short_hash(&account.homeserver);
+                    let store_path = base.join(&server_hash);
+                    crate::session::connect_with_session(
+                        kc,
+                        &account.homeserver,
+                        &account.username,
+                        &account.password,
+                        store_path,
+                        account.danger_accept_invalid_certs,
+                    )
+                    .await?
+                }
+                (Some(base), None) => {
+                    // Persistent store but no keychain — fresh login every time
+                    let server_hash = short_hash(&account.homeserver);
+                    let store_path = base.join(&server_hash);
+                    let client = MatrixClient::login_and_connect_persistent(
+                        &account.homeserver,
+                        &account.username,
+                        &account.password,
+                        store_path,
+                        account.danger_accept_invalid_certs,
+                    )
+                    .await?;
+                    (client, true)
+                }
+                _ => {
+                    // No persistent store — temp store, fresh login
+                    let client = MatrixClient::login_and_connect_opts(
+                        &account.homeserver,
+                        &account.username,
+                        &account.password,
+                        account.danger_accept_invalid_certs,
+                    )
+                    .await?;
+                    (client, true)
+                }
+            };
+
+            // Measure latency via a sync cycle
+            let start = Instant::now();
+            let latency_ms = match client.sync_once().await {
+                Ok(()) => start.elapsed().as_secs_f64() * 1000.0,
+                Err(_) => f64::MAX,
+            };
+
+            info!(
+                server = %account.homeserver,
+                latency_ms = latency_ms,
+                fresh_login = is_fresh,
+                "Connected to homeserver"
+            );
+
+            entries.push(ServerEntry {
+                client,
+                server: account.homeserver.clone(),
+                password: account.password.clone(),
+                latency_ms,
+            });
+            fresh_logins.push(is_fresh);
+        }
+
+        let preferred_override = preferred_server.map(String::from);
+
+        let preferred_index = if let Some(ref override_server) = preferred_override {
+            entries
+                .iter()
+                .position(|e| e.server == *override_server)
+                .unwrap_or(0)
+        } else {
+            entries
+                .iter()
+                .enumerate()
+                .min_by(|(_, a), (_, b)| a.latency_ms.partial_cmp(&b.latency_ms).unwrap())
+                .map(|(i, _)| i)
+                .unwrap_or(0)
+        };
+
+        let mut breakers = HashMap::new();
+        for entry in &entries {
+            breakers.insert(entry.server.clone(), CircuitBreaker::new());
+        }
+
+        info!(
+            preferred = %entries[preferred_index].server,
+            latency_ms = entries[preferred_index].latency_ms,
+            server_count = entries.len(),
+            "MultiHsClient ready (with keychain)"
+        );
+
+        Ok((
+            Self {
+                entries,
+                preferred_index,
+                preferred_override,
+                breakers,
+                seen_events: HashMap::new(),
+                seen_order: Vec::new(),
+                on_preferred_change: None,
+            },
+            fresh_logins,
+        ))
     }
 
     /// Create a `MultiHsClient` from pre-connected `MatrixClient` instances.

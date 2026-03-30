@@ -291,6 +291,9 @@ impl ClientRoomOps for MatrixClientRoom {
 /// Returns a `MatrixClientRoom` ready for sending/receiving events with failover.
 ///
 /// For backward compatibility, also accepts single-server connection parameters.
+///
+/// Session restore: When a keychain is available, tries to restore each server's
+/// session (reusing the same device ID) before falling back to fresh login.
 pub async fn connect_multi(
     accounts: &[mxdx_matrix::ServerAccount],
     worker_room: &str,
@@ -307,17 +310,32 @@ pub async fn connect_multi(
         worker = %worker_room,
         "connecting to Matrix"
     );
-    // NOTE: Persistent crypto store (Phase 1) is available but not wired here yet.
-    // It will be activated in Phase 3 (Session Restore) when we can properly
-    // match stored sessions to device IDs. Using temp stores for now to avoid
-    // stale crypto store conflicts when logging in fresh each time.
-    let mut multi = MultiHsClient::connect(accounts, None, None).await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // Create keychain for session restore (OS keychain -> file fallback)
+    let keychain: Box<dyn mxdx_types::identity::KeychainBackend> =
+        match mxdx_types::keychain_chain::ChainedKeychain::default_chain() {
+            Ok(kc) => Box::new(kc),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to create keychain, session restore disabled");
+                Box::new(mxdx_types::identity::InMemoryKeychain::new())
+            }
+        };
+
+    let store_base = mxdx_matrix::default_store_base_path("client");
+    let (mut multi, fresh_logins) = MultiHsClient::connect_with_keychain(
+        accounts,
+        None,
+        store_base,
+        Some(keychain.as_ref()),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     tracing::info!(
         user_id = %multi.user_id(),
         servers = multi.server_count(),
         preferred = %multi.preferred_server(),
+        fresh_logins = ?fresh_logins,
         "connected to Matrix"
     );
 

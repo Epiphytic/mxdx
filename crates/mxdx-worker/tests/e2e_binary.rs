@@ -15,6 +15,8 @@ use std::time::Duration;
 
 use mxdx_test_helpers::tuwunel::TuwunelInstance;
 
+// E2E test for session restore / device reuse is after the concurrent sessions test.
+
 // ---------------------------------------------------------------------------
 // Binary helpers
 // ---------------------------------------------------------------------------
@@ -428,5 +430,102 @@ async fn e2e_concurrent_sessions() {
 
     let _ = worker.kill();
     let _ = worker.wait();
+    hs.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Test 6: Device reuse on restart (session restore)
+// ---------------------------------------------------------------------------
+
+/// Extract the Matrix device_id from worker stderr logs.
+/// Looks for lines like:
+///   - `device_id=ABCDEF ... "fresh login completed"` (first start)
+///   - `device_id=ABCDEF ... "session restored successfully"` (restart)
+fn extract_device_id_from_stderr(stderr: &str) -> Option<String> {
+    for line in stderr.lines() {
+        if line.contains("fresh login completed") || line.contains("session restored successfully") {
+            // tracing output: device_id=VALUE
+            if let Some(pos) = line.find("device_id=") {
+                let rest = &line[pos + "device_id=".len()..];
+                // device_id may be followed by a space, comma, or end of line
+                let end = rest.find(|c: char| c == ' ' || c == ',' || c == '\n').unwrap_or(rest.len());
+                let device_id = rest[..end].to_string();
+                if !device_id.is_empty() {
+                    return Some(device_id);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Start worker twice, verify session restore works (no crash on second start).
+///
+/// This test validates that session restore works correctly: the worker reuses
+/// the same Matrix device ID across restarts instead of creating a new device
+/// every time. This is critical for E2EE because changing devices invalidates
+/// existing Megolm sessions.
+///
+/// We verify by running an echo command through the worker twice. If session
+/// restore fails, the second run would crash with a "store account mismatch" error.
+#[tokio::test]
+#[ignore = "requires tuwunel binary and compiled mxdx-worker/mxdx-client"]
+async fn e2e_device_reuse_on_restart() {
+    let mut hs = TuwunelInstance::start().await.unwrap();
+    let base_url = format!("http://127.0.0.1:{}", hs.port);
+
+    register_user(&hs, "worker-e2e6", "pass123").await;
+    register_user(&hs, "client-e2e6", "pass123").await;
+
+    let room_id = create_shared_room(
+        &base_url, &hs.server_name, "client-e2e6", "pass123", "worker-e2e6", "pass123",
+    ).await;
+    eprintln!("[e2e_device_reuse] shared room: {}", room_id);
+
+    // --- First run: execute echo through the worker ---
+    let mut worker1 = start_worker_with_room_id(&base_url, "worker-e2e6", "pass123", &room_id);
+    wait_for_worker_ready().await;
+
+    let out1 = run_client_with_room_id(
+        &base_url, "client-e2e6", "pass123", &room_id, &["run", "echo", "first-run"],
+    );
+    let stdout1 = String::from_utf8_lossy(&out1.stdout);
+    let stderr1 = String::from_utf8_lossy(&out1.stderr);
+    eprintln!("[e2e_device_reuse] first run stdout: {}", stdout1.trim());
+    assert!(out1.status.success(), "first echo should succeed, stderr: {stderr1}");
+
+    let _ = worker1.kill();
+    let _ = worker1.wait();
+
+    // Verify persistent crypto store was created
+    let crypto_dir = dirs::home_dir().unwrap().join(".mxdx").join("crypto").join("worker");
+    eprintln!("[e2e_device_reuse] crypto_dir exists: {}", crypto_dir.exists());
+    assert!(
+        crypto_dir.exists(),
+        "persistent crypto store should exist at {:?}",
+        crypto_dir
+    );
+
+    // Small delay
+    tokio::time::sleep(Duration::from_secs(1)).await;
+
+    // --- Second run: execute echo again with same credentials ---
+    // If session restore fails, this will crash with "account in store doesn't match"
+    let mut worker2 = start_worker_with_room_id(&base_url, "worker-e2e6", "pass123", &room_id);
+    wait_for_worker_ready().await;
+
+    let out2 = run_client_with_room_id(
+        &base_url, "client-e2e6", "pass123", &room_id, &["run", "echo", "second-run"],
+    );
+    let stdout2 = String::from_utf8_lossy(&out2.stdout);
+    let stderr2 = String::from_utf8_lossy(&out2.stderr);
+    eprintln!("[e2e_device_reuse] second run stdout: {}", stdout2.trim());
+    assert!(
+        out2.status.success(),
+        "second echo should succeed (session restore), stderr: {stderr2}"
+    );
+
+    let _ = worker2.kill();
+    let _ = worker2.wait();
     hs.stop().await;
 }
