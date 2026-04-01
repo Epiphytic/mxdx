@@ -36,7 +36,12 @@ pub fn short_hash(input: &str) -> String {
 ///
 /// Returns `~/.mxdx/crypto/{role}/` (e.g. `~/.mxdx/crypto/worker/`).
 /// Returns `None` if the home directory cannot be determined.
+///
+/// If `MXDX_STORE_DIR` is set, uses that directory instead (for test isolation).
 pub fn default_store_base_path(role: &str) -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("MXDX_STORE_DIR") {
+        return Some(PathBuf::from(dir).join(role));
+    }
     dirs::home_dir().map(|home| home.join(".mxdx").join("crypto").join(role))
 }
 
@@ -934,6 +939,13 @@ mod tests {
         let h1 = short_hash("https://server-a.example.com");
         let h2 = short_hash("https://server-b.example.com");
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn short_hash_different_users_same_server_differ() {
+        let hash_alice = short_hash("alice@https://matrix.org");
+        let hash_bob = short_hash("bob@https://matrix.org");
+        assert_ne!(hash_alice, hash_bob, "different users on same server must get different hashes");
     }
 
     #[test]

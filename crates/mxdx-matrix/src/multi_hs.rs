@@ -108,8 +108,8 @@ impl MultiHsClient {
 
         for account in accounts {
             let client = if let Some(ref base) = store_base_path {
-                let server_hash = short_hash(&account.homeserver);
-                let store_path = base.join(&server_hash);
+                let account_hash = short_hash(&format!("{}@{}", account.username, account.homeserver));
+                let store_path = base.join(&account_hash);
                 MatrixClient::login_and_connect_persistent(
                     &account.homeserver,
                     &account.username,
@@ -221,8 +221,8 @@ impl MultiHsClient {
             let (client, is_fresh) = match (&store_base_path, keychain) {
                 (Some(base), Some(kc)) => {
                     // Session restore path: persistent store + keychain
-                    let server_hash = short_hash(&account.homeserver);
-                    let store_path = base.join(&server_hash);
+                    let account_hash = short_hash(&format!("{}@{}", account.username, account.homeserver));
+                    let store_path = base.join(&account_hash);
                     crate::session::connect_with_session(
                         kc,
                         &account.homeserver,
@@ -236,8 +236,8 @@ impl MultiHsClient {
                 }
                 (Some(base), None) => {
                     // Persistent store but no keychain — fresh login every time
-                    let server_hash = short_hash(&account.homeserver);
-                    let store_path = base.join(&server_hash);
+                    let account_hash = short_hash(&format!("{}@{}", account.username, account.homeserver));
+                    let store_path = base.join(&account_hash);
                     let client = MatrixClient::login_and_connect_persistent(
                         &account.homeserver,
                         &account.username,
@@ -1276,5 +1276,16 @@ mod tests {
             ServerStatus::Healthy
         );
         assert!(client.breakers.get("server-b").unwrap().failures.is_empty());
+    }
+
+    #[test]
+    fn account_hash_includes_username() {
+        use crate::client::short_hash;
+        let hash1 = short_hash("alice@https://matrix.org");
+        let hash2 = short_hash("bob@https://matrix.org");
+        let hash3 = short_hash("alice@https://other.org");
+        assert_eq!(hash1, short_hash("alice@https://matrix.org"));
+        assert_ne!(hash1, hash2);
+        assert_ne!(hash1, hash3);
     }
 }
