@@ -1,10 +1,12 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use mxdx_client::config::{ClientArgs, ClientRuntimeConfig};
+use mxdx_client::liveness::{check_worker_liveness, LivenessStatus};
 use mxdx_client::matrix::{self, ClientRoomOps, IncomingClientEvent};
 use mxdx_types::events::session::{
     SessionOutput, SessionResult, SESSION_CANCEL, SESSION_SIGNAL, SESSION_TASK,
 };
+use mxdx_types::events::telemetry::WORKER_TELEMETRY;
 use std::io::Write;
 
 #[derive(Parser)]
@@ -53,6 +55,9 @@ enum Commands {
         /// Worker room name
         #[arg(long)]
         worker_room: Option<String>,
+        /// Skip the worker liveness check before task submission
+        #[arg(long)]
+        skip_liveness_check: bool,
     },
     /// Alias for run (backward compat)
     Exec {
@@ -76,6 +81,9 @@ enum Commands {
         /// Worker room name
         #[arg(long)]
         worker_room: Option<String>,
+        /// Skip the worker liveness check before task submission
+        #[arg(long)]
+        skip_liveness_check: bool,
     },
     /// Attach to an active session
     Attach {
@@ -180,6 +188,7 @@ async fn main() -> Result<()> {
             no_room_output,
             timeout,
             worker_room,
+            skip_liveness_check,
         }
         | Commands::Exec {
             command,
@@ -189,6 +198,7 @@ async fn main() -> Result<()> {
             no_room_output,
             timeout,
             worker_room,
+            skip_liveness_check,
         } => {
             let client_args = ClientArgs {
                 worker_room: worker_room.clone(),
@@ -219,6 +229,58 @@ async fn main() -> Result<()> {
                 config.force_new_device,
             )
             .await?;
+
+            // Check worker liveness before submitting a task
+            if !skip_liveness_check {
+                // Sync once to populate room state before reading state events
+                mx_room.client().sync_once().await?;
+
+                let telemetry_state = mx_room
+                    .read_state_events(
+                        mx_room.room_id().as_str(),
+                        WORKER_TELEMETRY,
+                    )
+                    .await;
+
+                let telemetry_json = telemetry_state
+                    .ok()
+                    .and_then(|events| {
+                        events.into_iter().find_map(|(_key, value)| {
+                            if value.is_null()
+                                || value.as_object().map_or(true, |o| o.is_empty())
+                            {
+                                None
+                            } else {
+                                Some(value)
+                            }
+                        })
+                    })
+                    .unwrap_or(serde_json::Value::Null);
+
+                match check_worker_liveness(&telemetry_json) {
+                    LivenessStatus::Online { capabilities } => {
+                        tracing::info!(
+                            capabilities = ?capabilities,
+                            "worker is online, proceeding with task submission"
+                        );
+                    }
+                    LivenessStatus::NoWorker => {
+                        eprintln!("Error: no worker found in room. Is a worker running?");
+                        std::process::exit(1);
+                    }
+                    LivenessStatus::Offline => {
+                        eprintln!("Error: worker is offline.");
+                        std::process::exit(1);
+                    }
+                    LivenessStatus::Stale(duration) => {
+                        eprintln!(
+                            "Error: worker last seen {}s ago (stale).",
+                            duration.as_secs()
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
 
             // Build task with actual user ID
             let sender_id = mx_room.user_id_string();
