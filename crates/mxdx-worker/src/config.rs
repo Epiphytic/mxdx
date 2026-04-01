@@ -23,6 +23,14 @@ pub struct WorkerArgs {
     pub password: Option<String>,
     /// When true, skip session restore and create a fresh device login.
     pub force_new_device: bool,
+    /// Maximum concurrent sessions (overrides config file).
+    pub max_sessions: Option<u32>,
+    /// Commands allowed to execute (collected from repeated --allowed-command flags).
+    pub allowed_commands: Vec<String>,
+    /// Working directories allowed (collected from repeated --allowed-cwd flags).
+    pub allowed_cwd: Vec<String>,
+    /// Authorized Matrix user IDs (collected from repeated --authorized-user flags).
+    pub authorized_users: Vec<String>,
 }
 
 /// Runtime configuration for the worker, combining defaults + worker config + CLI overrides.
@@ -85,6 +93,26 @@ impl WorkerRuntimeConfig {
         }
 
         self.force_new_device = args.force_new_device;
+
+        if let Some(max) = args.max_sessions {
+            self.worker.max_sessions = max;
+        }
+        // Extend (not replace) allowlists so CLI adds to config file values
+        if !args.allowed_commands.is_empty() {
+            self.worker
+                .allowed_commands
+                .extend(args.allowed_commands.iter().cloned());
+        }
+        if !args.allowed_cwd.is_empty() {
+            self.worker
+                .allowed_cwd
+                .extend(args.allowed_cwd.iter().cloned());
+        }
+        if !args.authorized_users.is_empty() {
+            self.worker
+                .authorized_users
+                .extend(args.authorized_users.iter().cloned());
+        }
 
         // Build credentials: CLI args take highest priority, fall back to first account in defaults.
         let homeserver = args
@@ -210,6 +238,10 @@ mod tests {
             username: None,
             password: None,
             force_new_device: false,
+            max_sessions: None,
+            allowed_commands: vec![],
+            allowed_cwd: vec![],
+            authorized_users: vec![],
         };
         let cfg = cfg.with_cli_overrides(&args);
 
@@ -280,6 +312,10 @@ mod tests {
             username: Some("bot".into()),
             password: Some("secret".into()),
             force_new_device: false,
+            max_sessions: None,
+            allowed_commands: vec![],
+            allowed_cwd: vec![],
+            authorized_users: vec![],
         };
         let cfg = cfg.with_cli_overrides(&args);
 
@@ -312,6 +348,10 @@ mod tests {
             username: Some("bot".into()),
             password: Some("secret".into()),
             force_new_device: false,
+            max_sessions: None,
+            allowed_commands: vec![],
+            allowed_cwd: vec![],
+            authorized_users: vec![],
         };
         let cfg = cfg.with_cli_overrides(&args);
 
@@ -337,6 +377,10 @@ mod tests {
             username: Some("bot".into()),
             password: None,
             force_new_device: false,
+            max_sessions: None,
+            allowed_commands: vec![],
+            allowed_cwd: vec![],
+            authorized_users: vec![],
         };
         let cfg = cfg.with_cli_overrides(&args);
         assert!(cfg.credentials.is_none(), "credentials should be None when incomplete");
@@ -376,6 +420,10 @@ extra = ["docker", "gpu"]
             username: Some("bot".into()),
             password: Some("secret".into()),
             force_new_device: false,
+            max_sessions: None,
+            allowed_commands: vec![],
+            allowed_cwd: vec![],
+            authorized_users: vec![],
         };
         let cfg = cfg.with_cli_overrides(&args);
         let accounts = cfg.resolve_accounts();
@@ -462,6 +510,10 @@ extra = ["docker", "gpu"]
             username: Some("cli-user".into()),
             password: Some("cli-pass".into()),
             force_new_device: false,
+            max_sessions: None,
+            allowed_commands: vec![],
+            allowed_cwd: vec![],
+            authorized_users: vec![],
         };
         let cfg = cfg.with_cli_overrides(&args);
         let accounts = cfg.resolve_accounts();
@@ -470,5 +522,110 @@ extra = ["docker", "gpu"]
         assert_eq!(accounts[0].homeserver, "https://server-a.com");
         assert_eq!(accounts[0].username, "cli-user"); // CLI takes priority
         assert_eq!(accounts[1].homeserver, "https://server-b.com");
+    }
+
+    #[test]
+    fn cli_overrides_max_sessions() {
+        let defaults = DefaultsConfig::default();
+        let worker = WorkerConfig::default();
+        let cfg = WorkerRuntimeConfig::from_parts(defaults, worker);
+
+        let args = WorkerArgs {
+            trust_anchor: None,
+            history_retention: None,
+            cross_signing_mode: None,
+            room_name: None,
+            room_id: None,
+            homeserver: None,
+            username: None,
+            password: None,
+            force_new_device: false,
+            max_sessions: Some(20),
+            allowed_commands: vec![],
+            allowed_cwd: vec![],
+            authorized_users: vec![],
+        };
+        let cfg = cfg.with_cli_overrides(&args);
+        assert_eq!(cfg.worker.max_sessions, 20);
+    }
+
+    #[test]
+    fn cli_extends_allowed_commands() {
+        let defaults = DefaultsConfig::default();
+        let mut worker = WorkerConfig::default();
+        worker.allowed_commands = vec!["echo".into()];
+        let cfg = WorkerRuntimeConfig::from_parts(defaults, worker);
+
+        let args = WorkerArgs {
+            trust_anchor: None,
+            history_retention: None,
+            cross_signing_mode: None,
+            room_name: None,
+            room_id: None,
+            homeserver: None,
+            username: None,
+            password: None,
+            force_new_device: false,
+            max_sessions: None,
+            allowed_commands: vec!["ls".into(), "cat".into()],
+            allowed_cwd: vec![],
+            authorized_users: vec![],
+        };
+        let cfg = cfg.with_cli_overrides(&args);
+        assert_eq!(cfg.worker.allowed_commands, vec!["echo", "ls", "cat"]);
+    }
+
+    #[test]
+    fn cli_extends_allowed_cwd() {
+        let defaults = DefaultsConfig::default();
+        let worker = WorkerConfig::default(); // default has ["/tmp"]
+        let cfg = WorkerRuntimeConfig::from_parts(defaults, worker);
+
+        let args = WorkerArgs {
+            trust_anchor: None,
+            history_retention: None,
+            cross_signing_mode: None,
+            room_name: None,
+            room_id: None,
+            homeserver: None,
+            username: None,
+            password: None,
+            force_new_device: false,
+            max_sessions: None,
+            allowed_commands: vec![],
+            allowed_cwd: vec!["/home/worker".into()],
+            authorized_users: vec![],
+        };
+        let cfg = cfg.with_cli_overrides(&args);
+        assert_eq!(cfg.worker.allowed_cwd, vec!["/tmp", "/home/worker"]);
+    }
+
+    #[test]
+    fn cli_extends_authorized_users() {
+        let defaults = DefaultsConfig::default();
+        let mut worker = WorkerConfig::default();
+        worker.authorized_users = vec!["@admin:example.com".into()];
+        let cfg = WorkerRuntimeConfig::from_parts(defaults, worker);
+
+        let args = WorkerArgs {
+            trust_anchor: None,
+            history_retention: None,
+            cross_signing_mode: None,
+            room_name: None,
+            room_id: None,
+            homeserver: None,
+            username: None,
+            password: None,
+            force_new_device: false,
+            max_sessions: None,
+            allowed_commands: vec![],
+            allowed_cwd: vec![],
+            authorized_users: vec!["@ops:example.com".into()],
+        };
+        let cfg = cfg.with_cli_overrides(&args);
+        assert_eq!(
+            cfg.worker.authorized_users,
+            vec!["@admin:example.com", "@ops:example.com"]
+        );
     }
 }

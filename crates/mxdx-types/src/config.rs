@@ -91,6 +91,14 @@ pub struct WorkerConfig {
     pub capabilities: CapabilitiesConfig,
     #[serde(default = "default_telemetry_refresh")]
     pub telemetry_refresh_seconds: u64,
+    #[serde(default = "default_max_sessions")]
+    pub max_sessions: u32,
+    #[serde(default)]
+    pub allowed_commands: Vec<String>,
+    #[serde(default = "default_allowed_cwd")]
+    pub allowed_cwd: Vec<String>,
+    #[serde(default)]
+    pub authorized_users: Vec<String>,
 }
 
 impl Default for WorkerConfig {
@@ -101,6 +109,10 @@ impl Default for WorkerConfig {
             history_retention: default_history_retention(),
             capabilities: CapabilitiesConfig::default(),
             telemetry_refresh_seconds: default_telemetry_refresh(),
+            max_sessions: default_max_sessions(),
+            allowed_commands: Vec::new(),
+            allowed_cwd: default_allowed_cwd(),
+            authorized_users: Vec::new(),
         }
     }
 }
@@ -111,6 +123,14 @@ fn default_history_retention() -> u64 {
 
 fn default_telemetry_refresh() -> u64 {
     60
+}
+
+fn default_max_sessions() -> u32 {
+    5
+}
+
+fn default_allowed_cwd() -> Vec<String> {
+    vec!["/tmp".to_string()]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -320,6 +340,28 @@ room_name = "test-room"
         assert_eq!(cfg.telemetry_refresh_seconds, 60);
         assert_eq!(cfg.room_name, Some("test-room".into()));
         assert!(cfg.capabilities.extra.is_empty());
+        assert_eq!(cfg.max_sessions, 5);
+        assert!(cfg.allowed_commands.is_empty());
+        assert_eq!(cfg.allowed_cwd, vec!["/tmp"]);
+        assert!(cfg.authorized_users.is_empty());
+    }
+
+    #[test]
+    fn worker_config_security_fields_from_toml() {
+        let toml_str = r#"
+max_sessions = 10
+allowed_commands = ["echo", "ls", "cat"]
+allowed_cwd = ["/tmp", "/home/worker"]
+authorized_users = ["@admin:example.com", "@ops:example.com"]
+"#;
+        let cfg: WorkerConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.max_sessions, 10);
+        assert_eq!(cfg.allowed_commands, vec!["echo", "ls", "cat"]);
+        assert_eq!(cfg.allowed_cwd, vec!["/tmp", "/home/worker"]);
+        assert_eq!(
+            cfg.authorized_users,
+            vec!["@admin:example.com", "@ops:example.com"]
+        );
     }
 
     #[test]
@@ -388,6 +430,10 @@ credential = "c"
         let worker: WorkerConfig = toml::from_str(empty).unwrap();
         assert_eq!(worker.history_retention, 90);
         assert_eq!(worker.telemetry_refresh_seconds, 60);
+        assert_eq!(worker.max_sessions, 5);
+        assert!(worker.allowed_commands.is_empty());
+        assert_eq!(worker.allowed_cwd, vec!["/tmp"]);
+        assert!(worker.authorized_users.is_empty());
 
         let client: ClientConfig = toml::from_str(empty).unwrap();
         assert_eq!(client.session.heartbeat_interval, 30);

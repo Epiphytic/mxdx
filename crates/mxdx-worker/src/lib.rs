@@ -158,6 +158,30 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
         multi.bootstrap_and_sync_trust(&room_id).await;
     }
 
+    // Invite authorized users to the exec room
+    for user_str in &config.worker.authorized_users {
+        match mxdx_matrix::UserId::parse(user_str.as_str()) {
+            Ok(uid) => {
+                if let Err(e) = multi.preferred().invite_user(&room_id, &uid).await {
+                    tracing::warn!(
+                        user = %user_str,
+                        error = %e,
+                        "failed to invite authorized user (may already be a member)"
+                    );
+                } else {
+                    tracing::info!(user = %user_str, "invited authorized user to exec room");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    user = %user_str,
+                    error = %e,
+                    "invalid Matrix user ID for authorized user, skipping invite"
+                );
+            }
+        }
+    }
+
     Ok(matrix::MatrixWorkerRoom::new(multi, room_id))
 }
 
@@ -429,13 +453,101 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
                     let task: SessionTask = serde_json::from_value(content)?;
                     tracing::info!(uuid = %task.uuid, bin = %task.bin, "received task");
 
-                    // Validate command
-                    let validated = executor::validate_command(
+                    // Check authorized users (empty list = allow all)
+                    if !config.worker.authorized_users.is_empty()
+                        && !config
+                            .worker
+                            .authorized_users
+                            .iter()
+                            .any(|u| u == &task.sender_id)
+                    {
+                        tracing::warn!(
+                            uuid = %task.uuid,
+                            sender = %task.sender_id,
+                            "unauthorized sender, rejecting task"
+                        );
+                        let result = SessionResult {
+                            session_uuid: task.uuid.clone(),
+                            worker_id: identity.device_id().to_string(),
+                            status: SessionStatus::Failed,
+                            exit_code: Some(1),
+                            duration_seconds: 0,
+                            tail: Some("Unauthorized sender".to_string()),
+                        };
+                        room.post_to_thread(
+                            &room_id_str,
+                            &event_id,
+                            mxdx_types::events::session::SESSION_RESULT,
+                            serde_json::to_value(&result)?,
+                        )
+                        .await?;
+                        continue;
+                    }
+
+                    // Check session limit
+                    let active_count = session_manager.active_sessions().len();
+                    if active_count >= config.worker.max_sessions as usize {
+                        tracing::warn!(
+                            uuid = %task.uuid,
+                            active = active_count,
+                            max = config.worker.max_sessions,
+                            "session limit reached, rejecting task"
+                        );
+                        let result = SessionResult {
+                            session_uuid: task.uuid.clone(),
+                            worker_id: identity.device_id().to_string(),
+                            status: SessionStatus::Failed,
+                            exit_code: Some(1),
+                            duration_seconds: 0,
+                            tail: Some(format!(
+                                "Session limit reached ({} max)",
+                                config.worker.max_sessions
+                            )),
+                        };
+                        room.post_to_thread(
+                            &room_id_str,
+                            &event_id,
+                            mxdx_types::events::session::SESSION_RESULT,
+                            serde_json::to_value(&result)?,
+                        )
+                        .await?;
+                        continue;
+                    }
+
+                    // Validate command (including allowlists)
+                    let validated = match executor::validate_command(
                         &task.bin,
                         &task.args,
                         task.env.as_ref(),
                         task.cwd.as_deref(),
-                    )?;
+                        &config.worker.allowed_commands,
+                        &config.worker.allowed_cwd,
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(
+                                uuid = %task.uuid,
+                                error = %e,
+                                "command validation failed, rejecting task"
+                            );
+                            let result = SessionResult {
+                                session_uuid: task.uuid.clone(),
+                                worker_id: identity.device_id().to_string(),
+                                status: SessionStatus::Failed,
+                                exit_code: Some(1),
+                                duration_seconds: 0,
+                                tail: Some(format!("Command validation failed: {}", e)),
+                            };
+                            room.post_to_thread(
+                                &room_id_str,
+                                &event_id,
+                                mxdx_types::events::session::SESSION_RESULT,
+                                serde_json::to_value(&result)?,
+                            )
+                            .await?;
+                            continue;
+                        }
+                    };
 
                     // Claim session
                     let active_state = session_manager.claim(task.clone())?;

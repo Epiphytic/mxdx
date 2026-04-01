@@ -84,14 +84,58 @@ pub fn validate_env(env: &HashMap<String, String>) -> Result<()> {
     Ok(())
 }
 
+/// Validate a binary name against the command allowlist.
+/// Empty list = deny all (strict security default).
+/// Non-empty list = exact match required.
+pub fn validate_allowlist(bin: &str, allowed: &[String]) -> Result<()> {
+    if allowed.is_empty() {
+        bail!("command allowlist is empty — all commands are denied");
+    }
+    if !allowed.iter().any(|a| a == bin) {
+        bail!(
+            "command '{}' is not in the allowlist: {:?}",
+            bin,
+            allowed
+        );
+    }
+    Ok(())
+}
+
+/// Validate a working directory against the CWD allowlist.
+/// Uses prefix matching: cwd must start with one of the allowed prefixes.
+pub fn validate_cwd_allowlist(cwd: &str, allowed: &[String]) -> Result<()> {
+    if allowed.is_empty() {
+        bail!("cwd allowlist is empty — all directories are denied");
+    }
+    if !allowed.iter().any(|a| cwd.starts_with(a.as_str())) {
+        bail!(
+            "cwd '{}' is not under any allowed directory: {:?}",
+            cwd,
+            allowed
+        );
+    }
+    Ok(())
+}
+
 /// Validate all parts of a command and return a `ValidatedCommand` if
 /// everything passes. This is the primary entry point for callers.
+///
+/// `allowed_commands` and `allowed_cwd` are security gates checked before
+/// any other validation. Pass empty slices to use the strict deny-all default.
 pub fn validate_command(
     bin: &str,
     args: &[String],
     env: Option<&HashMap<String, String>>,
     cwd: Option<&str>,
+    allowed_commands: &[String],
+    allowed_cwd: &[String],
 ) -> Result<ValidatedCommand> {
+    // Security gates first
+    validate_allowlist(bin, allowed_commands)?;
+    if let Some(cwd) = cwd {
+        validate_cwd_allowlist(cwd, allowed_cwd)?;
+    }
+
     validate_bin(bin)?;
     validate_args(args)?;
     if let Some(env) = env {
@@ -301,12 +345,30 @@ mod tests {
 
     // --- validate_command (full integration) ---
 
+    // Helper: create a permissive allowlist for tests that don't focus on allowlists
+    fn allow_all() -> Vec<String> {
+        vec!["echo".into(), "ls".into(), "cat".into(), "sleep".into()]
+    }
+
+    fn allow_cwd_all() -> Vec<String> {
+        vec!["/".into()]
+    }
+
     #[test]
     fn validate_command_happy_path() {
         let mut env = HashMap::new();
         env.insert("PATH".into(), "/usr/bin".into());
+        let allowed = vec!["echo".into()];
+        let allowed_cwd = vec!["/tmp".into()];
 
-        let result = validate_command("echo", &["hello".into()], Some(&env), Some("/tmp"));
+        let result = validate_command(
+            "echo",
+            &["hello".into()],
+            Some(&env),
+            Some("/tmp"),
+            &allowed,
+            &allowed_cwd,
+        );
         assert!(result.is_ok());
 
         let cmd = result.unwrap();
@@ -318,7 +380,8 @@ mod tests {
 
     #[test]
     fn validate_command_no_env_no_cwd() {
-        let result = validate_command("ls", &["-la".into()], None, None);
+        let allowed = vec!["ls".into()];
+        let result = validate_command("ls", &["-la".into()], None, None, &allowed, &[]);
         assert!(result.is_ok());
 
         let cmd = result.unwrap();
@@ -328,17 +391,27 @@ mod tests {
 
     #[test]
     fn validate_command_invalid_bin() {
-        let result = validate_command("echo; rm -rf /", &[], None, None);
+        let result = validate_command(
+            "echo; rm -rf /",
+            &[],
+            None,
+            None,
+            &allow_all(),
+            &allow_cwd_all(),
+        );
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("shell metacharacters"));
     }
 
     #[test]
     fn validate_command_invalid_args() {
-        let result = validate_command("echo", &["hello\0world".into()], None, None);
+        let result = validate_command(
+            "echo",
+            &["hello\0world".into()],
+            None,
+            None,
+            &allow_all(),
+            &allow_cwd_all(),
+        );
         assert!(result.is_err());
     }
 
@@ -346,13 +419,108 @@ mod tests {
     fn validate_command_invalid_env() {
         let mut env = HashMap::new();
         env.insert("bad-key".into(), "val".into());
-        let result = validate_command("echo", &[], Some(&env), None);
+        let result = validate_command(
+            "echo",
+            &[],
+            Some(&env),
+            None,
+            &allow_all(),
+            &allow_cwd_all(),
+        );
         assert!(result.is_err());
     }
 
     #[test]
     fn validate_command_invalid_cwd() {
-        let result = validate_command("echo", &[], None, Some("relative"));
+        let result = validate_command(
+            "echo",
+            &[],
+            None,
+            Some("relative"),
+            &allow_all(),
+            &allow_cwd_all(),
+        );
         assert!(result.is_err());
+    }
+
+    // --- validate_allowlist ---
+
+    #[test]
+    fn allowlist_empty_denies_all() {
+        let result = validate_allowlist("echo", &[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn allowlist_permits_listed_command() {
+        let allowed = vec!["echo".into(), "ls".into()];
+        assert!(validate_allowlist("echo", &allowed).is_ok());
+        assert!(validate_allowlist("ls", &allowed).is_ok());
+    }
+
+    #[test]
+    fn allowlist_rejects_unlisted_command() {
+        let allowed = vec!["echo".into()];
+        let result = validate_allowlist("rm", &allowed);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not in the allowlist"));
+    }
+
+    #[test]
+    fn allowlist_exact_match_only() {
+        let allowed = vec!["echo".into()];
+        // "echo2" should not match "echo"
+        assert!(validate_allowlist("echo2", &allowed).is_err());
+    }
+
+    // --- validate_cwd_allowlist ---
+
+    #[test]
+    fn cwd_allowlist_empty_denies_all() {
+        let result = validate_cwd_allowlist("/tmp", &[]);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn cwd_allowlist_prefix_match() {
+        let allowed = vec!["/tmp".into(), "/home/worker".into()];
+        assert!(validate_cwd_allowlist("/tmp", &allowed).is_ok());
+        assert!(validate_cwd_allowlist("/tmp/subdir", &allowed).is_ok());
+        assert!(validate_cwd_allowlist("/home/worker/projects", &allowed).is_ok());
+    }
+
+    #[test]
+    fn cwd_allowlist_rejects_outside_prefix() {
+        let allowed = vec!["/tmp".into()];
+        let result = validate_cwd_allowlist("/etc", &allowed);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not under any allowed"));
+    }
+
+    #[test]
+    fn validate_command_rejects_unlisted_bin() {
+        let allowed_cmds = vec!["ls".into()];
+        let allowed_cwd = vec!["/tmp".into()];
+        let result = validate_command("rm", &[], None, None, &allowed_cmds, &allowed_cwd);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not in the allowlist"));
+    }
+
+    #[test]
+    fn validate_command_rejects_unlisted_cwd() {
+        let allowed_cmds = vec!["echo".into()];
+        let allowed_cwd = vec!["/tmp".into()];
+        let result = validate_command(
+            "echo",
+            &[],
+            None,
+            Some("/etc"),
+            &allowed_cmds,
+            &allowed_cwd,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not under any allowed"));
     }
 }

@@ -48,6 +48,22 @@ enum Commands {
         /// Force a fresh device login, skipping session restore
         #[arg(long, default_value_t = false)]
         force_new_device: bool,
+
+        /// Maximum concurrent sessions
+        #[arg(long)]
+        max_sessions: Option<u32>,
+
+        /// Allowed command binaries (can be repeated)
+        #[arg(long = "allowed-command")]
+        allowed_commands: Vec<String>,
+
+        /// Allowed working directories (prefix match, can be repeated)
+        #[arg(long = "allowed-cwd")]
+        allowed_cwd: Vec<String>,
+
+        /// Authorized Matrix user IDs (can be repeated)
+        #[arg(long = "authorized-user")]
+        authorized_users: Vec<String>,
     },
 }
 
@@ -68,6 +84,10 @@ async fn main() -> Result<()> {
             username,
             password,
             force_new_device,
+            max_sessions,
+            allowed_commands,
+            allowed_cwd,
+            authorized_users,
         } => {
             let args = WorkerArgs {
                 trust_anchor,
@@ -79,6 +99,10 @@ async fn main() -> Result<()> {
                 username,
                 password,
                 force_new_device,
+                max_sessions,
+                allowed_commands,
+                allowed_cwd,
+                authorized_users,
             };
             let config = WorkerRuntimeConfig::load()?.with_cli_overrides(&args);
             mxdx_worker::run_worker(config).await?;
