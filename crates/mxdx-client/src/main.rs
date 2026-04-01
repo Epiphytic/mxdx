@@ -1,5 +1,6 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::Parser;
+use mxdx_client::cli::{Cli, Commands, DaemonAction, TrustAction};
 use mxdx_client::config::{ClientArgs, ClientRuntimeConfig};
 use mxdx_client::liveness::{check_worker_liveness, LivenessStatus};
 use mxdx_client::matrix::{self, ClientRoomOps, IncomingClientEvent};
@@ -8,151 +9,6 @@ use mxdx_types::events::session::{
 };
 use mxdx_types::events::telemetry::WORKER_TELEMETRY;
 use std::io::Write;
-
-#[derive(Parser)]
-#[command(name = "mxdx-client", about = "mxdx client CLI")]
-struct Cli {
-    /// Matrix homeserver URL or server name
-    #[arg(long, env = "MXDX_HOMESERVER", global = true)]
-    homeserver: Option<String>,
-    /// Matrix username
-    #[arg(long, env = "MXDX_USERNAME", global = true)]
-    username: Option<String>,
-    /// Matrix password
-    #[arg(long, env = "MXDX_PASSWORD", global = true)]
-    password: Option<String>,
-    /// Direct room ID (bypasses space discovery)
-    #[arg(long, env = "MXDX_ROOM_ID", global = true)]
-    room_id: Option<String>,
-    /// Force a fresh device login, skipping session restore
-    #[arg(long, global = true, default_value_t = false)]
-    force_new_device: bool,
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Submit and run a command on a worker
-    Run {
-        /// Command to execute
-        command: String,
-        /// Command arguments
-        #[arg(trailing_var_arg = true)]
-        args: Vec<String>,
-        /// Detached mode — print UUID and exit
-        #[arg(short = 'd', long)]
-        detach: bool,
-        /// Interactive mode
-        #[arg(short = 'i', long)]
-        interactive: bool,
-        /// Suppress room output
-        #[arg(long)]
-        no_room_output: bool,
-        /// Timeout in seconds
-        #[arg(long)]
-        timeout: Option<u64>,
-        /// Worker room name
-        #[arg(long)]
-        worker_room: Option<String>,
-        /// Skip the worker liveness check before task submission
-        #[arg(long)]
-        skip_liveness_check: bool,
-    },
-    /// Alias for run (backward compat)
-    Exec {
-        /// Command to execute
-        command: String,
-        /// Command arguments
-        #[arg(trailing_var_arg = true)]
-        args: Vec<String>,
-        /// Detached mode — print UUID and exit
-        #[arg(short = 'd', long)]
-        detach: bool,
-        /// Interactive mode
-        #[arg(short = 'i', long)]
-        interactive: bool,
-        /// Suppress room output
-        #[arg(long)]
-        no_room_output: bool,
-        /// Timeout in seconds
-        #[arg(long)]
-        timeout: Option<u64>,
-        /// Worker room name
-        #[arg(long)]
-        worker_room: Option<String>,
-        /// Skip the worker liveness check before task submission
-        #[arg(long)]
-        skip_liveness_check: bool,
-    },
-    /// Attach to an active session
-    Attach {
-        /// Session UUID
-        uuid: String,
-        /// Force interactive mode
-        #[arg(short = 'i', long)]
-        interactive: bool,
-    },
-    /// List sessions
-    Ls {
-        /// Include completed sessions
-        #[arg(long)]
-        all: bool,
-        /// Worker room name
-        #[arg(long)]
-        worker_room: Option<String>,
-    },
-    /// View session logs
-    Logs {
-        /// Session UUID
-        uuid: String,
-        /// Follow output in real-time
-        #[arg(short = 'f', long)]
-        follow: bool,
-        /// Worker room name
-        #[arg(long)]
-        worker_room: Option<String>,
-    },
-    /// Cancel a session
-    Cancel {
-        /// Session UUID
-        uuid: String,
-        /// Send specific signal
-        #[arg(long)]
-        signal: Option<String>,
-        /// Worker room name
-        #[arg(long)]
-        worker_room: Option<String>,
-    },
-    /// Trust management
-    Trust {
-        #[command(subcommand)]
-        action: TrustAction,
-    },
-}
-
-#[derive(Subcommand)]
-enum TrustAction {
-    /// List trusted devices
-    List,
-    /// Add a trusted device
-    Add {
-        #[arg(long)]
-        device: String,
-    },
-    /// Remove a trusted device
-    Remove {
-        #[arg(long)]
-        device: String,
-    },
-    /// Pull trust list from device
-    Pull {
-        #[arg(long)]
-        from: String,
-    },
-    /// Show or set trust anchor
-    Anchor { user_id: Option<String> },
-}
 
 /// Resolve the worker room name from CLI arg or config.
 /// When a direct room_id is provided, the worker room name is optional (used as a label only).
@@ -176,10 +32,66 @@ fn resolve_worker_room(
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+
+    match &cli.command {
+        // Internal daemon mode
+        Commands::InternalDaemon { profile, detach: _ } => {
+            let config = ClientRuntimeConfig::load()?;
+            mxdx_client::daemon::run_daemon(config, profile).await
+        }
+        // Daemon management commands
+        Commands::Daemon { action } => {
+            match action {
+                DaemonAction::Status => {
+                    let stream = mxdx_client::cli::connect::connect_or_spawn(&cli.profile).await?;
+                    let (reader, mut writer) = stream.into_split();
+                    let mut reader = tokio::io::BufReader::new(reader);
+                    let result = mxdx_client::cli::connect::send_request(
+                        &mut reader, &mut writer, "daemon.status", None, 1,
+                    ).await?;
+                    let status: mxdx_client::protocol::methods::DaemonStatusResult =
+                        serde_json::from_value(result)?;
+                    print!("{}", mxdx_client::cli::format::format_status(&status));
+                    Ok(())
+                }
+                DaemonAction::Stop { all: _ } => {
+                    eprintln!("Stop not yet fully implemented");
+                    let stream = mxdx_client::cli::connect::connect_or_spawn(&cli.profile).await?;
+                    let (reader, mut writer) = stream.into_split();
+                    let mut reader = tokio::io::BufReader::new(reader);
+                    mxdx_client::cli::connect::send_request(
+                        &mut reader, &mut writer, "daemon.shutdown", None, 1,
+                    ).await?;
+                    eprintln!("Shutdown signal sent");
+                    Ok(())
+                }
+                DaemonAction::Start { detach: _, enable_websocket: _, ws_port: _ } => {
+                    let config = ClientRuntimeConfig::load()?;
+                    mxdx_client::daemon::run_daemon(config, &cli.profile).await
+                }
+                DaemonAction::Mcp => {
+                    let handler = std::sync::Arc::new(
+                        mxdx_client::daemon::handler::Handler::new(&cli.profile)
+                    );
+                    mxdx_client::daemon::transport::mcp::serve_stdio(handler).await
+                }
+            }
+        }
+        // All other commands: --no-daemon or daemon mode
+        _ => {
+            // For now, always use direct mode. Daemon forwarding will be added in Task 10.
+            // When daemon forwarding is ready, check `cli.no_daemon` here.
+            run_direct(&cli).await
+        }
+    }
+}
+
+/// Run command directly (no daemon). This is the existing behavior preserved verbatim.
+async fn run_direct(cli: &Cli) -> Result<()> {
     let cli_room_id = cli.room_id.clone();
     let cli_force_new_device = cli.force_new_device;
 
-    match cli.command {
+    match &cli.command {
         Commands::Run {
             command,
             args,
@@ -203,13 +115,13 @@ async fn main() -> Result<()> {
             let client_args = ClientArgs {
                 worker_room: worker_room.clone(),
                 coordinator_room: None,
-                timeout,
+                timeout: *timeout,
                 heartbeat_interval: None,
-                interactive,
-                no_room_output,
-                homeserver: cli.homeserver,
-                username: cli.username,
-                password: cli.password,
+                interactive: *interactive,
+                no_room_output: *no_room_output,
+                homeserver: cli.homeserver.clone(),
+                username: cli.username.clone(),
+                password: cli.password.clone(),
                 force_new_device: cli_force_new_device,
             };
             let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
@@ -219,7 +131,7 @@ async fn main() -> Result<()> {
                     "No Matrix accounts configured (use --homeserver/--username/--password or config file)"
                 );
             }
-            let room_name = resolve_worker_room(&worker_room, &config, cli_room_id.is_some())?;
+            let room_name = resolve_worker_room(worker_room, &config, cli_room_id.is_some())?;
 
             // Connect to Matrix with multi-homeserver failover
             let mut mx_room = matrix::connect_multi(
@@ -285,10 +197,10 @@ async fn main() -> Result<()> {
             // Build task with actual user ID
             let sender_id = mx_room.user_id_string();
             let task = mxdx_client::submit::build_task(
-                &command,
-                &args,
-                interactive,
-                no_room_output,
+                command,
+                args,
+                *interactive,
+                *no_room_output,
                 timeout.or(config.client.session.timeout_seconds),
                 config.client.session.heartbeat_interval,
                 &sender_id,
@@ -303,7 +215,7 @@ async fn main() -> Result<()> {
                 .await?;
             tracing::info!(uuid = %task_uuid, event_id = %event_id, "task submitted");
 
-            if detach {
+            if *detach {
                 println!("{}", task_uuid);
             } else {
                 // Tail the session: sync for output and result events
@@ -363,11 +275,11 @@ async fn main() -> Result<()> {
                 coordinator_room: None,
                 timeout: None,
                 heartbeat_interval: None,
-                interactive,
+                interactive: *interactive,
                 no_room_output: false,
-                homeserver: cli.homeserver,
-                username: cli.username,
-                password: cli.password,
+                homeserver: cli.homeserver.clone(),
+                username: cli.username.clone(),
+                password: cli.password.clone(),
                 force_new_device: cli_force_new_device,
             };
             let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
@@ -400,7 +312,7 @@ async fn main() -> Result<()> {
                     content,
                 } = e
                 {
-                    if session_uuid == &uuid {
+                    if session_uuid == uuid {
                         content
                             .get("dm_room_id")
                             .and_then(|v| v.as_str())
@@ -438,9 +350,9 @@ async fn main() -> Result<()> {
                 heartbeat_interval: None,
                 interactive: false,
                 no_room_output: false,
-                homeserver: cli.homeserver,
-                username: cli.username,
-                password: cli.password,
+                homeserver: cli.homeserver.clone(),
+                username: cli.username.clone(),
+                password: cli.password.clone(),
                 force_new_device: cli_force_new_device,
             };
             let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
@@ -450,7 +362,7 @@ async fn main() -> Result<()> {
                     "No Matrix accounts configured (use --homeserver/--username/--password or config file)"
                 );
             }
-            let room_name = resolve_worker_room(&worker_room, &config, cli_room_id.is_some())?;
+            let room_name = resolve_worker_room(worker_room, &config, cli_room_id.is_some())?;
 
             let mx_room = matrix::connect_multi(
                 &accounts,
@@ -471,7 +383,7 @@ async fn main() -> Result<()> {
                 )
                 .await;
 
-            let completed_state = if all {
+            let completed_state = if *all {
                 mx_room
                     .read_state_events(
                         mx_room.room_id().as_str(),
@@ -525,9 +437,9 @@ async fn main() -> Result<()> {
                 heartbeat_interval: None,
                 interactive: false,
                 no_room_output: false,
-                homeserver: cli.homeserver,
-                username: cli.username,
-                password: cli.password,
+                homeserver: cli.homeserver.clone(),
+                username: cli.username.clone(),
+                password: cli.password.clone(),
                 force_new_device: cli_force_new_device,
             };
             let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
@@ -537,7 +449,7 @@ async fn main() -> Result<()> {
                     "No Matrix accounts configured (use --homeserver/--username/--password or config file)"
                 );
             }
-            let room_name = resolve_worker_room(&worker_room, &config, cli_room_id.is_some())?;
+            let room_name = resolve_worker_room(worker_room, &config, cli_room_id.is_some())?;
 
             let mut mx_room = matrix::connect_multi(
                 &accounts,
@@ -556,7 +468,7 @@ async fn main() -> Result<()> {
                     content,
                 } = event
                 {
-                    if session_uuid == uuid {
+                    if session_uuid == *uuid {
                         if let Ok(output) =
                             matrix::deserialize_event::<SessionOutput>(&content)
                         {
@@ -570,7 +482,7 @@ async fn main() -> Result<()> {
             print!("{}", assembled);
             std::io::stdout().flush().ok();
 
-            if follow {
+            if *follow {
                 eprintln!("(follow mode: watching for new output...)");
                 loop {
                     let events = mx_room.sync_events_mut().await?;
@@ -580,7 +492,7 @@ async fn main() -> Result<()> {
                                 session_uuid,
                                 content,
                             } => {
-                                if session_uuid != uuid {
+                                if session_uuid != *uuid {
                                     continue;
                                 }
                                 if let Ok(output) =
@@ -595,7 +507,7 @@ async fn main() -> Result<()> {
                             IncomingClientEvent::SessionResult {
                                 session_uuid, ..
                             } => {
-                                if session_uuid == uuid {
+                                if session_uuid == *uuid {
                                     eprintln!("Session completed.");
                                     return Ok(());
                                 }
@@ -618,9 +530,9 @@ async fn main() -> Result<()> {
                 heartbeat_interval: None,
                 interactive: false,
                 no_room_output: false,
-                homeserver: cli.homeserver,
-                username: cli.username,
-                password: cli.password,
+                homeserver: cli.homeserver.clone(),
+                username: cli.username.clone(),
+                password: cli.password.clone(),
                 force_new_device: cli_force_new_device,
             };
             let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
@@ -630,7 +542,7 @@ async fn main() -> Result<()> {
                     "No Matrix accounts configured (use --homeserver/--username/--password or config file)"
                 );
             }
-            let room_name = resolve_worker_room(&worker_room, &config, cli_room_id.is_some())?;
+            let room_name = resolve_worker_room(worker_room, &config, cli_room_id.is_some())?;
 
             let mut mx_room = matrix::connect_multi(
                 &accounts,
@@ -641,7 +553,7 @@ async fn main() -> Result<()> {
             .await?;
 
             if let Some(sig) = signal {
-                let event = mxdx_client::cancel::build_signal(&uuid, &sig);
+                let event = mxdx_client::cancel::build_signal(uuid, sig);
                 let content = matrix::serialize_event(&event)?;
                 let event_id = mx_room
                     .post_event_mut(SESSION_SIGNAL, content)
@@ -649,7 +561,7 @@ async fn main() -> Result<()> {
                 tracing::info!(uuid = %uuid, signal = %sig, event_id = %event_id, "signal sent");
                 eprintln!("Signal {} sent to session {}", sig, uuid);
             } else {
-                let event = mxdx_client::cancel::build_cancel(&uuid, None, None);
+                let event = mxdx_client::cancel::build_cancel(uuid, None, None);
                 let content = matrix::serialize_event(&event)?;
                 let event_id = mx_room
                     .post_event_mut(SESSION_CANCEL, content)
@@ -671,6 +583,8 @@ async fn main() -> Result<()> {
                 }
             }
         },
+        // These are handled above in main(), not in run_direct
+        Commands::Daemon { .. } | Commands::InternalDaemon { .. } => unreachable!(),
     }
     Ok(())
 }
