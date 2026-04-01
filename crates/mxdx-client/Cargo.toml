@@ -30,6 +30,7 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 base64 = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
+dirs = "5"
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -37,3 +38,4 @@ mxdx-types = { path = "../mxdx-types", version = "1.1.0" }
 mxdx-matrix = { path = "../mxdx-matrix", version = "1.1.0" }
 mxdx-test-helpers = { path = "../../tests/helpers" }
 base64 = { workspace = true }
+tempfile = "3"
