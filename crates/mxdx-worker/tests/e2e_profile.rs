@@ -104,9 +104,26 @@ const ALLOWED_COMMANDS: &[&str] = &[
     "/bin/true", "/bin/false", "true", "false",
 ];
 
+/// Create isolated store and keychain directories for a test.
+/// Each test gets its own SQLite crypto store and keychain to prevent
+/// parallel test processes from fighting over the same database files.
+fn isolated_test_dirs(test_name: &str) -> (tempfile::TempDir, tempfile::TempDir) {
+    let store_dir = tempfile::Builder::new()
+        .prefix(&format!("mxdx-store-{}-", test_name))
+        .tempdir()
+        .expect("failed to create temp store dir");
+    let keychain_dir = tempfile::Builder::new()
+        .prefix(&format!("mxdx-keychain-{}-", test_name))
+        .tempdir()
+        .expect("failed to create temp keychain dir");
+    (store_dir, keychain_dir)
+}
+
 /// Start the worker using default room naming (no `--room-name`).
 /// Passes `--authorized-user` and `--allowed-command` flags.
-fn start_worker(hs: &str, user: &str, pass: &str, authorized_user: &str) -> Child {
+/// Uses isolated store/keychain dirs to prevent parallel test conflicts.
+fn start_worker(hs: &str, user: &str, pass: &str, authorized_user: &str,
+                store_dir: &std::path::Path, keychain_dir: &std::path::Path) -> Child {
     let mut args = vec![
         "start".to_string(),
         "--homeserver".to_string(), hs.to_string(),
@@ -120,6 +137,8 @@ fn start_worker(hs: &str, user: &str, pass: &str, authorized_user: &str) -> Chil
     }
     Command::new(cargo_bin("mxdx-worker"))
         .args(&args)
+        .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
+        .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -127,7 +146,8 @@ fn start_worker(hs: &str, user: &str, pass: &str, authorized_user: &str) -> Chil
 }
 
 /// Start the worker with an explicit `--room-name` override.
-fn start_worker_with_room(hs: &str, user: &str, pass: &str, room: &str, authorized_user: &str) -> Child {
+fn start_worker_with_room(hs: &str, user: &str, pass: &str, room: &str, authorized_user: &str,
+                          store_dir: &std::path::Path, keychain_dir: &std::path::Path) -> Child {
     let mut args = vec![
         "start".to_string(),
         "--homeserver".to_string(), hs.to_string(),
@@ -142,25 +162,34 @@ fn start_worker_with_room(hs: &str, user: &str, pass: &str, room: &str, authoriz
     }
     Command::new(cargo_bin("mxdx-worker"))
         .args(&args)
+        .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
+        .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("failed to start mxdx-worker")
 }
 
-fn run_client(hs: &str, user: &str, pass: &str, worker_room: &str, args: &[&str]) -> Output {
-    // Global flags go before the subcommand; --worker-room goes after the subcommand
-    // args[0] is typically the subcommand ("run", "ls", etc.)
-    let mut full: Vec<&str> = vec!["--homeserver", hs, "--username", user, "--password", pass];
-    if !args.is_empty() {
-        full.push(args[0]); // subcommand
+fn run_client(hs: &str, user: &str, pass: &str, worker_room: &str, extra_args: &[&str],
+              store_dir: &std::path::Path, keychain_dir: &std::path::Path) -> Output {
+    // Global flags go before the subcommand; per-command flags go after
+    // extra_args[0] is typically the subcommand ("run", "ls", etc.)
+    let mut full: Vec<&str> = vec![
+        "--homeserver", hs, "--username", user, "--password", pass,
+        "--no-daemon",
+    ];
+    if !extra_args.is_empty() {
+        full.push(extra_args[0]); // subcommand
         full.extend_from_slice(&["--worker-room", worker_room]);
-        full.extend_from_slice(&args[1..]); // remaining args
+        full.push("--skip-liveness-check");
+        full.extend_from_slice(&extra_args[1..]); // remaining args
     }
     Command::new("timeout")
         .arg("330")
         .arg(cargo_bin("mxdx-client"))
         .args(&full)
+        .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
+        .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -222,14 +251,15 @@ fn md5_script(file_path: &str) -> String {
 /// Uses default room naming (no `--room-name`).
 async fn setup_worker(server: &str, worker_user: &str, worker_pass: &str,
                        client_server: &str, client_user: &str, client_pass: &str,
-                       authorized_user: &str) -> Child {
+                       authorized_user: &str,
+                       store_dir: &std::path::Path, keychain_dir: &std::path::Path) -> Child {
     let worker_room = default_worker_room(worker_user);
-    let w = start_worker(server, worker_user, worker_pass, authorized_user);
+    let w = start_worker(server, worker_user, worker_pass, authorized_user, store_dir, keychain_dir);
     wait_ready().await;
 
     // Warm-up: ensure client session is established (cold start if first run,
     // session restore on subsequent runs — either way, the NEXT command will be warm)
-    let warmup = run_client(client_server, client_user, client_pass, &worker_room, &["run", "/bin/true"]);
+    let warmup = run_client(client_server, client_user, client_pass, &worker_room, &["run", "/bin/true"], store_dir, keychain_dir);
     if !warmup.status.success() {
         let stderr = String::from_utf8_lossy(&warmup.stderr);
         eprintln!("[profile] warmup failed (may need account setup): {}", &stderr[stderr.len().saturating_sub(500)..]);
@@ -241,11 +271,12 @@ async fn setup_worker(server: &str, worker_user: &str, worker_pass: &str,
 /// Start the worker with an explicit `--room-name` and run a warm-up command.
 async fn setup_worker_with_room(server: &str, worker_user: &str, worker_pass: &str,
                                  client_server: &str, client_user: &str, client_pass: &str,
-                                 room: &str, authorized_user: &str) -> Child {
-    let w = start_worker_with_room(server, worker_user, worker_pass, room, authorized_user);
+                                 room: &str, authorized_user: &str,
+                                 store_dir: &std::path::Path, keychain_dir: &std::path::Path) -> Child {
+    let w = start_worker_with_room(server, worker_user, worker_pass, room, authorized_user, store_dir, keychain_dir);
     wait_ready().await;
 
-    let warmup = run_client(client_server, client_user, client_pass, room, &["run", "/bin/true"]);
+    let warmup = run_client(client_server, client_user, client_pass, room, &["run", "/bin/true"], store_dir, keychain_dir);
     if !warmup.status.success() {
         let stderr = String::from_utf8_lossy(&warmup.stderr);
         eprintln!("[profile] warmup failed (may need account setup): {}", &stderr[stderr.len().saturating_sub(500)..]);
@@ -331,12 +362,13 @@ async fn profile_echo_local() {
     let c = load_creds().expect("test-credentials.toml required");
     let auth_user = c.client_matrix_id();
     let worker_room = default_worker_room(&c.worker_user);
+    let (store_dir, keychain_dir) = isolated_test_dirs("echo_local");
     let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
                               &c.server_url, &c.client_user, &c.client_pass,
-                              &auth_user).await;
+                              &auth_user, store_dir.path(), keychain_dir.path()).await;
 
     let start = Instant::now();
-    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, &worker_room, &["run", "/bin/echo", "hello", "world"]);
+    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, &worker_room, &["run", "/bin/echo", "hello", "world"], store_dir.path(), keychain_dir.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
@@ -351,12 +383,13 @@ async fn profile_exit_code_local() {
     let c = load_creds().expect("test-credentials.toml required");
     let auth_user = c.client_matrix_id();
     let worker_room = default_worker_room(&c.worker_user);
+    let (store_dir, keychain_dir) = isolated_test_dirs("exit_code_local");
     let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
                               &c.server_url, &c.client_user, &c.client_pass,
-                              &auth_user).await;
+                              &auth_user, store_dir.path(), keychain_dir.path()).await;
 
     let start = Instant::now();
-    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, &worker_room, &["run", "/bin/false"]);
+    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, &worker_room, &["run", "/bin/false"], store_dir.path(), keychain_dir.path());
     assert!(!out.status.success());
     report("exit-code(/bin/false)", "mxdx-local", start.elapsed(), out.status.code(), 0);
 
@@ -369,14 +402,15 @@ async fn profile_md5sum_local() {
     let c = load_creds().expect("test-credentials.toml required");
     let auth_user = c.client_matrix_id();
     let worker_room = default_worker_room(&c.worker_user);
+    let (store_dir, keychain_dir) = isolated_test_dirs("md5sum_local");
     let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
                               &c.server_url, &c.client_user, &c.client_pass,
-                              &auth_user).await;
+                              &auth_user, store_dir.path(), keychain_dir.path()).await;
 
     let fp = large_file(10_000);
     let script = md5_script(&fp);
     let start = Instant::now();
-    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, &worker_room, &["run", "--", "/bin/sh", "-c", &script]);
+    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, &worker_room, &["run", "--", "/bin/sh", "-c", &script], store_dir.path(), keychain_dir.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
@@ -392,12 +426,13 @@ async fn profile_ping_local() {
     let c = load_creds().expect("test-credentials.toml required");
     let auth_user = c.client_matrix_id();
     let worker_room = default_worker_room(&c.worker_user);
+    let (store_dir, keychain_dir) = isolated_test_dirs("ping_local");
     let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
                               &c.server_url, &c.client_user, &c.client_pass,
-                              &auth_user).await;
+                              &auth_user, store_dir.path(), keychain_dir.path()).await;
 
     let start = Instant::now();
-    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, &worker_room, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"]);
+    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, &worker_room, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"], store_dir.path(), keychain_dir.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
@@ -418,12 +453,13 @@ async fn profile_echo_federated() {
     let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
     let auth_user = c.client_matrix_id();
     let worker_room = default_worker_room(&c.worker_user);
+    let (store_dir, keychain_dir) = isolated_test_dirs("echo_federated");
     let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
                               s2, &c.client_user, &c.client_pass,
-                              &auth_user).await;
+                              &auth_user, store_dir.path(), keychain_dir.path()).await;
 
     let start = Instant::now();
-    let out = run_client(s2, &c.client_user, &c.client_pass, &worker_room, &["run", "/bin/echo", "hello", "world"]);
+    let out = run_client(s2, &c.client_user, &c.client_pass, &worker_room, &["run", "/bin/echo", "hello", "world"], store_dir.path(), keychain_dir.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
@@ -439,12 +475,13 @@ async fn profile_exit_code_federated() {
     let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
     let auth_user = c.client_matrix_id();
     let worker_room = default_worker_room(&c.worker_user);
+    let (store_dir, keychain_dir) = isolated_test_dirs("exit_code_federated");
     let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
                               s2, &c.client_user, &c.client_pass,
-                              &auth_user).await;
+                              &auth_user, store_dir.path(), keychain_dir.path()).await;
 
     let start = Instant::now();
-    let out = run_client(s2, &c.client_user, &c.client_pass, &worker_room, &["run", "/bin/false"]);
+    let out = run_client(s2, &c.client_user, &c.client_pass, &worker_room, &["run", "/bin/false"], store_dir.path(), keychain_dir.path());
     assert!(!out.status.success());
     report("exit-code(/bin/false)", "mxdx-federated", start.elapsed(), out.status.code(), 0);
 
@@ -458,14 +495,15 @@ async fn profile_md5sum_federated() {
     let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
     let auth_user = c.client_matrix_id();
     let worker_room = default_worker_room(&c.worker_user);
+    let (store_dir, keychain_dir) = isolated_test_dirs("md5sum_federated");
     let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
                               s2, &c.client_user, &c.client_pass,
-                              &auth_user).await;
+                              &auth_user, store_dir.path(), keychain_dir.path()).await;
 
     let fp = large_file(10_000);
     let script = md5_script(&fp);
     let start = Instant::now();
-    let out = run_client(s2, &c.client_user, &c.client_pass, &worker_room, &["run", "--", "/bin/sh", "-c", &script]);
+    let out = run_client(s2, &c.client_user, &c.client_pass, &worker_room, &["run", "--", "/bin/sh", "-c", &script], store_dir.path(), keychain_dir.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
@@ -482,12 +520,13 @@ async fn profile_ping_federated() {
     let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
     let auth_user = c.client_matrix_id();
     let worker_room = default_worker_room(&c.worker_user);
+    let (store_dir, keychain_dir) = isolated_test_dirs("ping_federated");
     let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
                               s2, &c.client_user, &c.client_pass,
-                              &auth_user).await;
+                              &auth_user, store_dir.path(), keychain_dir.path()).await;
 
     let start = Instant::now();
-    let out = run_client(s2, &c.client_user, &c.client_pass, &worker_room, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"]);
+    let out = run_client(s2, &c.client_user, &c.client_pass, &worker_room, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"], store_dir.path(), keychain_dir.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
@@ -506,12 +545,13 @@ async fn profile_long_ping_local() {
     let c = load_creds().expect("test-credentials.toml required");
     let auth_user = c.client_matrix_id();
     let worker_room = default_worker_room(&c.worker_user);
+    let (store_dir, keychain_dir) = isolated_test_dirs("long_ping_local");
     let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
                               &c.server_url, &c.client_user, &c.client_pass,
-                              &auth_user).await;
+                              &auth_user, store_dir.path(), keychain_dir.path()).await;
 
     let start = Instant::now();
-    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, &worker_room, &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"]);
+    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, &worker_room, &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"], store_dir.path(), keychain_dir.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
@@ -527,12 +567,13 @@ async fn profile_long_ping_federated() {
     let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
     let auth_user = c.client_matrix_id();
     let worker_room = default_worker_room(&c.worker_user);
+    let (store_dir, keychain_dir) = isolated_test_dirs("long_ping_federated");
     let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
                               s2, &c.client_user, &c.client_pass,
-                              &auth_user).await;
+                              &auth_user, store_dir.path(), keychain_dir.path()).await;
 
     let start = Instant::now();
-    let out = run_client(s2, &c.client_user, &c.client_pass, &worker_room, &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"]);
+    let out = run_client(s2, &c.client_user, &c.client_pass, &worker_room, &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"], store_dir.path(), keychain_dir.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
@@ -551,12 +592,14 @@ async fn profile_echo_explicit_room_name() {
     let c = load_creds().expect("test-credentials.toml required");
     let auth_user = c.client_matrix_id();
     let explicit_room = "mxdx-e2e-profile-explicit";
+    let (store_dir, keychain_dir) = isolated_test_dirs("echo_explicit_room");
     let mut w = setup_worker_with_room(&c.server_url, &c.worker_user, &c.worker_pass,
                                         &c.server_url, &c.client_user, &c.client_pass,
-                                        explicit_room, &auth_user).await;
+                                        explicit_room, &auth_user,
+                                        store_dir.path(), keychain_dir.path()).await;
 
     let start = Instant::now();
-    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, explicit_room, &["run", "/bin/echo", "explicit", "room"]);
+    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, explicit_room, &["run", "/bin/echo", "explicit", "room"], store_dir.path(), keychain_dir.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
@@ -575,9 +618,13 @@ async fn e2e_beta_session_restore() {
     let c = load_creds().expect("test-credentials.toml required");
     let auth_user = c.client_matrix_id();
 
+    // Shared dirs for both runs — session restore requires the same store/keychain
+    let (store_dir, keychain_dir) = isolated_test_dirs("session_restore");
+
     // --- First run: start worker, let it initialize and save session to keychain ---
     eprintln!("[session-restore] starting first worker run");
-    let mut w1 = start_worker(&c.server_url, &c.worker_user, &c.worker_pass, &auth_user);
+    let mut w1 = start_worker(&c.server_url, &c.worker_user, &c.worker_pass, &auth_user,
+                               store_dir.path(), keychain_dir.path());
 
     // Wait for worker to initialize
     tokio::time::sleep(Duration::from_secs(15)).await;
@@ -601,9 +648,10 @@ async fn e2e_beta_session_restore() {
     // Small delay between runs
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // --- Second run: start worker again, verify it attempts session restore ---
+    // --- Second run: start worker again with SAME dirs, verify it attempts session restore ---
     eprintln!("[session-restore] starting second worker run (should restore session)");
-    let mut w2 = start_worker(&c.server_url, &c.worker_user, &c.worker_pass, &auth_user);
+    let mut w2 = start_worker(&c.server_url, &c.worker_user, &c.worker_pass, &auth_user,
+                               store_dir.path(), keychain_dir.path());
 
     // Wait for worker to initialize
     tokio::time::sleep(Duration::from_secs(15)).await;
