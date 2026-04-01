@@ -110,7 +110,7 @@ fn default_history_retention() -> u64 {
 }
 
 fn default_telemetry_refresh() -> u64 {
-    300
+    60
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -317,7 +317,7 @@ room_name = "test-room"
 "#;
         let cfg: WorkerConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.history_retention, 90);
-        assert_eq!(cfg.telemetry_refresh_seconds, 300);
+        assert_eq!(cfg.telemetry_refresh_seconds, 60);
         assert_eq!(cfg.room_name, Some("test-room".into()));
         assert!(cfg.capabilities.extra.is_empty());
     }
@@ -387,7 +387,7 @@ credential = "c"
 
         let worker: WorkerConfig = toml::from_str(empty).unwrap();
         assert_eq!(worker.history_retention, 90);
-        assert_eq!(worker.telemetry_refresh_seconds, 300);
+        assert_eq!(worker.telemetry_refresh_seconds, 60);
 
         let client: ClientConfig = toml::from_str(empty).unwrap();
         assert_eq!(client.session.heartbeat_interval, 30);

@@ -17,7 +17,7 @@ pub mod trust;
 pub mod webrtc;
 
 use std::collections::HashMap;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use base64::Engine;
@@ -27,6 +27,7 @@ use mxdx_matrix::MultiHsClient;
 use mxdx_types::events::session::{
     OutputStream, SessionResult, SessionStart, SessionStatus, SessionTask,
 };
+use mxdx_types::events::telemetry::WORKER_TELEMETRY;
 use state_room::WorkerStateRoom;
 
 /// Exponential backoff for sync failures.
@@ -254,6 +255,19 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
     .await?;
     tracing::info!("posted WorkerInfo state event");
 
+    // Post initial telemetry (status: "online") immediately after WorkerInfo
+    let initial_telemetry = telemetry.collect_telemetry_state(0, "online")?;
+    room.write_state(
+        &room_id_str,
+        WORKER_TELEMETRY,
+        "",
+        serde_json::to_value(&initial_telemetry)?,
+    )
+    .await?;
+    tracing::info!("posted initial telemetry (online)");
+    let mut last_telemetry = Instant::now();
+    let telemetry_interval = Duration::from_secs(config.worker.telemetry_refresh_seconds);
+
     // Track active sessions and their thread root event IDs
     let mut thread_roots: HashMap<String, String> = HashMap::new();
 
@@ -276,6 +290,13 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
 
     // Exponential backoff for sync failures
     let mut backoff = SyncBackoff::new();
+
+    // Set up shutdown signal handler (SIGTERM on Unix)
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("failed to install SIGTERM handler");
+    #[cfg(not(unix))]
+    let mut sigterm = ();
 
     // Main sync loop
     loop {
@@ -335,6 +356,32 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
             }
         }
 
+        // Periodic telemetry refresh
+        if last_telemetry.elapsed() >= telemetry_interval {
+            let active_count = session_manager.active_sessions().len() as u32;
+            match telemetry.collect_telemetry_state(active_count, "online") {
+                Ok(state) => {
+                    if let Err(e) = room
+                        .write_state(
+                            &room_id_str,
+                            WORKER_TELEMETRY,
+                            "",
+                            serde_json::to_value(&state)?,
+                        )
+                        .await
+                    {
+                        tracing::warn!(error = %e, "failed to post periodic telemetry");
+                    } else {
+                        tracing::debug!("posted periodic telemetry");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to collect telemetry state");
+                }
+            }
+            last_telemetry = Instant::now();
+        }
+
         // Periodic cross-server trust sync (multi-homeserver only)
         sync_cycle_count += 1;
         if sync_cycle_count % trust_sync_interval == 0 {
@@ -343,23 +390,36 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
                 room.multi().sync_trust(rid).await;
             }
         }
-        let events = match room
-            .sync_events(std::time::Duration::from_secs(30))
-            .await
-        {
-            Ok(events) => {
-                backoff.success();
-                events
+
+        // Sync events with shutdown signal handling via tokio::select!
+        let events = tokio::select! {
+            result = room.sync_events(std::time::Duration::from_secs(30)) => {
+                match result {
+                    Ok(events) => {
+                        backoff.success();
+                        events
+                    }
+                    Err(e) => {
+                        let wait = backoff.fail();
+                        tracing::error!(
+                            error = %e,
+                            backoff_ms = wait.as_millis(),
+                            "sync error, backing off"
+                        );
+                        tokio::time::sleep(wait).await;
+                        continue;
+                    }
+                }
             }
-            Err(e) => {
-                let wait = backoff.fail();
-                tracing::error!(
-                    error = %e,
-                    backoff_ms = wait.as_millis(),
-                    "sync error, backing off"
-                );
-                tokio::time::sleep(wait).await;
-                continue;
+            _ = tokio::signal::ctrl_c() => {
+                tracing::info!("received SIGINT, shutting down gracefully");
+                post_offline_telemetry(&telemetry, &mut room, &room_id_str, &session_manager).await;
+                break;
+            }
+            _ = sigterm_recv(&mut sigterm) => {
+                tracing::info!("received SIGTERM, shutting down gracefully");
+                post_offline_telemetry(&telemetry, &mut room, &room_id_str, &session_manager).await;
+                break;
             }
         };
 
@@ -576,6 +636,57 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
             }
         }
     }
+
+    tracing::info!("worker shut down cleanly");
+    Ok(())
+}
+
+/// Post offline telemetry state with a 2-second timeout.
+/// Best-effort: logs a warning on failure but does not propagate errors.
+async fn post_offline_telemetry(
+    telemetry: &telemetry::TelemetryCollector,
+    room: &mut matrix::MatrixWorkerRoom,
+    room_id_str: &str,
+    session_manager: &session::SessionManager,
+) {
+    let active_count = session_manager.active_sessions().len() as u32;
+    let state = match telemetry.collect_telemetry_state(active_count, "offline") {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to collect offline telemetry");
+            return;
+        }
+    };
+    let value = match serde_json::to_value(&state) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to serialize offline telemetry");
+            return;
+        }
+    };
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        room.write_state(room_id_str, WORKER_TELEMETRY, "", value),
+    )
+    .await;
+    match result {
+        Ok(Ok(())) => tracing::info!("posted offline telemetry"),
+        Ok(Err(e)) => tracing::warn!(error = %e, "failed to post offline telemetry"),
+        Err(_) => tracing::warn!("offline telemetry post timed out (2s)"),
+    }
+}
+
+/// Platform-specific SIGTERM receiver.
+/// On Unix, waits for SIGTERM. On other platforms, pends forever (ctrl_c handles shutdown).
+#[cfg(unix)]
+async fn sigterm_recv(signal: &mut tokio::signal::unix::Signal) {
+    signal.recv().await;
+}
+
+#[cfg(not(unix))]
+async fn sigterm_recv(_signal: &mut ()) {
+    // On non-Unix, this future never completes; ctrl_c handles shutdown
+    std::future::pending::<()>().await;
 }
 
 /// Persist the current active sessions to disk for crash recovery.

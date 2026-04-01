@@ -225,7 +225,7 @@ mod tests {
         let cfg = WorkerRuntimeConfig::from_parts(defaults, worker);
 
         assert_eq!(cfg.worker.history_retention, 90);
-        assert_eq!(cfg.worker.telemetry_refresh_seconds, 300);
+        assert_eq!(cfg.worker.telemetry_refresh_seconds, 60);
         assert!(cfg.worker.trust_anchor.is_none());
         assert!(cfg.worker.capabilities.extra.is_empty());
     }
