@@ -107,6 +107,7 @@ fn cli_args_override_toml() {
         homeserver: None,
         username: None,
         password: None,
+        force_new_device: false,
     };
     let cfg = cfg.with_cli_overrides(&args);
 

@@ -21,6 +21,8 @@ pub struct WorkerArgs {
     pub homeserver: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
+    /// When true, skip session restore and create a fresh device login.
+    pub force_new_device: bool,
 }
 
 /// Runtime configuration for the worker, combining defaults + worker config + CLI overrides.
@@ -33,6 +35,8 @@ pub struct WorkerRuntimeConfig {
     pub credentials: Option<WorkerCredentials>,
     /// Direct room ID — bypasses launcher space creation when set.
     pub room_id: Option<String>,
+    /// When true, skip session restore and create a fresh device login.
+    pub force_new_device: bool,
 }
 
 impl WorkerRuntimeConfig {
@@ -48,6 +52,7 @@ impl WorkerRuntimeConfig {
             resolved_room_name,
             credentials: None,
             room_id: None,
+            force_new_device: false,
         })
     }
 
@@ -60,6 +65,7 @@ impl WorkerRuntimeConfig {
             resolved_room_name,
             credentials: None,
             room_id: None,
+            force_new_device: false,
         }
     }
 
@@ -77,6 +83,8 @@ impl WorkerRuntimeConfig {
         if let Some(ref id) = args.room_id {
             self.room_id = Some(id.clone());
         }
+
+        self.force_new_device = args.force_new_device;
 
         // Build credentials: CLI args take highest priority, fall back to first account in defaults.
         let homeserver = args
@@ -201,6 +209,7 @@ mod tests {
             homeserver: None,
             username: None,
             password: None,
+            force_new_device: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
 
@@ -270,6 +279,7 @@ mod tests {
             homeserver: Some("https://matrix.example.com".into()),
             username: Some("bot".into()),
             password: Some("secret".into()),
+            force_new_device: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
 
@@ -301,6 +311,7 @@ mod tests {
             homeserver: None, // not provided — should fall back to defaults
             username: Some("bot".into()),
             password: Some("secret".into()),
+            force_new_device: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
 
@@ -325,6 +336,7 @@ mod tests {
             homeserver: None,
             username: Some("bot".into()),
             password: None,
+            force_new_device: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
         assert!(cfg.credentials.is_none(), "credentials should be None when incomplete");
@@ -363,6 +375,7 @@ extra = ["docker", "gpu"]
             homeserver: Some("https://matrix.example.com".into()),
             username: Some("bot".into()),
             password: Some("secret".into()),
+            force_new_device: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
         let accounts = cfg.resolve_accounts();
@@ -448,6 +461,7 @@ extra = ["docker", "gpu"]
             homeserver: Some("https://server-a.com".into()),
             username: Some("cli-user".into()),
             password: Some("cli-pass".into()),
+            force_new_device: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
         let accounts = cfg.resolve_accounts();

@@ -35,10 +35,17 @@ pub struct FileKeychain {
 impl FileKeychain {
     /// Create a new `FileKeychain` with the default config directory (`~/.config/mxdx`)
     /// and a key derived from `SHA256(hostname:uid:mxdx-credential-store)`.
+    ///
+    /// If the `MXDX_KEYCHAIN_DIR` environment variable is set, uses that directory
+    /// instead of the default. This is useful for test isolation.
     pub fn new() -> Result<Self> {
-        let config_dir = dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("~/.config"))
-            .join("mxdx");
+        let config_dir = if let Ok(dir) = std::env::var("MXDX_KEYCHAIN_DIR") {
+            PathBuf::from(dir)
+        } else {
+            dirs::config_dir()
+                .unwrap_or_else(|| PathBuf::from("~/.config"))
+                .join("mxdx")
+        };
         let key = derive_key()?;
         Ok(Self { config_dir, key })
     }

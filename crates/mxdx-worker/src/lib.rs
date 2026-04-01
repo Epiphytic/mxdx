@@ -99,6 +99,7 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
         None,
         store_base,
         Some(keychain.as_ref()),
+        config.force_new_device,
     )
     .await?;
 

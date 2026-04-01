@@ -206,6 +206,7 @@ impl MultiHsClient {
         preferred_server: Option<&str>,
         store_base_path: Option<PathBuf>,
         keychain: Option<&dyn KeychainBackend>,
+        force_new_device: bool,
     ) -> Result<(Self, Vec<bool>)> {
         if accounts.is_empty() {
             return Err(MatrixClientError::Other(anyhow::anyhow!(
@@ -229,6 +230,7 @@ impl MultiHsClient {
                         &account.password,
                         store_path,
                         account.danger_accept_invalid_certs,
+                        force_new_device,
                     )
                     .await?
                 }

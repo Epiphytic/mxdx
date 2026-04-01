@@ -140,43 +140,76 @@ pub async fn connect_with_session(
     password: &str,
     store_path: PathBuf,
     danger_accept_invalid_certs: bool,
+    force_new_device: bool,
 ) -> Result<(MatrixClient, bool)> {
     // 0. Get or create store passphrase for at-rest encryption of E2EE keys
     let store_passphrase = get_or_create_store_passphrase(keychain, username, server);
     let store_pass_ref = store_passphrase.as_deref();
 
-    // 1. Try session restore
-    let session_k = session_key(username, server);
-    if let Ok(Some(data)) = keychain.get(&session_k) {
-        if let Ok(session) = serde_json::from_slice::<SessionData>(&data) {
-            tracing::info!(
-                device_id = %session.device_id,
-                user_id = %session.user_id,
-                "attempting session restore"
-            );
-            match MatrixClient::connect_with_token_persistent_with_passphrase(
-                &session.homeserver_url,
-                &session.access_token,
-                &session.user_id,
-                &session.device_id,
-                store_path.clone(),
-                store_pass_ref,
-            )
-            .await
-            {
-                Ok(client) => {
-                    tracing::info!(
-                        device_id = %session.device_id,
-                        "session restored successfully"
-                    );
-                    return Ok((client, false)); // false = not a fresh login
+    // 1. Try session restore (unless force_new_device is set)
+    if force_new_device {
+        tracing::info!(
+            username = %username,
+            server = %server,
+            "force_new_device=true, skipping session restore"
+        );
+    } else {
+        let session_k = session_key(username, server);
+        match keychain.get(&session_k) {
+            Ok(Some(data)) => {
+                match serde_json::from_slice::<SessionData>(&data) {
+                    Ok(session) => {
+                        tracing::info!(
+                            device_id = %session.device_id,
+                            user_id = %session.user_id,
+                            "attempting session restore"
+                        );
+                        match MatrixClient::connect_with_token_persistent_with_passphrase(
+                            &session.homeserver_url,
+                            &session.access_token,
+                            &session.user_id,
+                            &session.device_id,
+                            store_path.clone(),
+                            store_pass_ref,
+                        )
+                        .await
+                        {
+                            Ok(client) => {
+                                tracing::info!(
+                                    device_id = %session.device_id,
+                                    "session restored successfully"
+                                );
+                                return Ok((client, false)); // false = not a fresh login
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    device_id = %session.device_id,
+                                    "stored session failed, falling back to fresh login"
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "stored session data is corrupt, falling back to fresh login"
+                        );
+                    }
                 }
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        "session restore failed, falling back to fresh login"
-                    );
-                }
+            }
+            Ok(None) => {
+                tracing::info!(
+                    username = %username,
+                    server = %server,
+                    "no stored session found, proceeding to fresh login"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "keychain read failed, proceeding to fresh login"
+                );
             }
         }
     }
@@ -211,6 +244,7 @@ pub async fn connect_with_session(
     );
     let session_json = serde_json::to_vec(&session_data)
         .map_err(|e| MatrixClientError::Other(e.into()))?;
+    let session_k = session_key(username, server);
     if let Err(e) = keychain.set(&session_k, &session_json) {
         tracing::warn!(error = %e, "failed to save session to keychain");
     }
@@ -319,6 +353,7 @@ mod tests {
             "testpass",
             store_path,
             false,
+            false,
         )
         .await;
 
@@ -365,6 +400,7 @@ mod tests {
             "testpass",
             store_path,
             false,
+            false,
         )
         .await;
 
@@ -372,6 +408,53 @@ mod tests {
         assert!(result.is_err());
 
         // Keychain should still have the original session (not overwritten on failure)
+        let stored = keychain
+            .get(&session_key("testuser", "https://nonexistent.example.com"))
+            .unwrap()
+            .unwrap();
+        let stored_session: SessionData = serde_json::from_slice(&stored).unwrap();
+        assert_eq!(stored_session, session);
+    }
+
+    /// Verify that force_new_device=true skips session restore even when keychain has a session.
+    /// The fresh login will fail (no real server), but we verify the keychain session was NOT
+    /// attempted for restore (the function goes straight to fresh login).
+    #[tokio::test]
+    async fn test_force_new_device_skips_restore() {
+        let keychain = InMemoryKeychain::new();
+        let store_path = PathBuf::from("/tmp/mxdx-test-force-new-device");
+
+        // Pre-populate keychain with session data
+        let session = SessionData {
+            user_id: "@testuser:nonexistent.example.com".to_string(),
+            device_id: "TESTDEVICE_FORCE".to_string(),
+            access_token: "syt_fake_token_force".to_string(),
+            homeserver_url: "https://nonexistent.example.com".to_string(),
+        };
+        let session_json = serde_json::to_vec(&session).unwrap();
+        keychain
+            .set(
+                &session_key("testuser", "https://nonexistent.example.com"),
+                &session_json,
+            )
+            .unwrap();
+
+        // With force_new_device=true, should skip restore and go straight to fresh login
+        let result = connect_with_session(
+            &keychain,
+            "https://nonexistent.example.com",
+            "testuser",
+            "testpass",
+            store_path,
+            false,
+            true, // force_new_device
+        )
+        .await;
+
+        // Fresh login fails without a real server
+        assert!(result.is_err());
+
+        // Keychain should still have the original session (untouched)
         let stored = keychain
             .get(&session_key("testuser", "https://nonexistent.example.com"))
             .unwrap()

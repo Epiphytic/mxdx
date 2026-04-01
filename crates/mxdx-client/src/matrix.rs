@@ -298,6 +298,7 @@ pub async fn connect_multi(
     accounts: &[mxdx_matrix::ServerAccount],
     worker_room: &str,
     direct_room_id: Option<&str>,
+    force_new_device: bool,
 ) -> Result<MatrixClientRoom> {
     if accounts.is_empty() {
         anyhow::bail!(
@@ -327,6 +328,7 @@ pub async fn connect_multi(
         None,
         store_base,
         Some(keychain.as_ref()),
+        force_new_device,
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -405,7 +407,7 @@ pub async fn connect(
         password: password.to_string(),
         danger_accept_invalid_certs: false,
     }];
-    connect_multi(&accounts, worker_room, direct_room_id).await
+    connect_multi(&accounts, worker_room, direct_room_id, false).await
 }
 
 /// Helper to serialize a typed event into a JSON Value for posting.

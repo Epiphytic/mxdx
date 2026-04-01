@@ -44,6 +44,10 @@ enum Commands {
         /// Matrix password
         #[arg(long, env = "MXDX_PASSWORD")]
         password: Option<String>,
+
+        /// Force a fresh device login, skipping session restore
+        #[arg(long, default_value_t = false)]
+        force_new_device: bool,
     },
 }
 
@@ -63,6 +67,7 @@ async fn main() -> Result<()> {
             homeserver,
             username,
             password,
+            force_new_device,
         } => {
             let args = WorkerArgs {
                 trust_anchor,
@@ -73,6 +78,7 @@ async fn main() -> Result<()> {
                 homeserver,
                 username,
                 password,
+                force_new_device,
             };
             let config = WorkerRuntimeConfig::load()?.with_cli_overrides(&args);
             mxdx_worker::run_worker(config).await?;

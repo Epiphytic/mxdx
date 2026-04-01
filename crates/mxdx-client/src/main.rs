@@ -22,6 +22,9 @@ struct Cli {
     /// Direct room ID (bypasses space discovery)
     #[arg(long, env = "MXDX_ROOM_ID", global = true)]
     room_id: Option<String>,
+    /// Force a fresh device login, skipping session restore
+    #[arg(long, global = true, default_value_t = false)]
+    force_new_device: bool,
     #[command(subcommand)]
     command: Commands,
 }
@@ -166,6 +169,7 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
     let cli_room_id = cli.room_id.clone();
+    let cli_force_new_device = cli.force_new_device;
 
     match cli.command {
         Commands::Run {
@@ -196,6 +200,7 @@ async fn main() -> Result<()> {
                 homeserver: cli.homeserver,
                 username: cli.username,
                 password: cli.password,
+                force_new_device: cli_force_new_device,
             };
             let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
             let accounts = config.resolve_accounts();
@@ -211,6 +216,7 @@ async fn main() -> Result<()> {
                 &accounts,
                 &room_name,
                 cli_room_id.as_deref(),
+                config.force_new_device,
             )
             .await?;
 
@@ -300,6 +306,7 @@ async fn main() -> Result<()> {
                 homeserver: cli.homeserver,
                 username: cli.username,
                 password: cli.password,
+                force_new_device: cli_force_new_device,
             };
             let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
             let accounts = config.resolve_accounts();
@@ -319,6 +326,7 @@ async fn main() -> Result<()> {
                 &accounts,
                 &room_name,
                 cli_room_id.as_deref(),
+                config.force_new_device,
             )
             .await?;
 
@@ -371,6 +379,7 @@ async fn main() -> Result<()> {
                 homeserver: cli.homeserver,
                 username: cli.username,
                 password: cli.password,
+                force_new_device: cli_force_new_device,
             };
             let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
             let accounts = config.resolve_accounts();
@@ -385,6 +394,7 @@ async fn main() -> Result<()> {
                 &accounts,
                 &room_name,
                 cli_room_id.as_deref(),
+                config.force_new_device,
             )
             .await?;
 
@@ -456,6 +466,7 @@ async fn main() -> Result<()> {
                 homeserver: cli.homeserver,
                 username: cli.username,
                 password: cli.password,
+                force_new_device: cli_force_new_device,
             };
             let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
             let accounts = config.resolve_accounts();
@@ -470,6 +481,7 @@ async fn main() -> Result<()> {
                 &accounts,
                 &room_name,
                 cli_room_id.as_deref(),
+                config.force_new_device,
             )
             .await?;
 
@@ -547,6 +559,7 @@ async fn main() -> Result<()> {
                 homeserver: cli.homeserver,
                 username: cli.username,
                 password: cli.password,
+                force_new_device: cli_force_new_device,
             };
             let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
             let accounts = config.resolve_accounts();
@@ -561,6 +574,7 @@ async fn main() -> Result<()> {
                 &accounts,
                 &room_name,
                 cli_room_id.as_deref(),
+                config.force_new_device,
             )
             .await?;
 

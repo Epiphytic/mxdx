@@ -22,6 +22,8 @@ pub struct ClientArgs {
     pub homeserver: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
+    /// When true, skip session restore and create a fresh device login.
+    pub force_new_device: bool,
 }
 
 /// Runtime configuration for the client, combining defaults + client config + CLI overrides.
@@ -29,6 +31,8 @@ pub struct ClientRuntimeConfig {
     pub defaults: DefaultsConfig,
     pub client: ClientConfig,
     pub credentials: Option<ClientCredentials>,
+    /// When true, skip session restore and create a fresh device login.
+    pub force_new_device: bool,
 }
 
 impl ClientRuntimeConfig {
@@ -41,6 +45,7 @@ impl ClientRuntimeConfig {
             defaults,
             client,
             credentials: None,
+            force_new_device: false,
         })
     }
 
@@ -50,6 +55,7 @@ impl ClientRuntimeConfig {
             defaults,
             client,
             credentials: None,
+            force_new_device: false,
         }
     }
 
@@ -67,6 +73,8 @@ impl ClientRuntimeConfig {
         if let Some(interval) = args.heartbeat_interval {
             self.client.session.heartbeat_interval = interval;
         }
+        self.force_new_device = args.force_new_device;
+
         // Build credentials if all three parts are present
         if let (Some(hs), Some(user), Some(pass)) =
             (&args.homeserver, &args.username, &args.password)
@@ -159,6 +167,7 @@ mod tests {
             homeserver: Some("matrix.example.com".into()),
             username: Some("alice".into()),
             password: Some("secret".into()),
+            force_new_device: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
 
@@ -212,6 +221,7 @@ mod tests {
             homeserver: None,
             username: None,
             password: None,
+            force_new_device: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
 
@@ -237,6 +247,7 @@ mod tests {
             homeserver: Some("https://matrix.example.com".into()),
             username: Some("alice".into()),
             password: Some("secret".into()),
+            force_new_device: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
         let accounts = cfg.resolve_accounts();
