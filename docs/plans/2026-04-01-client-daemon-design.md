@@ -381,3 +381,32 @@ When bound to `127.0.0.1` (default), same-user protection applies via OS. When b
 ### MCP
 
 MCP over stdio inherits the security of the parent process (the AI tool that spawned it). No additional auth needed.
+
+## Crypto Store Isolation
+
+Each (username, homeserver) pair gets its own SQLite crypto store directory and its own encryption passphrase in the OS keystore.
+
+### Store Directory
+
+```
+~/.mxdx/crypto/{role}/{account_hash}/
+```
+
+Where `account_hash = short_hash("{username}@{homeserver}")`. This replaces the current `short_hash(homeserver)` which would collide if two users share the same server.
+
+Example:
+```
+~/.mxdx/crypto/worker/a1b2c3d4/    ← hash of "alice@matrix.org"
+~/.mxdx/crypto/worker/e5f6g7h8/    ← hash of "bob@matrix.org"
+~/.mxdx/crypto/client/a1b2c3d4/    ← hash of "alice@matrix.org" (client role)
+```
+
+### Store Passphrase
+
+Each account gets its own encryption passphrase stored in the OS keystore:
+
+- Key: `mxdx:{username}@{normalized_server}:store_key`
+- Value: random 32-byte hex string, generated on first use
+- Used to encrypt all E2EE key material in that account's SQLite store
+
+This is already the current passphrase key format — no change needed to the keychain keys, only to the directory hashing to include the username.
