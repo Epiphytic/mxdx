@@ -108,6 +108,10 @@ fn cli_args_override_toml() {
         username: None,
         password: None,
         force_new_device: false,
+        max_sessions: None,
+        allowed_commands: vec![],
+        allowed_cwd: vec![],
+        authorized_users: vec![],
     };
     let cfg = cfg.with_cli_overrides(&args);
 

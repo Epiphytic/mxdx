@@ -125,9 +125,25 @@ impl WorkerRuntimeConfig {
         {
             self.credentials = Some(WorkerCredentials {
                 homeserver: hs,
-                username: user,
+                username: user.clone(),
                 password: pass,
             });
+
+            // Recompute default room name using CLI username as localpart when no
+            // explicit --room-name was provided and no config file accounts exist.
+            if args.room_name.is_none() && self.defaults.accounts.is_empty() {
+                let host = hostname::get()
+                    .map(|h| h.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| "unknown".into());
+                let os_user = whoami::username();
+                // CLI username is just the localpart (no @user:server prefix)
+                let localpart = user
+                    .split(':')
+                    .next()
+                    .unwrap_or(&user)
+                    .trim_start_matches('@');
+                self.resolved_room_name = format!("{host}.{os_user}.{localpart}");
+            }
         }
 
         self
@@ -323,6 +339,38 @@ mod tests {
         assert_eq!(creds.homeserver, "https://matrix.example.com");
         assert_eq!(creds.username, "bot");
         assert_eq!(creds.password, "secret");
+    }
+
+    #[test]
+    fn cli_username_recomputes_room_name_when_no_config_accounts() {
+        let defaults = DefaultsConfig::default(); // empty accounts
+        let worker = WorkerConfig::default();
+        let cfg = WorkerRuntimeConfig::from_parts(defaults, worker);
+        // Before CLI overrides, room name ends with ".anon"
+        assert!(cfg.resolved_room_name.ends_with(".anon"));
+
+        let args = WorkerArgs {
+            trust_anchor: None,
+            history_retention: None,
+            cross_signing_mode: None,
+            room_name: None, // no explicit room name
+            room_id: None,
+            homeserver: Some("https://matrix.example.com".into()),
+            username: Some("testworker".into()),
+            password: Some("secret".into()),
+            force_new_device: false,
+            max_sessions: None,
+            allowed_commands: vec![],
+            allowed_cwd: vec![],
+            authorized_users: vec![],
+        };
+        let cfg = cfg.with_cli_overrides(&args);
+        // After CLI overrides, room name should use CLI username as localpart
+        assert!(
+            cfg.resolved_room_name.ends_with(".testworker"),
+            "Expected room name to end with '.testworker', got: {}",
+            cfg.resolved_room_name
+        );
     }
 
     #[test]

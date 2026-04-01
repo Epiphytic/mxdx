@@ -53,3 +53,5 @@ serde_json = { workspace = true }
 libc = "0.2"
 dirs = "6"
 tempfile = { workspace = true }
+hostname = "0.4"
+whoami = "1"
