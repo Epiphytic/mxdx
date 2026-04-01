@@ -102,12 +102,17 @@ pub fn validate_allowlist(bin: &str, allowed: &[String]) -> Result<()> {
 }
 
 /// Validate a working directory against the CWD allowlist.
-/// Uses prefix matching: cwd must start with one of the allowed prefixes.
+/// Uses prefix matching with path boundary check: cwd must be exactly an
+/// allowed path or a subdirectory of one (prevents `/tmp` matching `/tmpevil`).
 pub fn validate_cwd_allowlist(cwd: &str, allowed: &[String]) -> Result<()> {
     if allowed.is_empty() {
         bail!("cwd allowlist is empty — all directories are denied");
     }
-    if !allowed.iter().any(|a| cwd.starts_with(a.as_str())) {
+    let matches = allowed.iter().any(|a| {
+        let prefix = a.as_str();
+        cwd == prefix || cwd.starts_with(&format!("{}/", prefix.trim_end_matches('/')))
+    });
+    if !matches {
         bail!(
             "cwd '{}' is not under any allowed directory: {:?}",
             cwd,
@@ -134,6 +139,8 @@ pub fn validate_command(
     validate_allowlist(bin, allowed_commands)?;
     if let Some(cwd) = cwd {
         validate_cwd_allowlist(cwd, allowed_cwd)?;
+    } else if !allowed_cwd.is_empty() {
+        bail!("cwd is required when a cwd allowlist is configured");
     }
 
     validate_bin(bin)?;
@@ -497,6 +504,34 @@ mod tests {
         let result = validate_cwd_allowlist("/etc", &allowed);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not under any allowed"));
+    }
+
+    #[test]
+    fn cwd_allowlist_rejects_path_confusion() {
+        // /tmp should NOT match /tmpevil (path boundary check)
+        let allowed = vec!["/tmp".into()];
+        assert!(validate_cwd_allowlist("/tmpevil", &allowed).is_err());
+        assert!(validate_cwd_allowlist("/tmp_backup", &allowed).is_err());
+        // But /tmp/subdir is fine
+        assert!(validate_cwd_allowlist("/tmp/subdir", &allowed).is_ok());
+        // Exact match is fine
+        assert!(validate_cwd_allowlist("/tmp", &allowed).is_ok());
+    }
+
+    #[test]
+    fn cwd_allowlist_trailing_slash_works() {
+        let allowed = vec!["/tmp/".into()];
+        assert!(validate_cwd_allowlist("/tmp/subdir", &allowed).is_ok());
+        assert!(validate_cwd_allowlist("/tmpevil", &allowed).is_err());
+    }
+
+    #[test]
+    fn validate_command_rejects_missing_cwd_when_allowlist_set() {
+        let allowed_cmds = vec!["echo".into()];
+        let allowed_cwd = vec!["/tmp".into()];
+        let result = validate_command("echo", &[], None, None, &allowed_cmds, &allowed_cwd);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cwd is required"));
     }
 
     #[test]
