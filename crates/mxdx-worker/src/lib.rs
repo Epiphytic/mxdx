@@ -241,37 +241,8 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
     let mut room = connect(&config).await?;
     let room_id_str = room.room_id().to_string();
 
-    // 10. Get or create state room
-    let localpart = user_id
-        .split(':')
-        .next()
-        .unwrap_or(user_id)
-        .trim_start_matches('@');
-    let state_room_keychain = Box::new(mxdx_types::identity::InMemoryKeychain::new());
-    let state_room = WorkerStateRoom::get_or_create(
-        room.client(),
-        &host,
-        &os_user,
-        localpart,
-        state_room_keychain.as_ref(),
-        &[], // trusted coordinators — populated later from config
-    )
-    .await?;
-    tracing::info!(state_room_id = %state_room.room_id(), "state room ready");
-
-    // 11. Read config from state room; use for room name if --room-name not given
-    if let Ok(Some(state_config)) = state_room.read_config(room.client()).await {
-        tracing::info!(
-            room_name = %state_config.room_name,
-            "loaded config from state room"
-        );
-        // If the room name was auto-derived (not explicitly set via CLI), use
-        // the state room config's room_name to keep naming consistent.
-        // The config.resolved_room_name is already set to the auto-default at
-        // this point; only override if user didn't pass --room-name explicitly.
-    }
-
-    // 12. Post WorkerInfo state event
+    // Post WorkerInfo state event (do this before entering the sync loop
+    // so other participants can see the worker is online)
     let worker_info = telemetry.collect_info()?;
     room.write_state(
         &room_id_str,
@@ -282,67 +253,21 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
     .await?;
     tracing::info!("posted WorkerInfo state event");
 
-    // 13. Write topology to state room
-    let topology = mxdx_types::events::state_room::StateRoomTopology {
-        space_id: String::new(), // populated when space is used
-        exec_room_id: room_id_str.clone(),
-        status_room_id: String::new(),
-        logs_room_id: String::new(),
-    };
-    if let Err(e) = state_room.write_topology(room.client(), &topology).await {
-        tracing::warn!(error = %e, "failed to write topology to state room");
-    }
-
-    // Advertise state room in exec room for coordinator discovery
-    if let Err(e) = state_room
-        .advertise_in_exec_room(
-            room.client(),
-            room.room_id(),
-            identity.device_id(),
-            &host,
-            &os_user,
-        )
-        .await
-    {
-        tracing::warn!(error = %e, "failed to advertise state room in exec room");
-    }
-
     // Track active sessions and their thread root event IDs
     let mut thread_roots: HashMap<String, String> = HashMap::new();
 
-    // 14. Recover sessions from state room (replaces disk recovery)
-    match state_room.read_sessions(room.client()).await {
-        Ok(recovered) if !recovered.is_empty() => {
-            tracing::info!(
-                count = recovered.len(),
-                "recovered sessions from state room"
-            );
-            for s in &recovered {
-                thread_roots.insert(s.uuid.clone(), s.thread_root.clone());
-            }
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!(error = %e, "failed to recover sessions from state room");
-            // Fall back to disk-based recovery
-            match session_persist::recover_sessions(None) {
-                Ok(recovered) if !recovered.is_empty() => {
-                    tracing::info!(
-                        count = recovered.len(),
-                        "recovered orphaned sessions from disk (fallback)"
-                    );
-                    for s in &recovered {
-                        thread_roots
-                            .insert(s.uuid.clone(), s.thread_root.clone().unwrap_or_default());
-                    }
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to recover sessions from disk");
-                }
-            }
-        }
-    }
+    // State room setup is deferred to after the first sync iteration to avoid
+    // consuming timeline events during room discovery (sync_once calls in
+    // find_worker_state_room / get_or_create would eat events meant for the
+    // main loop). The worker can process tasks before state room is ready.
+    let localpart = user_id
+        .split(':')
+        .next()
+        .unwrap_or(user_id)
+        .trim_start_matches('@')
+        .to_string();
+    let mut state_room_ready = false;
+    let mut state_room: Option<WorkerStateRoom> = None;
 
     // Periodic trust sync (every ~60 sync cycles, ~30 minutes at 30s sync timeout)
     let mut sync_cycle_count: u64 = 0;
@@ -353,6 +278,62 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
 
     // Main sync loop
     loop {
+        // Deferred state room setup — runs once after the sync loop starts
+        // so that room discovery syncs don't consume task events.
+        if !state_room_ready {
+            state_room_ready = true;
+            let sr_keychain = Box::new(mxdx_types::identity::InMemoryKeychain::new());
+            match WorkerStateRoom::get_or_create(
+                room.client(),
+                &host,
+                &os_user,
+                &localpart,
+                sr_keychain.as_ref(),
+                &[],
+            )
+            .await
+            {
+                Ok(sr) => {
+                    tracing::info!(state_room_id = %sr.room_id(), "state room ready");
+
+                    // Recover sessions from state room
+                    if let Ok(recovered) = sr.read_sessions(room.client()).await {
+                        for s in &recovered {
+                            thread_roots.insert(s.uuid.clone(), s.thread_root.clone());
+                        }
+                        if !recovered.is_empty() {
+                            tracing::info!(count = recovered.len(), "recovered sessions from state room");
+                        }
+                    }
+
+                    // Write topology
+                    let topo = mxdx_types::events::state_room::StateRoomTopology {
+                        space_id: String::new(),
+                        exec_room_id: room_id_str.clone(),
+                        status_room_id: String::new(),
+                        logs_room_id: String::new(),
+                    };
+                    let _ = sr.write_topology(room.client(), &topo).await;
+
+                    // Advertise in exec room
+                    let _ = sr
+                        .advertise_in_exec_room(
+                            room.client(),
+                            room.room_id(),
+                            identity.device_id(),
+                            &host,
+                            &os_user,
+                        )
+                        .await;
+
+                    state_room = Some(sr);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "state room setup failed, continuing without it");
+                }
+            }
+        }
+
         // Periodic cross-server trust sync (multi-homeserver only)
         sync_cycle_count += 1;
         if sync_cycle_count % trust_sync_interval == 0 {
