@@ -44,6 +44,10 @@ impl SessionTracker {
     pub fn push_output(&mut self, uuid: &str, line: String) {
         if let Some(session) = self.sessions.get_mut(uuid) {
             let line_len = line.len();
+            // Reject lines larger than the entire buffer to prevent unbounded growth
+            if line_len > session.max_buffer_bytes {
+                return;
+            }
             while session.buffer_bytes + line_len > session.max_buffer_bytes {
                 if let Some(old) = session.output_buffer.pop_front() {
                     session.buffer_bytes -= old.len();
@@ -127,5 +131,16 @@ mod tests {
         let rx2 = tracker.subscribe("uuid-1");
         assert!(rx2.is_some());
         assert!(tracker.subscribe("nonexistent").is_none());
+    }
+
+    #[test]
+    fn oversized_line_rejected() {
+        let mut tracker = SessionTracker::new();
+        tracker.track("uuid-1", "!room:example.com");
+        // Push a line larger than the 64KB buffer
+        let huge = "x".repeat(DEFAULT_BUFFER_SIZE + 1);
+        tracker.push_output("uuid-1", huge);
+        // Should be rejected — buffer stays empty
+        assert!(tracker.buffered_output("uuid-1").is_empty());
     }
 }

@@ -4,7 +4,7 @@ pub mod subscriptions;
 pub mod transport;
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{info, error};
 
 use crate::config::ClientRuntimeConfig;
@@ -16,10 +16,15 @@ pub async fn run_daemon(
     config: ClientRuntimeConfig,
     profile: &str,
 ) -> anyhow::Result<()> {
-    // Write PID file
+    // Write PID file (ensure daemon dir has restricted permissions)
     let pid_path = transport::unix::pid_path(profile);
     if let Some(parent) = pid_path.parent() {
         std::fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+        }
     }
     std::fs::write(&pid_path, std::process::id().to_string())?;
 
@@ -40,8 +45,7 @@ pub async fn run_daemon(
     info!(profile, "daemon ready");
 
     // Idle timeout tracking
-    let idle_timeout = Duration::from_secs(config.client.daemon.idle_timeout_seconds);
-    let last_activity = Instant::now();
+    let idle_timeout_secs = config.client.daemon.idle_timeout_seconds;
 
     // Main loop: check for shutdown signals and idle timeout
     loop {
@@ -51,10 +55,10 @@ pub async fn run_daemon(
                 break;
             }
             _ = tokio::time::sleep(Duration::from_secs(10)) => {
-                // Check idle timeout
-                if idle_timeout.as_secs() > 0 {
+                // Check idle timeout (0 = never auto-shutdown)
+                if idle_timeout_secs > 0 {
                     let sessions = handler.sessions.lock().await;
-                    if sessions.active_count() == 0 && last_activity.elapsed() > idle_timeout {
+                    if sessions.active_count() == 0 && handler.idle_seconds() > idle_timeout_secs {
                         info!("idle timeout reached, shutting down");
                         break;
                     }

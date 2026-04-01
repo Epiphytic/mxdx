@@ -1,8 +1,9 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::Mutex;
 
-use crate::protocol::{Request, Response, ErrorResponse, Notification, RequestId};
+use crate::protocol::{Request, Response, ErrorResponse, RequestId};
 use crate::protocol::error;
 use crate::protocol::methods::*;
 use super::sessions::SessionTracker;
@@ -15,19 +16,46 @@ pub struct Handler {
     pub subscriptions: Arc<Mutex<SubscriptionRegistry>>,
     pub started_at: Instant,
     pub profile_name: String,
+    /// Epoch millis of last client activity, for idle timeout tracking.
+    pub last_activity_ms: AtomicU64,
 }
 
 impl Handler {
     pub fn new(profile_name: &str) -> Self {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
         Self {
             sessions: Arc::new(Mutex::new(SessionTracker::new())),
             subscriptions: Arc::new(Mutex::new(SubscriptionRegistry::new())),
             started_at: Instant::now(),
             profile_name: profile_name.to_string(),
+            last_activity_ms: AtomicU64::new(now_ms),
         }
     }
 
+    /// Record client activity (resets idle timeout).
+    pub fn touch(&self) {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        self.last_activity_ms.store(now_ms, Ordering::Relaxed);
+    }
+
+    /// Seconds since last client activity.
+    pub fn idle_seconds(&self) -> u64 {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        let last = self.last_activity_ms.load(Ordering::Relaxed);
+        (now_ms.saturating_sub(last)) / 1000
+    }
+
     pub async fn handle_request(&self, request: &Request, sink: &NotificationSink) -> String {
+        self.touch();
         match request.method.as_str() {
             "daemon.status" => self.handle_daemon_status(&request.id).await,
             "daemon.shutdown" => self.handle_daemon_shutdown(&request.id).await,
@@ -91,7 +119,7 @@ impl Handler {
         params: &Option<serde_json::Value>,
         _sink: &NotificationSink,
     ) -> String {
-        let params = match parse_params::<SessionRunParams>(params) {
+        let _params = match parse_params::<SessionRunParams>(id, params) {
             Ok(p) => p,
             Err(e) => return e,
         };
@@ -111,7 +139,7 @@ impl Handler {
         id: &RequestId,
         params: &Option<serde_json::Value>,
     ) -> String {
-        let _params = match parse_params::<SessionCancelParams>(params) {
+        let _params = match parse_params::<SessionCancelParams>(id, params) {
             Ok(p) => p,
             Err(e) => return e,
         };
@@ -144,7 +172,7 @@ impl Handler {
         id: &RequestId,
         params: &Option<serde_json::Value>,
     ) -> String {
-        let params = match parse_params::<SessionLogsParams>(params) {
+        let params = match parse_params::<SessionLogsParams>(id, params) {
             Ok(p) => p,
             Err(e) => return e,
         };
@@ -172,7 +200,7 @@ impl Handler {
         id: &RequestId,
         params: &Option<serde_json::Value>,
     ) -> String {
-        let _params = match parse_params::<SessionAttachParams>(params) {
+        let _params = match parse_params::<SessionAttachParams>(id, params) {
             Ok(p) => p,
             Err(e) => return e,
         };
@@ -191,7 +219,7 @@ impl Handler {
         params: &Option<serde_json::Value>,
         sink: &NotificationSink,
     ) -> String {
-        let params = match parse_params::<EventsSubscribeParams>(params) {
+        let params = match parse_params::<EventsSubscribeParams>(id, params) {
             Ok(p) => p,
             Err(e) => return e,
         };
@@ -210,7 +238,7 @@ impl Handler {
         id: &RequestId,
         params: &Option<serde_json::Value>,
     ) -> String {
-        let params = match parse_params::<EventsUnsubscribeParams>(params) {
+        let params = match parse_params::<EventsUnsubscribeParams>(id, params) {
             Ok(p) => p,
             Err(e) => return e,
         };
@@ -229,7 +257,7 @@ impl Handler {
         id: &RequestId,
         params: &Option<serde_json::Value>,
     ) -> String {
-        let _params = match parse_params::<AddTransportParams>(params) {
+        let _params = match parse_params::<AddTransportParams>(id, params) {
             Ok(p) => p,
             Err(e) => return e,
         };
@@ -248,7 +276,7 @@ impl Handler {
         id: &RequestId,
         params: &Option<serde_json::Value>,
     ) -> String {
-        let _params = match parse_params::<RemoveTransportParams>(params) {
+        let _params = match parse_params::<RemoveTransportParams>(id, params) {
             Ok(p) => p,
             Err(e) => return e,
         };
@@ -270,14 +298,15 @@ impl Handler {
 }
 
 /// Parse typed params from JSON-RPC params value.
-/// Returns the parsed params or a JSON-RPC error string.
+/// Returns the parsed params or a JSON-RPC error string with the correct request ID.
 fn parse_params<T: serde::de::DeserializeOwned>(
+    id: &RequestId,
     params: &Option<serde_json::Value>,
 ) -> Result<T, String> {
     match params {
         Some(v) => serde_json::from_value(v.clone()).map_err(|e| {
             serde_json::to_string(&ErrorResponse::new(
-                RequestId::Number(0),
+                id.clone(),
                 error::INVALID_PARAMS,
                 format!("invalid params: {}", e),
             ))
@@ -285,7 +314,7 @@ fn parse_params<T: serde::de::DeserializeOwned>(
         }),
         None => serde_json::from_value(serde_json::json!({})).map_err(|e| {
             serde_json::to_string(&ErrorResponse::new(
-                RequestId::Number(0),
+                id.clone(),
                 error::INVALID_PARAMS,
                 format!("params required: {}", e),
             ))
@@ -396,14 +425,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn invalid_params_returns_error() {
+    async fn invalid_params_returns_error_with_correct_id() {
         let handler = Handler::new("default");
         let (sink, _rx) = tokio::sync::mpsc::unbounded_channel();
-        // session.run requires `bin` field
-        let req = Request::new(1i64, "session.run", Some(serde_json::json!({})));
+        // session.run requires `bin` field — use id 42 to verify it's echoed back
+        let req = Request::new(42i64, "session.run", Some(serde_json::json!({})));
         let resp = handler.handle_request(&req, &sink).await;
         let parsed: ErrorResponse = serde_json::from_str(&resp).unwrap();
         assert_eq!(parsed.error.code, error::INVALID_PARAMS);
+        assert_eq!(parsed.id, RequestId::Number(42));
     }
 
     #[tokio::test]
