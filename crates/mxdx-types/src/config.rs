@@ -145,6 +145,8 @@ pub struct ClientConfig {
     pub coordinator_room: Option<String>,
     #[serde(default)]
     pub session: SessionDefaults,
+    #[serde(default)]
+    pub daemon: DaemonConfig,
 }
 
 impl Default for ClientConfig {
@@ -153,6 +155,7 @@ impl Default for ClientConfig {
             default_worker_room: None,
             coordinator_room: None,
             session: SessionDefaults::default(),
+            daemon: DaemonConfig::default(),
         }
     }
 }
@@ -206,6 +209,56 @@ impl Default for CoordinatorConfig {
 
 fn default_failure_action() -> String {
     "escalate".into()
+}
+
+// ---------------------------------------------------------------------------
+// Daemon config types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DaemonConfig {
+    #[serde(default = "default_idle_timeout")]
+    pub idle_timeout_seconds: u64,
+    #[serde(default)]
+    pub profiles: std::collections::HashMap<String, ProfileConfig>,
+    #[serde(default)]
+    pub websocket: Option<WebSocketTransportConfig>,
+}
+
+impl Default for DaemonConfig {
+    fn default() -> Self {
+        Self {
+            idle_timeout_seconds: default_idle_timeout(),
+            profiles: std::collections::HashMap::new(),
+            websocket: None,
+        }
+    }
+}
+
+fn default_idle_timeout() -> u64 {
+    1200
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct ProfileConfig {
+    #[serde(default)]
+    pub accounts: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebSocketTransportConfig {
+    #[serde(default = "default_ws_bind")]
+    pub bind: String,
+    #[serde(default = "default_ws_port")]
+    pub port: u16,
+}
+
+fn default_ws_bind() -> String {
+    "127.0.0.1".into()
+}
+
+fn default_ws_port() -> u16 {
+    9390
 }
 
 // ---------------------------------------------------------------------------
@@ -572,6 +625,31 @@ password = "secret"
         let parsed: DefaultsConfig = toml::from_str(&result).unwrap();
         assert!(parsed.accounts[0].password.is_none());
         assert_eq!(parsed.accounts[0].user_id, "@worker:example.com");
+    }
+
+    #[test]
+    fn daemon_config_deserializes_with_defaults() {
+        let toml_str = "";
+        let cfg: DaemonConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.idle_timeout_seconds, 1200);
+        assert!(cfg.profiles.is_empty());
+    }
+
+    #[test]
+    fn daemon_config_with_profiles() {
+        let toml_str = r#"
+idle_timeout_seconds = 0
+
+[profiles.default]
+
+[profiles.staging]
+accounts = ["@worker:staging.mxdx.dev"]
+"#;
+        let cfg: DaemonConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.idle_timeout_seconds, 0);
+        assert_eq!(cfg.profiles.len(), 2);
+        assert!(cfg.profiles["default"].accounts.is_none());
+        assert_eq!(cfg.profiles["staging"].accounts.as_ref().unwrap().len(), 1);
     }
 
     #[test]
