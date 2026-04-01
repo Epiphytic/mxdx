@@ -1,6 +1,7 @@
 pub mod attach;
 pub mod cancel;
 pub mod config;
+pub mod daemon;
 pub mod identity;
 pub mod liveness;
 pub mod logs;
