@@ -31,6 +31,8 @@ uuid = { workspace = true }
 base64 = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "5"
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
 
 [dev-dependencies]
 tokio = { workspace = true }
