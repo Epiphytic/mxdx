@@ -140,6 +140,33 @@ impl ClientRuntimeConfig {
 
         accounts
     }
+
+    /// Resolve accounts for a specific profile.
+    /// If the profile specifies accounts, filter to just those.
+    /// If not (or profile doesn't exist), use all accounts from defaults.
+    pub fn resolve_accounts_for_profile(&self, profile: &str) -> Vec<mxdx_matrix::ServerAccount> {
+        let profile_config = self.client.daemon.profiles.get(profile);
+        let filter_accounts = profile_config.and_then(|p| p.accounts.as_ref());
+
+        let all_accounts = self.resolve_accounts();
+
+        match filter_accounts {
+            Some(filter) => {
+                all_accounts.into_iter()
+                    .filter(|a| {
+                        let user_at_server = format!("@{}:{}",
+                            a.username,
+                            a.homeserver
+                                .trim_start_matches("https://")
+                                .trim_start_matches("http://")
+                        );
+                        filter.iter().any(|f| f == &user_at_server)
+                    })
+                    .collect()
+            }
+            None => all_accounts,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -293,5 +320,58 @@ mod tests {
         let accounts = cfg.resolve_accounts();
 
         assert!(accounts.is_empty());
+    }
+
+    #[test]
+    fn resolve_accounts_for_profile_filters_by_account() {
+        use mxdx_types::config::{AccountConfig, DaemonConfig, ProfileConfig};
+        use std::collections::HashMap;
+
+        let defaults = DefaultsConfig {
+            accounts: vec![
+                AccountConfig {
+                    user_id: "@alice:server-a.com".into(),
+                    homeserver: "https://server-a.com".into(),
+                    password: Some("pass-a".into()),
+                },
+                AccountConfig {
+                    user_id: "@bob:server-b.com".into(),
+                    homeserver: "https://server-b.com".into(),
+                    password: Some("pass-b".into()),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let mut profiles = HashMap::new();
+        profiles.insert("staging".to_string(), ProfileConfig {
+            accounts: Some(vec!["@alice:server-a.com".to_string()]),
+        });
+        profiles.insert("default".to_string(), ProfileConfig {
+            accounts: None,  // use all
+        });
+
+        let client = ClientConfig {
+            daemon: DaemonConfig {
+                profiles,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let cfg = ClientRuntimeConfig::from_parts(defaults, client);
+
+        // "default" profile with no filter → all accounts
+        let all = cfg.resolve_accounts_for_profile("default");
+        assert_eq!(all.len(), 2);
+
+        // "staging" profile → only alice
+        let staging = cfg.resolve_accounts_for_profile("staging");
+        assert_eq!(staging.len(), 1);
+        assert_eq!(staging[0].username, "alice");
+
+        // unknown profile → all accounts (fallback)
+        let unknown = cfg.resolve_accounts_for_profile("nonexistent");
+        assert_eq!(unknown.len(), 2);
     }
 }
