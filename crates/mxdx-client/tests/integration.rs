@@ -207,18 +207,18 @@ fn reconnect_finds_own_sessions_only() {
 #[test]
 fn attach_mode_interactive_with_webrtc() {
     use mxdx_client::attach::{determine_attach_mode, AttachMode};
-    assert_eq!(determine_attach_mode(true, true), AttachMode::Interactive);
+    assert_eq!(determine_attach_mode(true, true, false), AttachMode::Interactive);
 }
 
 #[test]
 fn attach_mode_interactive_without_webrtc() {
     use mxdx_client::attach::{determine_attach_mode, AttachMode};
-    assert_eq!(determine_attach_mode(true, false), AttachMode::TailThread);
+    assert_eq!(determine_attach_mode(true, false, false), AttachMode::TailThread);
 }
 
 #[test]
 fn attach_mode_non_interactive() {
     use mxdx_client::attach::{determine_attach_mode, AttachMode};
-    assert_eq!(determine_attach_mode(false, true), AttachMode::TailThread);
-    assert_eq!(determine_attach_mode(false, false), AttachMode::TailThread);
+    assert_eq!(determine_attach_mode(false, true, false), AttachMode::TailThread);
+    assert_eq!(determine_attach_mode(false, false, false), AttachMode::TailThread);
 }
