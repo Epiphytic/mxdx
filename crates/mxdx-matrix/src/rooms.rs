@@ -126,25 +126,60 @@ impl MatrixClient {
         // Sync again to get full state of newly joined rooms
         self.sync_once().await?;
 
-        let mut space_id: Option<OwnedRoomId> = None;
-        let mut exec_room_id: Option<OwnedRoomId> = None;
-        let mut status_room_id: Option<OwnedRoomId> = None;
-        let mut logs_room_id: Option<OwnedRoomId> = None;
+        // Collect all candidates per room type, with member count for disambiguation.
+        // When multiple rooms match the same topic (e.g. from previous test runs),
+        // the active room will have more members (worker + client joined).
+        let mut space_candidates: Vec<(OwnedRoomId, u64)> = Vec::new();
+        let mut exec_candidates: Vec<(OwnedRoomId, u64)> = Vec::new();
+        let mut status_candidates: Vec<(OwnedRoomId, u64)> = Vec::new();
+        let mut logs_candidates: Vec<(OwnedRoomId, u64)> = Vec::new();
 
         for room in self.inner().joined_rooms() {
             let topic = room.topic().unwrap_or_default();
             let rid = room.room_id().to_owned();
+            let member_count = room.active_members_count();
 
             if topic == expected_space_topic {
-                space_id = Some(rid);
+                space_candidates.push((rid, member_count));
             } else if topic == expected_exec_topic {
-                exec_room_id = Some(rid);
+                exec_candidates.push((rid, member_count));
             } else if topic == expected_status_topic {
-                status_room_id = Some(rid);
+                status_candidates.push((rid, member_count));
             } else if topic == expected_logs_topic {
-                logs_room_id = Some(rid);
+                logs_candidates.push((rid, member_count));
             }
         }
+
+        // Pick the room with the most active members (active room has worker + client)
+        let pick_best = |candidates: Vec<(OwnedRoomId, u64)>| -> Option<OwnedRoomId> {
+            candidates
+                .into_iter()
+                .max_by_key(|(_, count)| *count)
+                .map(|(rid, _)| rid)
+        };
+
+        // Log disambiguation when multiple candidates found
+        for (label, candidates) in [
+            ("space", &space_candidates),
+            ("exec", &exec_candidates),
+            ("status", &status_candidates),
+            ("logs", &logs_candidates),
+        ] {
+            if candidates.len() > 1 {
+                tracing::warn!(
+                    launcher_id = %launcher_id,
+                    room_type = %label,
+                    candidate_count = candidates.len(),
+                    candidates = ?candidates,
+                    "multiple rooms match launcher topic, selecting by highest member count"
+                );
+            }
+        }
+
+        let space_id = pick_best(space_candidates);
+        let exec_room_id = pick_best(exec_candidates);
+        let status_room_id = pick_best(status_candidates);
+        let logs_room_id = pick_best(logs_candidates);
 
         match (space_id, exec_room_id, status_room_id, logs_room_id) {
             (Some(s), Some(e), Some(st), Some(l)) => Ok(Some(LauncherTopology {
