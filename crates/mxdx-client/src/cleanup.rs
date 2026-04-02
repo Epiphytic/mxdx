@@ -166,6 +166,15 @@ pub async fn run_cleanup(
             eprintln!("You will need to re-login. Use --force to skip this prompt.");
             return Ok(());
         }
+        // Leave all rooms first (must happen before logout invalidates the token)
+        eprintln!("Leaving all rooms before logout...");
+        let rooms = list_joined_rooms(homeserver, access_token).await?;
+        for room_id in &rooms {
+            let _ = leave_and_forget(homeserver, access_token, room_id).await;
+        }
+        if !rooms.is_empty() {
+            eprintln!("Left {} room(s)", rooms.len());
+        }
         eprintln!("Logging out all sessions...");
         logout_all(homeserver, access_token).await?;
         eprintln!("All sessions logged out. All devices deleted. Re-login required.");
