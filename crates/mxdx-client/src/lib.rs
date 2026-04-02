@@ -1,4 +1,5 @@
 pub mod attach;
+pub mod cleanup;
 pub mod cancel;
 pub mod cli;
 pub mod config;

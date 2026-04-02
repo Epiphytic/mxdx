@@ -570,6 +570,65 @@ async fn run_direct(cli: &Cli) -> Result<()> {
                 eprintln!("Cancel sent for session {}", uuid);
             }
         }
+        Commands::Cleanup {
+            targets,
+            force,
+            delete_all_sessions,
+        } => {
+            let client_args = ClientArgs {
+                worker_room: None,
+                coordinator_room: None,
+                timeout: None,
+                heartbeat_interval: None,
+                interactive: false,
+                no_room_output: false,
+                homeserver: cli.homeserver.clone(),
+                username: cli.username.clone(),
+                password: cli.password.clone(),
+                force_new_device: cli_force_new_device,
+            };
+            let config = ClientRuntimeConfig::load()?.with_cli_overrides(&client_args);
+            let creds = config.require_credentials()?;
+
+            // Login directly via REST API for cleanup (no need for full Matrix SDK connection)
+            let homeserver = &creds.homeserver;
+            let base = homeserver.trim_end_matches('/');
+            let login_resp = reqwest::Client::new()
+                .post(format!("{}/_matrix/client/v3/login", base))
+                .json(&serde_json::json!({
+                    "type": "m.login.password",
+                    "identifier": { "type": "m.id.user", "user": &creds.username },
+                    "password": &creds.password,
+                }))
+                .send()
+                .await?;
+
+            if !login_resp.status().is_success() {
+                anyhow::bail!("Login failed: {}", login_resp.status());
+            }
+            let login_data: serde_json::Value = login_resp.json().await?;
+            let access_token = login_data["access_token"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("No access token in login response"))?;
+            let device_id = login_data["device_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("No device_id in login response"))?;
+            let user_id = login_data["user_id"]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("No user_id in login response"))?;
+
+            mxdx_client::cleanup::run_cleanup(
+                homeserver,
+                access_token,
+                device_id,
+                user_id,
+                &creds.password,
+                targets,
+                *force,
+                *delete_all_sessions,
+            )
+            .await?;
+        }
         Commands::Trust { action } => match action {
             TrustAction::List => tracing::info!("listing trusted devices"),
             TrustAction::Add { device } => tracing::info!(device = %device, "adding trust"),

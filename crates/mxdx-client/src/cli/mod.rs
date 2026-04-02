@@ -131,6 +131,17 @@ pub enum Commands {
         #[command(subcommand)]
         action: DaemonAction,
     },
+    /// Clean up stale Matrix state (devices, rooms)
+    Cleanup {
+        /// Targets to clean: devices, rooms, all
+        targets: String,
+        /// Skip confirmation prompts
+        #[arg(long)]
+        force: bool,
+        /// Log out ALL sessions and delete ALL devices (nuclear)
+        #[arg(long)]
+        delete_all_sessions: bool,
+    },
     /// Internal: run as daemon (hidden)
     #[command(name = "_daemon", hide = true)]
     InternalDaemon {
