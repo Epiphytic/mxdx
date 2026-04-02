@@ -601,7 +601,19 @@ impl MatrixClient {
                 None => continue,
             };
 
+            // Room may not have synced encryption state yet — treat as not-ready
+            // rather than spinning. Unencrypted rooms pass immediately.
             if !room.encryption_state().is_encrypted() {
+                // If the room has active members, it might just not have synced
+                // the encryption state event yet. Keep waiting.
+                let member_count = room.joined_members_count();
+                if member_count <= 1 {
+                    // We're the only member and encryption state hasn't synced —
+                    // no one to exchange keys with. Proceed; the SDK will handle
+                    // key sharing when new members join.
+                    tracing::info!(room_id = %room_id, "single-member room, skipping key exchange wait");
+                    return Ok(());
+                }
                 continue;
             }
 
@@ -609,6 +621,12 @@ impl MatrixClient {
                 .members(matrix_sdk::RoomMemberships::ACTIVE)
                 .await
                 .map_err(|e| MatrixClientError::Other(e.into()))?;
+
+            // Single member (just us) — no one to exchange keys with yet
+            if members.len() <= 1 {
+                tracing::info!(room_id = %room_id, members = members.len(), "no other members yet, key exchange complete");
+                return Ok(());
+            }
 
             let mut all_keys_available = true;
             for member in &members {
@@ -626,7 +644,7 @@ impl MatrixClient {
                 }
             }
 
-            if all_keys_available && !members.is_empty() {
+            if all_keys_available {
                 return Ok(());
             }
         }
