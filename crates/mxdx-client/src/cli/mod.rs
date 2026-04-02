@@ -49,6 +49,9 @@ pub enum Commands {
         /// Timeout in seconds
         #[arg(long)]
         timeout: Option<u64>,
+        /// Working directory for the command on the worker
+        #[arg(long)]
+        cwd: Option<String>,
         /// Worker room name
         #[arg(long)]
         worker_room: Option<String>,
@@ -75,6 +78,9 @@ pub enum Commands {
         /// Timeout in seconds
         #[arg(long)]
         timeout: Option<u64>,
+        /// Working directory for the command on the worker
+        #[arg(long)]
+        cwd: Option<String>,
         /// Worker room name
         #[arg(long)]
         worker_room: Option<String>,

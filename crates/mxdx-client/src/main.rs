@@ -99,6 +99,7 @@ async fn run_direct(cli: &Cli) -> Result<()> {
             interactive,
             no_room_output,
             timeout,
+            cwd,
             worker_room,
             skip_liveness_check,
         }
@@ -109,6 +110,7 @@ async fn run_direct(cli: &Cli) -> Result<()> {
             interactive,
             no_room_output,
             timeout,
+            cwd,
             worker_room,
             skip_liveness_check,
         } => {
@@ -204,6 +206,7 @@ async fn run_direct(cli: &Cli) -> Result<()> {
                 timeout.or(config.client.session.timeout_seconds),
                 config.client.session.heartbeat_interval,
                 &sender_id,
+                cwd.as_deref(),
             );
 
             let task_uuid = task.uuid.clone();

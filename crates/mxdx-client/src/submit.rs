@@ -9,6 +9,7 @@ pub fn build_task(
     timeout_seconds: Option<u64>,
     heartbeat_interval_seconds: u64,
     sender_id: &str,
+    cwd: Option<&str>,
 ) -> SessionTask {
     SessionTask {
         uuid: uuid::Uuid::new_v4().to_string(),
@@ -16,7 +17,7 @@ pub fn build_task(
         bin: bin.to_string(),
         args: args.to_vec(),
         env: None,
-        cwd: None,
+        cwd: cwd.map(|s| s.to_string()),
         interactive,
         no_room_output,
         timeout_seconds,
@@ -50,6 +51,7 @@ mod tests {
             Some(60),
             15,
             "@alice:example.com",
+            None,
         );
         assert_eq!(task.bin, "echo");
         assert_eq!(task.args, vec!["hello", "world"]);
@@ -63,23 +65,23 @@ mod tests {
 
     #[test]
     fn build_task_uuid_is_unique() {
-        let t1 = build_task("echo", &[], false, false, None, 30, "@a:b");
-        let t2 = build_task("echo", &[], false, false, None, 30, "@a:b");
+        let t1 = build_task("echo", &[], false, false, None, 30, "@a:b", None);
+        let t2 = build_task("echo", &[], false, false, None, 30, "@a:b", None);
         assert_ne!(t1.uuid, t2.uuid);
     }
 
     #[test]
     fn build_task_interactive_flag_propagates() {
-        let task = build_task("bash", &[], true, false, None, 30, "@u:h");
+        let task = build_task("bash", &[], true, false, None, 30, "@u:h", None);
         assert!(task.interactive);
 
-        let task2 = build_task("bash", &[], false, false, None, 30, "@u:h");
+        let task2 = build_task("bash", &[], false, false, None, 30, "@u:h", None);
         assert!(!task2.interactive);
     }
 
     #[test]
     fn build_task_defaults_are_none() {
-        let task = build_task("ls", &[], false, false, None, 30, "@u:h");
+        let task = build_task("ls", &[], false, false, None, 30, "@u:h", None);
         assert!(task.env.is_none());
         assert!(task.cwd.is_none());
         assert!(task.plan.is_none());

@@ -10,7 +10,7 @@ use mxdx_types::events::session::{
 fn submit_task_has_valid_uuid_and_fields() {
     let args = vec!["--flag".to_string(), "value".to_string()];
     let task = mxdx_client::submit::build_task(
-        "my-bin", &args, true, false, Some(120), 15, "@sender:example.com",
+        "my-bin", &args, true, false, Some(120), 15, "@sender:example.com", None,
     );
 
     assert!(!task.uuid.is_empty());

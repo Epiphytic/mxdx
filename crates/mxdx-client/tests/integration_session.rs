@@ -99,6 +99,7 @@ async fn client_submit_worker_receives_e2e() {
         Some(60),
         30,
         &client_mc.user_id().to_string(),
+        None,
     );
 
     let task_uuid = task.uuid.clone();
@@ -167,6 +168,7 @@ async fn client_tail_output_e2e() {
         None,
         30,
         &client_mc.user_id().to_string(),
+        None,
     );
     let task_event_id = client_mc
         .send_event(
@@ -338,6 +340,7 @@ async fn client_logs_reassemble_e2e() {
         None,
         30,
         &client_mc.user_id().to_string(),
+        None,
     );
     let task_event_id = client_mc
         .send_event(
@@ -433,6 +436,7 @@ async fn client_cancel_worker_receives_e2e() {
         Some(600),
         30,
         &client_mc.user_id().to_string(),
+        None,
     );
     let task_uuid = task.uuid.clone();
     let task_event_id = client_mc

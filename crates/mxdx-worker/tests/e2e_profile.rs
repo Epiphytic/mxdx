@@ -182,6 +182,10 @@ fn run_client(hs: &str, user: &str, pass: &str, worker_room: &str, extra_args: &
         full.push(extra_args[0]); // subcommand
         full.extend_from_slice(&["--worker-room", worker_room]);
         full.push("--skip-liveness-check");
+        // Pass --cwd /tmp for run/exec commands (worker requires CWD when allowlist is configured)
+        if extra_args[0] == "run" || extra_args[0] == "exec" {
+            full.extend_from_slice(&["--cwd", "/tmp"]);
+        }
         full.extend_from_slice(&extra_args[1..]); // remaining args
     }
     Command::new("timeout")
