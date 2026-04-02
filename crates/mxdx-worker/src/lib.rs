@@ -147,16 +147,24 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
         let topology = multi
             .get_or_create_launcher_space(&config.resolved_room_name)
             .await?;
-        topology.exec_room_id
+        let rid = topology.exec_room_id;
+
+        // Key exchange: ensure we have encryption keys for all room members.
+        // On fresh login this establishes keys; on session restore the crypto
+        // store already has them so this completes quickly.
+        tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
+        multi
+            .wait_for_key_exchange(&rid, std::time::Duration::from_secs(15))
+            .await?;
+
+        rid
     };
 
     tracing::info!(room_id = %room_id, "worker room ready");
 
     // Bootstrap cross-signing: on fresh login this sets up keys;
     // on session restore this no-ops quickly (keys already exist).
-    if any_fresh {
-        multi.bootstrap_and_sync_trust(&room_id).await;
-    }
+    multi.bootstrap_and_sync_trust(&room_id).await;
 
     // Invite authorized users to the exec room
     for user_str in &config.worker.authorized_users {

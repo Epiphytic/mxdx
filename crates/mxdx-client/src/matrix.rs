@@ -379,15 +379,24 @@ pub async fn connect_multi(
         // Find or create the launcher space
         let topology = multi.get_or_create_launcher_space(worker_room).await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        tracing::info!(exec_room = %topology.exec_room_id, "connected to worker exec room");
-        topology.exec_room_id
+        let rid = topology.exec_room_id;
+        tracing::info!(exec_room = %rid, "connected to worker exec room");
+
+        // Key exchange: ensure we have encryption keys for all room members.
+        // On fresh login this establishes keys; on session restore the crypto
+        // store already has them so this completes quickly.
+        tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
+        multi
+            .wait_for_key_exchange(&rid, std::time::Duration::from_secs(15))
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        rid
     };
 
     // Bootstrap cross-signing: on fresh login this sets up keys;
-    // on session restore this no-ops quickly (keys already exist)
-    if any_fresh {
-        multi.bootstrap_and_sync_trust(&room_id).await;
-    }
+    // on session restore this no-ops quickly (keys already exist).
+    multi.bootstrap_and_sync_trust(&room_id).await;
 
     Ok(MatrixClientRoom::new(multi, room_id))
 }
