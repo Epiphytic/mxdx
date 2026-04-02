@@ -96,15 +96,34 @@ impl MatrixClient {
         })
     }
 
-    /// Find an existing launcher space by scanning joined rooms for a matching topic.
+    /// Find an existing launcher space by scanning rooms for a matching topic.
+    /// Auto-accepts invitations to mxdx launcher rooms before scanning.
     /// Returns None if no space is found for this launcher_id.
     pub async fn find_launcher_space(&self, launcher_id: &str) -> Result<Option<LauncherTopology>> {
+        let topic_prefix = "org.mxdx.launcher.";
         let expected_space_topic = format!("org.mxdx.launcher.space:{launcher_id}");
         let expected_exec_topic = format!("org.mxdx.launcher.exec:{launcher_id}");
         let expected_status_topic = format!("org.mxdx.launcher.status:{launcher_id}");
         let expected_logs_topic = format!("org.mxdx.launcher.logs:{launcher_id}");
 
-        // Sync to ensure we have current room state
+        // Sync to see current room state + pending invitations
+        self.sync_once().await?;
+
+        // Auto-join any invited rooms with mxdx launcher topics
+        for room in self.inner().rooms() {
+            if room.state() == matrix_sdk::RoomState::Invited {
+                let topic = room.topic().unwrap_or_default();
+                if topic.starts_with(topic_prefix) {
+                    let rid = room.room_id().to_owned();
+                    tracing::info!(room_id = %rid, topic = %topic, "accepting launcher room invitation");
+                    if let Err(e) = self.join_room(&rid).await {
+                        tracing::warn!(room_id = %rid, error = %e, "failed to accept invitation");
+                    }
+                }
+            }
+        }
+
+        // Sync again to get full state of newly joined rooms
         self.sync_once().await?;
 
         let mut space_id: Option<OwnedRoomId> = None;

@@ -147,15 +147,43 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
         let topology = multi
             .get_or_create_launcher_space(&config.resolved_room_name)
             .await?;
-        let rid = topology.exec_room_id;
+        let rid = topology.exec_room_id.clone();
 
         // Key exchange: ensure we have encryption keys for all room members.
-        // On fresh login this establishes keys; on session restore the crypto
-        // store already has them so this completes quickly.
         tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
         multi
             .wait_for_key_exchange(&rid, std::time::Duration::from_secs(15))
             .await?;
+
+        // Invite authorized users to the space + all child rooms so clients
+        // can discover the topology via find_launcher_space.
+        for user_str in &config.worker.authorized_users {
+            match mxdx_matrix::UserId::parse(user_str.as_str()) {
+                Ok(uid) => {
+                    for (label, room) in [
+                        ("space", &topology.space_id),
+                        ("exec", &topology.exec_room_id),
+                        ("status", &topology.status_room_id),
+                        ("logs", &topology.logs_room_id),
+                    ] {
+                        if let Err(e) = multi.preferred().invite_user(room, &uid).await {
+                            tracing::warn!(
+                                user = %user_str, room = label,
+                                error = %e,
+                                "failed to invite authorized user (may already be a member)"
+                            );
+                        }
+                    }
+                    tracing::info!(user = %user_str, "invited authorized user to launcher rooms");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        user = %user_str, error = %e,
+                        "invalid Matrix user ID for authorized user, skipping invite"
+                    );
+                }
+            }
+        }
 
         rid
     };
@@ -165,30 +193,6 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
     // Bootstrap cross-signing: on fresh login this sets up keys;
     // on session restore this no-ops quickly (keys already exist).
     multi.bootstrap_and_sync_trust(&room_id).await;
-
-    // Invite authorized users to the exec room
-    for user_str in &config.worker.authorized_users {
-        match mxdx_matrix::UserId::parse(user_str.as_str()) {
-            Ok(uid) => {
-                if let Err(e) = multi.preferred().invite_user(&room_id, &uid).await {
-                    tracing::warn!(
-                        user = %user_str,
-                        error = %e,
-                        "failed to invite authorized user (may already be a member)"
-                    );
-                } else {
-                    tracing::info!(user = %user_str, "invited authorized user to exec room");
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    user = %user_str,
-                    error = %e,
-                    "invalid Matrix user ID for authorized user, skipping invite"
-                );
-            }
-        }
-    }
 
     Ok(matrix::MatrixWorkerRoom::new(multi, room_id))
 }
