@@ -84,6 +84,13 @@ fn load_creds() -> Option<TestCreds> {
 // ---------------------------------------------------------------------------
 
 fn cargo_bin(name: &str) -> std::path::PathBuf {
+    // Allow override via MXDX_BIN_DIR for testing release-profile binaries
+    if let Ok(dir) = std::env::var("MXDX_BIN_DIR") {
+        let path = std::path::PathBuf::from(dir).join(name);
+        assert!(path.exists(), "Binary not found at {} (via MXDX_BIN_DIR)", path.display());
+        return path;
+    }
+    // Default: resolve relative to test binary (target/debug/)
     let mut path = std::env::current_exe().expect("cannot resolve test binary path");
     path.pop();
     path.pop();
@@ -253,6 +260,32 @@ fn report(test: &str, transport: &str, elapsed: Duration, exit_code: Option<i32>
         exit_code.map(|c| c.to_string()).unwrap_or("?".into()),
         stdout_lines,
     );
+
+    // Write performance JSON entry if TEST_PERF_OUTPUT is set
+    if let Ok(path) = std::env::var("TEST_PERF_OUTPUT") {
+        let status = match exit_code {
+            Some(0) => "pass",
+            Some(_) => "fail",
+            None => "fail",
+        };
+        let entry = serde_json::json!({
+            "name": test,
+            "transport": transport,
+            "duration_ms": elapsed.as_millis() as u64,
+            "exit_code": exit_code,
+            "stdout_lines": stdout_lines,
+            "status": status,
+        });
+
+        // Append JSON line to file (one JSON object per line, wrapped by e2e-test-suite.sh)
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .expect("failed to open TEST_PERF_OUTPUT file");
+        writeln!(file, "{}", entry).expect("failed to write perf entry");
+    }
 }
 
 fn md5_script(file_path: &str) -> String {
