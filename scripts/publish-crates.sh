@@ -12,6 +12,8 @@ CRATES=(
   mxdx-launcher
   mxdx-web
   mxdx-core-wasm
+  mxdx-worker
+  mxdx-client
 )
 
 for crate in "${CRATES[@]}"; do
