@@ -16,7 +16,6 @@ async fn create_launcher_space_creates_space_with_child_rooms() {
 
     assert!(!topology.space_id.as_str().is_empty());
     assert!(!topology.exec_room_id.as_str().is_empty());
-    assert!(!topology.status_room_id.as_str().is_empty());
     assert!(!topology.logs_room_id.as_str().is_empty());
 
     // Verify space has m.space.child state events for each child room
@@ -31,17 +30,6 @@ async fn create_launcher_space_creates_space_with_child_rooms() {
     assert!(
         exec_child.is_ok(),
         "exec room should be linked as space child"
-    );
-
-    let status_child = client
-        .get_room_state(
-            &topology.space_id,
-            &format!("m.space.child/{}", topology.status_room_id),
-        )
-        .await;
-    assert!(
-        status_child.is_ok(),
-        "status room should be linked as space child"
     );
 
     let logs_child = client

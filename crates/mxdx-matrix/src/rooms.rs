@@ -17,18 +17,20 @@ use matrix_sdk::ruma::{
 };
 
 /// Room IDs for a launcher space and its child rooms.
+/// Topology: space (container) + exec (encrypted, all client interaction) + logs (worker operational logs).
+/// There is no status room — worker telemetry goes to the exec room.
 #[derive(Debug, Clone)]
 pub struct LauncherTopology {
     pub space_id: OwnedRoomId,
     pub exec_room_id: OwnedRoomId,
-    pub status_room_id: OwnedRoomId,
     pub logs_room_id: OwnedRoomId,
 }
 
 impl MatrixClient {
-    /// Create a launcher space with exec, status, and logs child rooms.
-    /// The space is a Matrix Space (m.space), exec is encrypted, status and logs are unencrypted.
+    /// Create a launcher space with exec and logs child rooms.
+    /// The space is a Matrix Space (m.space), exec is encrypted, logs is unencrypted.
     /// All rooms are named and tagged with topics for discoverability.
+    /// Worker telemetry goes to the exec room (no separate status room).
     pub async fn create_launcher_space(&self, launcher_id: &str) -> Result<LauncherTopology> {
         let server_name = self.user_id().server_name().to_string();
 
@@ -65,15 +67,6 @@ impl MatrixClient {
         if let Some(d) = delay {
             tokio::time::sleep(d).await;
         }
-        let status_room_id = self
-            .create_named_unencrypted_room(
-                &format!("mxdx: {launcher_id} — status"),
-                &format!("org.mxdx.launcher.status:{launcher_id}"),
-            )
-            .await?;
-        if let Some(d) = delay {
-            tokio::time::sleep(d).await;
-        }
         let logs_room_id = self
             .create_named_unencrypted_room(
                 &format!("mxdx: {launcher_id} — logs"),
@@ -83,7 +76,7 @@ impl MatrixClient {
 
         // Link child rooms to space via m.space.child state events
         let via = serde_json::json!({ "via": [server_name] });
-        for child_id in [&exec_room_id, &status_room_id, &logs_room_id] {
+        for child_id in [&exec_room_id, &logs_room_id] {
             self.send_state_event(&space_id, "m.space.child", child_id.as_str(), via.clone())
                 .await?;
         }
@@ -91,7 +84,6 @@ impl MatrixClient {
         Ok(LauncherTopology {
             space_id,
             exec_room_id,
-            status_room_id,
             logs_room_id,
         })
     }
@@ -99,11 +91,13 @@ impl MatrixClient {
     /// Find an existing launcher space by scanning rooms for a matching topic.
     /// Auto-accepts invitations to mxdx launcher rooms before scanning.
     /// Returns None if no space is found for this launcher_id.
+    ///
+    /// The exec room is the minimum requirement — if found, the topology is valid.
+    /// The space and logs rooms are optional (they're worker-side concerns).
     pub async fn find_launcher_space(&self, launcher_id: &str) -> Result<Option<LauncherTopology>> {
         let topic_prefix = "org.mxdx.launcher.";
         let expected_space_topic = format!("org.mxdx.launcher.space:{launcher_id}");
         let expected_exec_topic = format!("org.mxdx.launcher.exec:{launcher_id}");
-        let expected_status_topic = format!("org.mxdx.launcher.status:{launcher_id}");
         let expected_logs_topic = format!("org.mxdx.launcher.logs:{launcher_id}");
 
         // Sync to see current room state + pending invitations
@@ -131,7 +125,6 @@ impl MatrixClient {
         // the active room will have more members (worker + client joined).
         let mut space_candidates: Vec<(OwnedRoomId, u64)> = Vec::new();
         let mut exec_candidates: Vec<(OwnedRoomId, u64)> = Vec::new();
-        let mut status_candidates: Vec<(OwnedRoomId, u64)> = Vec::new();
         let mut logs_candidates: Vec<(OwnedRoomId, u64)> = Vec::new();
 
         for room in self.inner().joined_rooms() {
@@ -143,8 +136,6 @@ impl MatrixClient {
                 space_candidates.push((rid, member_count));
             } else if topic == expected_exec_topic {
                 exec_candidates.push((rid, member_count));
-            } else if topic == expected_status_topic {
-                status_candidates.push((rid, member_count));
             } else if topic == expected_logs_topic {
                 logs_candidates.push((rid, member_count));
             }
@@ -162,7 +153,6 @@ impl MatrixClient {
         for (label, candidates) in [
             ("space", &space_candidates),
             ("exec", &exec_candidates),
-            ("status", &status_candidates),
             ("logs", &logs_candidates),
         ] {
             if candidates.len() > 1 {
@@ -176,23 +166,28 @@ impl MatrixClient {
             }
         }
 
-        let space_id = pick_best(space_candidates);
         let exec_room_id = pick_best(exec_candidates);
-        let status_room_id = pick_best(status_candidates);
-        let logs_room_id = pick_best(logs_candidates);
 
-        match (space_id, exec_room_id, status_room_id, logs_room_id) {
-            (Some(s), Some(e), Some(st), Some(l)) => Ok(Some(LauncherTopology {
-                space_id: s,
-                exec_room_id: e,
-                status_room_id: st,
-                logs_room_id: l,
-            })),
-            _ => Ok(None),
+        // The exec room is the minimum requirement for a valid topology
+        match exec_room_id {
+            Some(e) => {
+                let space_id = pick_best(space_candidates)
+                    .unwrap_or_else(|| e.clone()); // fallback: use exec as space placeholder
+                let logs_room_id = pick_best(logs_candidates)
+                    .unwrap_or_else(|| e.clone()); // fallback: use exec as logs placeholder
+                Ok(Some(LauncherTopology {
+                    space_id,
+                    exec_room_id: e,
+                    logs_room_id,
+                }))
+            }
+            None => Ok(None),
         }
     }
 
     /// Find an existing launcher space or create a new one.
+    /// NOTE: Only workers/launchers should call this. Clients must use find_launcher_space()
+    /// and fail if no worker room is found — clients must never create rooms.
     pub async fn get_or_create_launcher_space(
         &self,
         launcher_id: &str,

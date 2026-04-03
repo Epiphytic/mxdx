@@ -32,10 +32,19 @@ struct TestCreds {
 }
 
 impl TestCreds {
-    /// Full Matrix user ID for the client account (e.g. `@e2etest-test2:ca1-beta.mxdx.dev`).
+    /// Full Matrix user ID for the client account on server1 (e.g. `@e2etest-test2:ca1-beta.mxdx.dev`).
     fn client_matrix_id(&self) -> String {
         let server_name = self
             .server_url
+            .trim_start_matches("https://")
+            .trim_start_matches("http://");
+        format!("@{}:{}", self.client_user, server_name)
+    }
+
+    /// Full Matrix user ID for the client account on a specific server.
+    /// Use this for federated tests where the client is on a different server.
+    fn client_matrix_id_on(&self, server_url: &str) -> String {
+        let server_name = server_url
             .trim_start_matches("https://")
             .trim_start_matches("http://");
         format!("@{}:{}", self.client_user, server_name)
@@ -455,7 +464,8 @@ async fn profile_ping_local() {
 async fn profile_echo_federated() {
     let c = load_creds().expect("test-credentials.toml required");
     let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
-    let auth_user = c.client_matrix_id();
+    // Client is on server2 — invite the client's actual Matrix ID on that server
+    let auth_user = c.client_matrix_id_on(s2);
     let worker_room = default_worker_room(&c.worker_user);
     let (store_dir, keychain_dir) = isolated_test_dirs("echo_federated");
     let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
@@ -477,7 +487,7 @@ async fn profile_echo_federated() {
 async fn profile_exit_code_federated() {
     let c = load_creds().expect("test-credentials.toml required");
     let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
-    let auth_user = c.client_matrix_id();
+    let auth_user = c.client_matrix_id_on(s2);
     let worker_room = default_worker_room(&c.worker_user);
     let (store_dir, keychain_dir) = isolated_test_dirs("exit_code_federated");
     let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
@@ -497,7 +507,7 @@ async fn profile_exit_code_federated() {
 async fn profile_md5sum_federated() {
     let c = load_creds().expect("test-credentials.toml required");
     let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
-    let auth_user = c.client_matrix_id();
+    let auth_user = c.client_matrix_id_on(s2);
     let worker_room = default_worker_room(&c.worker_user);
     let (store_dir, keychain_dir) = isolated_test_dirs("md5sum_federated");
     let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
@@ -522,7 +532,7 @@ async fn profile_md5sum_federated() {
 async fn profile_ping_federated() {
     let c = load_creds().expect("test-credentials.toml required");
     let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
-    let auth_user = c.client_matrix_id();
+    let auth_user = c.client_matrix_id_on(s2);
     let worker_room = default_worker_room(&c.worker_user);
     let (store_dir, keychain_dir) = isolated_test_dirs("ping_federated");
     let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
@@ -569,7 +579,7 @@ async fn profile_long_ping_local() {
 async fn profile_long_ping_federated() {
     let c = load_creds().expect("test-credentials.toml required");
     let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
-    let auth_user = c.client_matrix_id();
+    let auth_user = c.client_matrix_id_on(s2);
     let worker_room = default_worker_room(&c.worker_user);
     let (store_dir, keychain_dir) = isolated_test_dirs("long_ping_federated");
     let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,

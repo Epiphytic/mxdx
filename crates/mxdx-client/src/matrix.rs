@@ -376,11 +376,16 @@ pub async fn connect_multi(
         tracing::info!(room_id = %rid, "using direct room ID");
         rid
     } else {
-        // Find or create the launcher space
-        let topology = multi.get_or_create_launcher_space(worker_room).await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        // Discover the worker's launcher space — clients must NEVER create rooms.
+        // If no worker room is found, fail immediately with a clear error.
+        let topology = multi.find_launcher_space(worker_room).await
+            .map_err(|e| anyhow::anyhow!("{e}"))?
+            .ok_or_else(|| anyhow::anyhow!(
+                "No worker room found for '{}'. Has the worker started and invited this client?",
+                worker_room
+            ))?;
         let rid = topology.exec_room_id;
-        tracing::info!(exec_room = %rid, "connected to worker exec room");
+        tracing::info!(exec_room = %rid, "discovered worker exec room");
 
         // Key exchange: ensure we have encryption keys for all room members.
         // On fresh login this establishes keys; on session restore the crypto

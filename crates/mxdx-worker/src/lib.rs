@@ -163,7 +163,6 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
                     for (label, room) in [
                         ("space", &topology.space_id),
                         ("exec", &topology.exec_room_id),
-                        ("status", &topology.status_room_id),
                         ("logs", &topology.logs_room_id),
                     ] {
                         if let Err(e) = multi.preferred().invite_user(room, &uid).await {
@@ -368,7 +367,6 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
                     let topo = mxdx_types::events::state_room::StateRoomTopology {
                         space_id: String::new(),
                         exec_room_id: room_id_str.clone(),
-                        status_room_id: String::new(),
                         logs_room_id: String::new(),
                     };
                     let _ = sr.write_topology(room.client(), &topo).await;

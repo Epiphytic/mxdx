@@ -66,11 +66,11 @@ pub struct TrustedEntity {
 }
 
 /// Topology pointers for the worker's space and child rooms.
+/// Two-room topology: exec (encrypted, all client interaction) + logs (worker operational logs).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StateRoomTopology {
     pub space_id: String,
     pub exec_room_id: String,
-    pub status_room_id: String,
     pub logs_room_id: String,
 }
 
@@ -238,7 +238,6 @@ mod tests {
         let topology = StateRoomTopology {
             space_id: "!space:example.com".into(),
             exec_room_id: "!exec:example.com".into(),
-            status_room_id: "!status:example.com".into(),
             logs_room_id: "!logs:example.com".into(),
         };
         let json = serde_json::to_string(&topology).unwrap();

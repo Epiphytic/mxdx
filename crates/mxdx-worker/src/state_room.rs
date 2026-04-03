@@ -647,7 +647,6 @@ mod tests {
         let topology = StateRoomTopology {
             space_id: "!space:example.com".into(),
             exec_room_id: "!exec:example.com".into(),
-            status_room_id: "!status:example.com".into(),
             logs_room_id: "!logs:example.com".into(),
         };
         let value = serde_json::to_value(&topology).unwrap();

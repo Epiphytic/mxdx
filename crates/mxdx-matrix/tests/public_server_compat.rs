@@ -270,7 +270,6 @@ async fn launcher_space_operations() {
 
     assert!(!topology.space_id.as_str().is_empty());
     assert!(!topology.exec_room_id.as_str().is_empty());
-    assert!(!topology.status_room_id.as_str().is_empty());
     assert!(!topology.logs_room_id.as_str().is_empty());
     eprintln!("  Space: {}", topology.space_id);
 
@@ -290,7 +289,6 @@ async fn launcher_space_operations() {
     for rid in [
         &topology.space_id,
         &topology.exec_room_id,
-        &topology.status_room_id,
         &topology.logs_room_id,
     ] {
         if let Some(room) = client.inner().get_room(rid) {
