@@ -18,7 +18,11 @@
       "@semantic-release/github",
       {
         "successComment": false,
-        "failTitle": false
+        "failTitle": false,
+        "assets": [
+          {"path": "release-assets/mxdx-worker-x86_64-unknown-linux-gnu", "label": "mxdx-worker (Linux x86_64)"},
+          {"path": "release-assets/mxdx-client-x86_64-unknown-linux-gnu", "label": "mxdx-client (Linux x86_64)"}
+        ]
       }
     ],
     [
