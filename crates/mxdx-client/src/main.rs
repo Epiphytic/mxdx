@@ -2,7 +2,7 @@ use anyhow::Result;
 use clap::Parser;
 use mxdx_client::cli::{Cli, Commands, DaemonAction, TrustAction};
 use mxdx_client::config::{ClientArgs, ClientRuntimeConfig};
-use mxdx_client::liveness::{check_worker_liveness, LivenessStatus};
+use mxdx_client::liveness;
 use mxdx_client::matrix::{self, ClientRoomOps, IncomingClientEvent};
 use mxdx_types::events::session::{
     SessionOutput, SessionResult, SESSION_CANCEL, SESSION_SIGNAL, SESSION_TASK,
@@ -144,56 +144,66 @@ async fn run_direct(cli: &Cli) -> Result<()> {
             )
             .await?;
 
-            // Check worker liveness before submitting a task
+            // Check worker liveness and capability before submitting a task
             if !skip_liveness_check {
                 // Sync once to populate room state before reading state events
                 mx_room.client().sync_once().await?;
 
-                let telemetry_state = mx_room
+                let telemetry_events = mx_room
                     .read_state_events(
                         mx_room.room_id().as_str(),
                         WORKER_TELEMETRY,
                     )
-                    .await;
+                    .await
+                    .unwrap_or_default();
 
-                let telemetry_json = telemetry_state
-                    .ok()
-                    .and_then(|events| {
-                        events.into_iter().find_map(|(_key, value)| {
-                            if value.is_null()
-                                || value.as_object().map_or(true, |o| o.is_empty())
-                            {
-                                None
-                            } else {
-                                Some(value)
-                            }
-                        })
+                // If no telemetry events at all, treat as no worker
+                if telemetry_events.is_empty()
+                    || telemetry_events.iter().all(|(_, v)| {
+                        v.is_null() || v.as_object().map_or(true, |o| o.is_empty())
                     })
-                    .unwrap_or(serde_json::Value::Null);
-
-                match check_worker_liveness(&telemetry_json) {
-                    LivenessStatus::Online { capabilities } => {
-                        tracing::info!(
-                            capabilities = ?capabilities,
-                            "worker is online, proceeding with task submission"
-                        );
-                    }
-                    LivenessStatus::NoWorker => {
-                        eprintln!("Error: no worker found in room. Is a worker running?");
-                        std::process::exit(1);
-                    }
-                    LivenessStatus::Offline => {
-                        eprintln!("Error: worker is offline.");
-                        std::process::exit(1);
-                    }
-                    LivenessStatus::Stale(duration) => {
-                        eprintln!(
-                            "Error: worker last seen {}s ago (stale).",
-                            duration.as_secs()
-                        );
-                        std::process::exit(1);
-                    }
+                {
+                    eprintln!(
+                        "Error: No worker room found for '{}'. Has the worker started and invited this client?",
+                        room_name
+                    );
+                    std::process::exit(10);
                 }
+
+                // Check if any worker is online
+                let summary = liveness::summarize_worker_liveness(&telemetry_events);
+                if summary.online == 0 {
+                    if let Some(stale_dur) = summary.stale_details {
+                        eprintln!(
+                            "Error: No live worker in room '{}' (last seen {}s ago)",
+                            room_name,
+                            stale_dur.as_secs()
+                        );
+                    } else if summary.offline > 0 {
+                        eprintln!(
+                            "Error: No live worker in room '{}' (Worker is offline)",
+                            room_name
+                        );
+                    } else {
+                        eprintln!(
+                            "Error: No live worker in room '{}' (No telemetry found)",
+                            room_name
+                        );
+                    }
+                    std::process::exit(11);
+                }
+
+                // Check if any online worker supports the requested command
+                let cmd = command;
+                if liveness::find_capable_worker(&telemetry_events, cmd).is_none() {
+                    eprintln!("Error: No worker supports command '{}'", cmd);
+                    std::process::exit(12);
+                }
+
+                tracing::info!(
+                    online_workers = summary.online,
+                    "worker liveness and capability verified, proceeding with task submission"
+                );
             }
 
             // Build task with actual user ID

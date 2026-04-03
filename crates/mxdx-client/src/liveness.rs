@@ -149,6 +149,72 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era * 146097 + doe as i64 - 719468
 }
 
+/// Check if any online worker in a list of telemetry events supports the given command.
+/// Returns the first matching worker's capabilities, or None if no match.
+pub fn find_capable_worker(
+    telemetry_events: &[(String, serde_json::Value)],
+    command: &str,
+) -> Option<Vec<String>> {
+    let cmd_basename = std::path::Path::new(command)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(command);
+
+    for (_key, telemetry_json) in telemetry_events {
+        match check_worker_liveness(telemetry_json) {
+            LivenessStatus::Online { capabilities } => {
+                // Empty capabilities = allow all commands
+                if capabilities.is_empty()
+                    || capabilities.iter().any(|c| c == command || c == cmd_basename)
+                {
+                    return Some(capabilities);
+                }
+            }
+            _ => continue,
+        }
+    }
+    None
+}
+
+/// Summarize the liveness status of all workers in a room.
+pub fn summarize_worker_liveness(
+    telemetry_events: &[(String, serde_json::Value)],
+) -> WorkerLivenessSummary {
+    let mut online = 0u32;
+    let mut stale_details: Option<Duration> = None;
+    let mut offline = 0u32;
+    let mut no_worker = 0u32;
+
+    for (_key, telemetry_json) in telemetry_events {
+        match check_worker_liveness(telemetry_json) {
+            LivenessStatus::Online { .. } => online += 1,
+            LivenessStatus::Stale(d) => {
+                // Track the most recent stale worker
+                if stale_details.map_or(true, |prev| d < prev) {
+                    stale_details = Some(d);
+                }
+            }
+            LivenessStatus::Offline => offline += 1,
+            LivenessStatus::NoWorker => no_worker += 1,
+        }
+    }
+
+    WorkerLivenessSummary {
+        online,
+        stale_details,
+        offline,
+        no_worker,
+    }
+}
+
+#[derive(Debug)]
+pub struct WorkerLivenessSummary {
+    pub online: u32,
+    pub stale_details: Option<Duration>,
+    pub offline: u32,
+    pub no_worker: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -367,5 +433,58 @@ mod tests {
             parse_iso8601_to_epoch_ms("2020-01-01T00:00:00+00:00"),
             Some(1577836800000)
         );
+    }
+
+    #[test]
+    fn find_capable_worker_matches_basename() {
+        let ts = timestamp_ago(Duration::from_secs(5));
+        let json = serde_json::json!({
+            "timestamp": ts,
+            "heartbeat_interval_ms": 60000,
+            "status": "online",
+            "capabilities": ["echo", "md5sum"],
+        });
+        let events = vec![("worker/ABC".to_string(), json)];
+        assert!(find_capable_worker(&events, "/bin/echo").is_some());
+        assert!(find_capable_worker(&events, "echo").is_some());
+        assert!(find_capable_worker(&events, "curl").is_none());
+    }
+
+    #[test]
+    fn find_capable_worker_empty_caps_allows_all() {
+        let ts = timestamp_ago(Duration::from_secs(5));
+        let json = serde_json::json!({
+            "timestamp": ts,
+            "heartbeat_interval_ms": 60000,
+            "status": "online",
+            "capabilities": [],
+        });
+        let events = vec![("worker/ABC".to_string(), json)];
+        assert!(find_capable_worker(&events, "anything").is_some());
+    }
+
+    #[test]
+    fn find_capable_worker_skips_stale() {
+        let fresh_ts = timestamp_ago(Duration::from_secs(5));
+        let stale_ts = timestamp_ago(Duration::from_secs(200));
+        let stale = serde_json::json!({
+            "timestamp": stale_ts,
+            "heartbeat_interval_ms": 60000,
+            "status": "online",
+            "capabilities": ["echo"],
+        });
+        let fresh = serde_json::json!({
+            "timestamp": fresh_ts,
+            "heartbeat_interval_ms": 60000,
+            "status": "online",
+            "capabilities": ["md5sum"],
+        });
+        let events = vec![
+            ("worker/OLD".to_string(), stale),
+            ("worker/NEW".to_string(), fresh),
+        ];
+        // Only the fresh worker is considered
+        assert!(find_capable_worker(&events, "md5sum").is_some());
+        assert!(find_capable_worker(&events, "echo").is_none()); // stale worker ignored
     }
 }
