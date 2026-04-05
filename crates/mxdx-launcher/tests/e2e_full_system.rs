@@ -54,7 +54,6 @@ async fn full_system_e2e() {
         .unwrap();
     assert!(!topology.space_id.as_str().is_empty());
     assert!(!topology.exec_room_id.as_str().is_empty());
-    assert!(!topology.status_room_id.as_str().is_empty());
     assert!(!topology.logs_room_id.as_str().is_empty());
 
     // ── 4. Invite orchestrator to exec room and key exchange ──────────

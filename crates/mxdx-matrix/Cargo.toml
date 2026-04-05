@@ -16,9 +16,12 @@ ruma = { workspace = true }
 anyhow = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 reqwest = { workspace = true }
+dirs = "6"
+hostname = "0.4"
 
 [dev-dependencies]
 mxdx-test-helpers = { path = "../../tests/helpers" }

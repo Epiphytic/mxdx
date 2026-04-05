@@ -1,0 +1,70 @@
+{
+  "timestamp": "2026-03-29T06:02:08.610009678+00:00",
+  "server": "https://ca1-beta.mxdx.dev",
+  "federated": false,
+  "git_sha": "d00791cb5cdb993731e9de989f7dce0580ef8815",
+  "metrics": [
+    {
+      "name": "login",
+      "operation": "MatrixClient::login_and_connect",
+      "latency_ms": 1625.5602195000001,
+      "samples": 1,
+      "min_ms": 1625.5602195000001,
+      "max_ms": 1625.5602195000001,
+      "p50_ms": 1625.5602195000001,
+      "p95_ms": 1625.5602195000001,
+      "p99_ms": 1625.5602195000001
+    },
+    {
+      "name": "room_creation",
+      "operation": "MatrixClient::create_encrypted_room",
+      "latency_ms": 112.530459,
+      "samples": 1,
+      "min_ms": 112.530459,
+      "max_ms": 112.530459,
+      "p50_ms": 112.530459,
+      "p95_ms": 112.530459,
+      "p99_ms": 112.530459
+    },
+    {
+      "name": "e2ee_key_exchange",
+      "operation": "4x sync_once round-trip",
+      "latency_ms": 30920.800739000002,
+      "samples": 1,
+      "min_ms": 30920.800739000002,
+      "max_ms": 30920.800739000002,
+      "p50_ms": 30920.800739000002,
+      "p95_ms": 30920.800739000002,
+      "p99_ms": 30920.800739000002
+    },
+    {
+      "name": "event_send",
+      "operation": "send_event (session task)",
+      "latency_ms": 199.9621052,
+      "samples": 5,
+      "min_ms": 99.35938499999999,
+      "max_ms": 594.619417,
+      "p50_ms": 100.318355,
+      "p95_ms": 594.619417,
+      "p99_ms": 594.619417
+    },
+    {
+      "name": "state_event_roundtrip",
+      "operation": "send_state_event + sync + get_room_state_event",
+      "latency_ms": 321.69502966666664,
+      "samples": 3,
+      "min_ms": 303.895491,
+      "max_ms": 352.898265,
+      "p50_ms": 308.291333,
+      "p95_ms": 352.898265,
+      "p99_ms": 352.898265
+    },
+    {
+      "name": "burst_throughput",
+      "operation": "10 events sequential",
+      "latency_ms": 961.822589,
+      "throughput_ops_per_sec": 10.396927785192618,
+      "samples": 10
+    }
+  ]
+}

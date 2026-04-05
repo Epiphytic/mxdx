@@ -41,6 +41,24 @@ const CLIENT_BIN = path.resolve(__dirname, '../../client/bin/mxdx-client.js');
 const FIXED_LAUNCHER_ID = 'pub-e2e-stable';
 
 /**
+ * Write a performance JSON entry to TEST_PERF_OUTPUT (if set).
+ * One JSON object per line — the e2e-test-suite.sh wraps them with suite metadata.
+ */
+function writePerfEntry(name, transport, durationMs, exitCode, stdoutLines) {
+  const perfPath = process.env.TEST_PERF_OUTPUT;
+  if (!perfPath) return;
+  const entry = JSON.stringify({
+    name,
+    transport,
+    duration_ms: durationMs,
+    exit_code: exitCode,
+    stdout_lines: stdoutLines,
+    status: exitCode === 0 ? 'pass' : 'fail',
+  });
+  fs.appendFileSync(perfPath, entry + '\n');
+}
+
+/**
  * Load credentials from test-credentials.toml.
  */
 function loadCredentials() {
@@ -388,6 +406,9 @@ describe('Public Server: Launcher + Client Round-Trip', { timeout: 180000 }, () 
     console.log(`[pub] Client exit code: ${clientResult.code}, latency: ${latencyMs}ms`);
     console.log(`[pub] Client stdout: ${clientResult.stdout}`);
     if (clientResult.stderr) console.log(`[pub] Client stderr: ${clientResult.stderr}`);
+
+    writePerfEntry('launcher-client-round-trip', 'npm-public', latencyMs, clientResult.code,
+      clientResult.stdout.split('\n').filter(Boolean).length);
 
     assert.strictEqual(clientResult.code, 0, `Client should exit 0, got ${clientResult.code}`);
     assert.ok(latencyMs < 10000, `Latency should be < 10s, was ${latencyMs}ms`);

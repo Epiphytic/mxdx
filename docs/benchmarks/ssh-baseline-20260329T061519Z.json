@@ -1,0 +1,70 @@
+{
+  "timestamp": "2026-03-29T06:15:19.500761039+00:00",
+  "server": "localhost-ssh",
+  "federated": false,
+  "git_sha": "d45b9edadffde75f2831c183d1ed5285f9bf3db5",
+  "metrics": [
+    {
+      "name": "ssh_command_echo",
+      "operation": "ssh localhost echo hello",
+      "latency_ms": 235.2139932,
+      "samples": 20,
+      "min_ms": 217.336794,
+      "max_ms": 451.63408599999997,
+      "p50_ms": 224.437257,
+      "p95_ms": 231.817376,
+      "p99_ms": 451.63408599999997
+    },
+    {
+      "name": "ssh_command_ls",
+      "operation": "ssh localhost ls -la /",
+      "latency_ms": 224.4788918,
+      "samples": 10,
+      "min_ms": 215.768119,
+      "max_ms": 230.160058,
+      "p50_ms": 224.283904,
+      "p95_ms": 230.160058,
+      "p99_ms": 230.160058
+    },
+    {
+      "name": "ssh_command_sha256sum",
+      "operation": "ssh localhost sha256sum /etc/hostname",
+      "latency_ms": 223.7252442,
+      "samples": 10,
+      "min_ms": 213.78760499999999,
+      "max_ms": 230.729639,
+      "p50_ms": 222.95008199999998,
+      "p95_ms": 230.729639,
+      "p99_ms": 230.729639
+    },
+    {
+      "name": "ssh_burst_throughput",
+      "operation": "20 sequential ssh echo commands",
+      "latency_ms": 4466.140645,
+      "throughput_ops_per_sec": 4.4781393130533615,
+      "samples": 20
+    },
+    {
+      "name": "ssh_session_lifecycle",
+      "operation": "ssh: connect + bash script + capture output",
+      "latency_ms": 327.51537099999996,
+      "samples": 5,
+      "min_ms": 316.749977,
+      "max_ms": 335.76363399999997,
+      "p50_ms": 327.208597,
+      "p95_ms": 335.76363399999997,
+      "p99_ms": 335.76363399999997
+    },
+    {
+      "name": "ssh_pty_command",
+      "operation": "ssh -t localhost echo (with PTY)",
+      "latency_ms": 223.22945620000002,
+      "samples": 10,
+      "min_ms": 214.780086,
+      "max_ms": 230.662545,
+      "p50_ms": 222.57543099999998,
+      "p95_ms": 230.662545,
+      "p99_ms": 230.662545
+    }
+  ]
+}

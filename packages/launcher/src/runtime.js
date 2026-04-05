@@ -1,5 +1,4 @@
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { connectWithSession, TerminalDataEvent, saveIndexedDB, BatchedSender, fetchTurnCredentials, turnToIceServers, NodeWebRTCChannel, P2PSignaling, P2PTransport, generateSessionKey, createP2PCrypto } from '@mxdx/core';
@@ -8,10 +7,24 @@ import { PtyBridge } from './pty-bridge.js';
 import { inflateSync } from 'node:zlib';
 
 const DEFAULT_SESSION_DIR = path.join(os.homedir(), '.mxdx');
-const SESSIONS_FILE = 'sessions.json';
-const SESSION_ROOMS_FILE = 'session-rooms.json';
 
 const MAX_DECOMPRESSED_SIZE = 1024 * 1024; // 1MB zlib bomb protection
+
+/**
+ * Unified session event type constants.
+ */
+const SESSION_EVENTS = {
+  TASK: 'org.mxdx.session.task',
+  START: 'org.mxdx.session.start',
+  OUTPUT: 'org.mxdx.session.output',
+  RESULT: 'org.mxdx.session.result',
+  CANCEL: 'org.mxdx.session.cancel',
+  SIGNAL: 'org.mxdx.session.signal',
+  INPUT: 'org.mxdx.session.input',
+  RESIZE: 'org.mxdx.session.resize',
+  ACTIVE: 'org.mxdx.session.active',
+  COMPLETED: 'org.mxdx.session.completed',
+};
 
 /**
  * Structured logger with JSON and text output modes.
@@ -172,6 +185,7 @@ export class LauncherRuntime {
   #client;
   #config;
   #topology;
+  #stateRoomId;
   #running = false;
   #processedEvents = new Set();
   #activeSessions = 0;
@@ -199,90 +213,71 @@ export class LauncherRuntime {
     return this.#config.tmuxSocketDir || path.join(this.#sessionDir, 'tmux');
   }
 
-  get #sessionsFilePath() {
-    return path.join(this.#sessionDir, SESSIONS_FILE);
-  }
-
-  #saveSessionsFile() {
-    const data = {};
-    for (const [id, entry] of this.#sessionRegistry) {
-      if (entry.persistent && entry.tmuxName) {
-        data[id] = {
-          tmuxName: entry.tmuxName,
-          dmRoomId: entry.dmRoomId,
-          sender: entry.sender,
-          persistent: true,
-          createdAt: entry.createdAt,
-        };
-      }
-    }
-    try {
-      fs.mkdirSync(this.#sessionDir, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(this.#sessionsFilePath, JSON.stringify(data, null, 2), { mode: 0o600 });
-    } catch (err) {
-      this.#log.warn('Failed to save sessions file', { error: err.message });
-    }
-  }
-
-  #loadSessionsFile() {
-    try {
-      if (!fs.existsSync(this.#sessionsFilePath)) return {};
-      return JSON.parse(fs.readFileSync(this.#sessionsFilePath, 'utf8'));
-    } catch {
-      return {};
-    }
-  }
-
-  get #sessionRoomsFilePath() {
-    return path.join(this.#sessionDir, SESSION_ROOMS_FILE);
-  }
-
   #sessionRoomKey(clientUserId) {
     return `${this.#config.username}:${clientUserId}`;
   }
 
-  #saveSessionRooms() {
+  async #recoverSessions() {
+    // Load tracked rooms from state room
     try {
-      const data = Object.fromEntries(this.#sessionRooms);
-      fs.mkdirSync(this.#sessionDir, { recursive: true, mode: 0o700 });
-      fs.writeFileSync(this.#sessionRoomsFilePath, JSON.stringify(data, null, 2), { mode: 0o600 });
-    } catch (err) {
-      this.#log.warn('Failed to save session rooms file', { error: err.message });
-    }
-  }
-
-  #loadSessionRooms() {
-    try {
-      if (!fs.existsSync(this.#sessionRoomsFilePath)) return;
-      const data = JSON.parse(fs.readFileSync(this.#sessionRoomsFilePath, 'utf8'));
-      for (const [key, roomId] of Object.entries(data)) {
-        this.#sessionRooms.set(key, roomId);
+      const roomsJson = await this.#client.readRooms(this.#stateRoomId);
+      const rooms = JSON.parse(roomsJson);
+      for (const entry of rooms) {
+        if (entry.content?.room_id && entry.content?.role === 'dm') {
+          // Reconstruct session room key from room name or sender info
+          const roomId = entry.content.room_id;
+          const roomKey = entry.content.room_key;
+          if (roomKey) {
+            this.#sessionRooms.set(roomKey, roomId);
+          }
+        }
       }
-    } catch { /* ignore */ }
-  }
+    } catch (err) {
+      this.#log.warn('Failed to load rooms from state room', { error: err.message });
+    }
 
-  #recoverSessions() {
-    this.#loadSessionRooms();
-
-    const saved = this.#loadSessionsFile();
+    // Load sessions from state room
+    const deviceId = this.#client.deviceId();
     const liveTmux = PtyBridge.list(this.#socketDir);
     let recovered = 0;
 
-    for (const [sessionId, entry] of Object.entries(saved)) {
-      if (liveTmux.includes(entry.tmuxName)) {
-        this.#sessionRegistry.set(sessionId, {
-          tmuxName: entry.tmuxName,
-          dmRoomId: entry.dmRoomId,
-          sender: entry.sender,
-          persistent: true,
-          pty: null, // no attached PtyBridge yet — will attach on reconnect
-          createdAt: entry.createdAt,
-        });
-        recovered++;
-        this.#log.info('Recovered tmux session', { session_id: sessionId, tmux: entry.tmuxName });
-      } else {
-        this.#log.info('Stale session removed (tmux gone)', { session_id: sessionId, tmux: entry.tmuxName });
+    try {
+      const sessionsJson = await this.#client.readSessions(this.#stateRoomId);
+      const sessions = JSON.parse(sessionsJson);
+
+      for (const entry of sessions) {
+        const content = entry.content || {};
+        const stateKey = entry.state_key || '';
+        // State key format: {device_id}/{uuid}
+        const sessionId = content.uuid || stateKey.split('/')[1];
+
+        // Skip empty (removed) entries
+        if (!sessionId || !content.tmuxName) continue;
+
+        // Only recover sessions for this device
+        if (stateKey && !stateKey.startsWith(`${deviceId}/`)) continue;
+
+        if (liveTmux.includes(content.tmuxName)) {
+          this.#sessionRegistry.set(sessionId, {
+            tmuxName: content.tmuxName,
+            dmRoomId: content.dmRoomId,
+            sender: content.sender,
+            persistent: true,
+            pty: null, // no attached PtyBridge yet — will attach on reconnect
+            createdAt: content.createdAt,
+          });
+          recovered++;
+          this.#log.info('Recovered tmux session', { session_id: sessionId, tmux: content.tmuxName });
+        } else {
+          this.#log.info('Stale session removed (tmux gone)', { session_id: sessionId, tmux: content.tmuxName });
+          // Best-effort cleanup of stale state room entry
+          this.#client.removeSession(this.#stateRoomId, deviceId, sessionId).catch((err) => {
+            this.#log.warn('Failed to remove stale session from state room', { session_id: sessionId, error: err.message });
+          });
+        }
       }
+    } catch (err) {
+      this.#log.warn('Failed to load sessions from state room', { error: err.message });
     }
 
     // Rebuild session rooms cache from recovered sessions
@@ -293,11 +288,6 @@ export class LauncherRuntime {
           this.#sessionRooms.set(key, session.dmRoomId);
         }
       }
-    }
-
-    // Clean up sessions file to remove stale entries
-    if (recovered > 0 || Object.keys(saved).length > 0) {
-      this.#saveSessionsFile();
     }
 
     return recovered;
@@ -327,7 +317,19 @@ export class LauncherRuntime {
     }));
 
     this.#sessionRooms.set(key, roomId);
-    this.#saveSessionRooms();
+
+    // Persist to state room (best-effort)
+    try {
+      await this.#client.writeRoom(this.#stateRoomId, roomId, JSON.stringify({
+        room_id: roomId,
+        room_key: key,
+        role: 'dm',
+        joined_at: new Date().toISOString(),
+      }));
+    } catch (err) {
+      this.#log.warn('Failed to persist session room to state room', { room_id: roomId, error: err.message });
+    }
+
     return roomId;
   }
 
@@ -396,6 +398,12 @@ export class LauncherRuntime {
     this.#topology = await this.#client.getOrCreateLauncherSpace(username);
     log(`Rooms ready: space=${this.#topology.space_id} exec=${this.#topology.exec_room_id}`);
 
+    // ── 4. Set up state room for persistence ────────────────────
+    const hostname = os.hostname();
+    const osUser = os.userInfo().username;
+    this.#stateRoomId = await this.#client.getOrCreateStateRoom(hostname, osUser, username);
+    log(`State room ready: ${this.#stateRoomId}`);
+
     // Invite admin users to all rooms
     if (this.#config.adminUsers && this.#config.adminUsers.length > 0) {
       log(`Inviting admin users: ${this.#config.adminUsers.join(', ')}`);
@@ -415,7 +423,7 @@ export class LauncherRuntime {
     }
 
     // Recover tmux sessions from previous launcher instance
-    const recovered = this.#recoverSessions();
+    const recovered = await this.#recoverSessions();
     if (recovered > 0) {
       log(`Recovered ${recovered} tmux session(s) from previous instance`);
     }
@@ -465,8 +473,25 @@ export class LauncherRuntime {
     }
     this.#roomTransports.clear();
 
-    // Save session metadata for recovery on next start
-    this.#saveSessionsFile();
+    // Persist session metadata to state room for recovery on next start
+    const deviceId = this.#client.deviceId();
+    for (const [id, entry] of this.#sessionRegistry) {
+      if (entry.persistent && entry.tmuxName) {
+        try {
+          await this.#client.writeSession(this.#stateRoomId, deviceId, id, JSON.stringify({
+            uuid: id,
+            tmuxName: entry.tmuxName,
+            dmRoomId: entry.dmRoomId,
+            sender: entry.sender,
+            persistent: true,
+            createdAt: entry.createdAt,
+            state: 'detached',
+          }));
+        } catch (err) {
+          this.#log.warn('Failed to persist session on shutdown', { session_id: id, error: err.message });
+        }
+      }
+    }
   }
 
   get topology() {
@@ -524,17 +549,52 @@ export class LauncherRuntime {
       const eventType = event?.type;
       const eventId = event?.event_id;
 
-      if (eventType !== 'org.mxdx.command' || !eventId) continue;
+      // Unified session event types (Phase 6 migration):
+      //   SESSION_START  = 'org.mxdx.session.start'   — replaces org.mxdx.command
+      //   SESSION_OUTPUT = 'org.mxdx.session.output'   — replaces org.mxdx.output
+      //   SESSION_RESULT = 'org.mxdx.session.result'   — replaces org.mxdx.result
+      //   SESSION_CANCEL = 'org.mxdx.session.cancel'   — new
+      //   SESSION_HEARTBEAT = 'org.mxdx.session.heartbeat' — new
+      // State events:
+      //   ACTIVE_SESSION  = 'org.mxdx.session.active'
+      //   COMPLETED_SESSION = 'org.mxdx.session.completed'
+      //   WORKER_INFO     = 'org.mxdx.worker.info'     — replaces org.mxdx.host_telemetry
+
+      if (!eventId) continue;
       if (this.#processedEvents.has(eventId)) continue;
       this.#processedEvents.add(eventId);
 
       const content = event.content || {};
+      const sender = event.sender;
+
+      // ── Unified session events ──────────────────────────────────
+      if (eventType === SESSION_EVENTS.TASK) {
+        // Skip tasks we submitted ourselves
+        if (sender === this.#client.userId()) continue;
+        await this.#handleSessionTask(content, eventId, sender);
+        continue;
+      }
+
+      if (eventType === SESSION_EVENTS.CANCEL) {
+        if (sender === this.#client.userId()) continue;
+        await this.#handleSessionCancel(content);
+        continue;
+      }
+
+      if (eventType === SESSION_EVENTS.SIGNAL) {
+        if (sender === this.#client.userId()) continue;
+        await this.#handleSessionSignal(content);
+        continue;
+      }
+
+      // ── Legacy org.mxdx.command events (backward compat) ───────
+      if (eventType !== 'org.mxdx.command') continue;
+
       const action = content.action;
       const command = content.command;
       const args = content.args || [];
       const cwd = content.cwd || '/tmp';
       const requestId = content.request_id || eventId;
-      const sender = event.sender;
 
       // Route session management actions
       if (action === 'list_sessions') {
@@ -617,6 +677,233 @@ export class LauncherRuntime {
     }
   }
 
+  /**
+   * Handle a unified SESSION_TASK event.
+   * Claims the task, executes the command, and posts lifecycle events.
+   */
+  async #handleSessionTask(task, eventId, sender) {
+    const uuid = task.uuid;
+    const bin = task.bin || task.command;
+    const args = task.args || [];
+    const cwd = task.cwd || '/tmp';
+    const interactive = task.interactive || false;
+    const timeoutSeconds = task.timeout_seconds || null;
+    const execRoomId = this.#topology.exec_room_id;
+
+    this.#log.info('Unified session task received', { uuid, bin, sender });
+
+    // Route interactive sessions through existing handler
+    if (interactive) {
+      await this.#handleInteractiveSession({
+        command: bin,
+        args,
+        cwd,
+        action: 'interactive',
+        cols: task.cols || 80,
+        rows: task.rows || 24,
+      }, uuid, sender);
+      return;
+    }
+
+    // Validate command against allowlist
+    if (!this.#isCommandAllowed(bin)) {
+      this.#log.warn(`Session task rejected: ${bin} not in allowlist`, { uuid });
+      await this.#sendSessionResult(execRoomId, uuid, {
+        status: 'failed',
+        exit_code: 1,
+        error: `Command '${bin}' is not allowed`,
+        duration_seconds: 0,
+        tail: [],
+      });
+      return;
+    }
+
+    // Validate cwd
+    if (!this.#isCwdAllowed(cwd)) {
+      this.#log.warn(`Session task CWD rejected: ${cwd}`, { uuid });
+      await this.#sendSessionResult(execRoomId, uuid, {
+        status: 'failed',
+        exit_code: 1,
+        error: `Working directory '${cwd}' is not allowed`,
+        duration_seconds: 0,
+        tail: [],
+      });
+      return;
+    }
+
+    // Check session limit
+    if (this.#activeSessions >= this.#maxSessions) {
+      this.#log.warn('Session limit reached for task', { uuid, active: this.#activeSessions });
+      await this.#sendSessionResult(execRoomId, uuid, {
+        status: 'failed',
+        exit_code: 1,
+        error: `Session limit reached (${this.#maxSessions} max)`,
+        duration_seconds: 0,
+        tail: [],
+      });
+      return;
+    }
+
+    this.#activeSessions++;
+    const startTime = Date.now();
+    let seqNum = 0;
+    const tailLines = [];
+    const MAX_TAIL_LINES = 10;
+
+    try {
+      // Post SESSION_START
+      await this.#client.sendEvent(execRoomId, SESSION_EVENTS.START, JSON.stringify({
+        session_uuid: uuid,
+        worker_id: this.#client.userId(),
+        tmux_session: null,
+        pid: null,
+        started_at: Math.floor(startTime / 1000),
+      }));
+
+      // Write active session state (best-effort)
+      try {
+        await this.#client.sendStateEvent(execRoomId, SESSION_EVENTS.ACTIVE, `session/${uuid}`, JSON.stringify({
+          session_uuid: uuid,
+          worker_id: this.#client.userId(),
+          bin,
+          args,
+          sender_id: sender,
+          started_at: Math.floor(startTime / 1000),
+        }));
+      } catch (err) {
+        this.#log.warn('Failed to write active session state', { uuid, error: err.message });
+      }
+
+      const timeoutMs = timeoutSeconds ? timeoutSeconds * 1000 : 30000;
+
+      const result = await executeCommand(bin, args, {
+        cwd,
+        timeoutMs,
+        onStdout: async (line) => {
+          seqNum++;
+          trackTail(tailLines, line, MAX_TAIL_LINES);
+          await this.#sendSessionOutput(execRoomId, uuid, 'stdout', line, seqNum);
+        },
+        onStderr: async (line) => {
+          seqNum++;
+          trackTail(tailLines, line, MAX_TAIL_LINES);
+          await this.#sendSessionOutput(execRoomId, uuid, 'stderr', line, seqNum);
+        },
+      });
+
+      const durationSeconds = Math.floor((Date.now() - startTime) / 1000);
+      const status = result.exitCode === 0 ? 'success' : 'failed';
+
+      await this.#sendSessionResult(execRoomId, uuid, {
+        status,
+        exit_code: result.exitCode,
+        duration_seconds: durationSeconds,
+        tail: tailLines,
+        timed_out: result.timedOut || false,
+      });
+
+      // Clear active session state, write completed (best-effort)
+      try {
+        await this.#client.sendStateEvent(execRoomId, SESSION_EVENTS.ACTIVE, `session/${uuid}`, JSON.stringify({}));
+        await this.#client.sendStateEvent(execRoomId, SESSION_EVENTS.COMPLETED, `session/${uuid}`, JSON.stringify({
+          session_uuid: uuid,
+          worker_id: this.#client.userId(),
+          status,
+          exit_code: result.exitCode,
+          duration_seconds: durationSeconds,
+        }));
+      } catch (err) {
+        this.#log.warn('Failed to update session state', { uuid, error: err.message });
+      }
+    } catch (err) {
+      const durationSeconds = Math.floor((Date.now() - startTime) / 1000);
+      await this.#sendSessionResult(execRoomId, uuid, {
+        status: 'failed',
+        exit_code: 1,
+        error: err.message,
+        duration_seconds: durationSeconds,
+        tail: tailLines,
+      });
+    } finally {
+      this.#activeSessions--;
+    }
+  }
+
+  /**
+   * Handle a unified SESSION_CANCEL event.
+   * Finds the matching session and sends SIGTERM to its process.
+   */
+  async #handleSessionCancel(content) {
+    const uuid = content.session_uuid;
+    const graceSeconds = content.grace_seconds || 5;
+    if (!uuid) return;
+
+    this.#log.info('Session cancel received', { uuid, grace_seconds: graceSeconds });
+
+    const entry = this.#sessionRegistry.get(uuid);
+    if (entry && entry.pty && entry.pty.alive) {
+      entry.pty.kill('SIGTERM');
+      // If grace period elapses and still alive, force kill
+      setTimeout(() => {
+        if (entry.pty && entry.pty.alive) {
+          this.#log.warn('Grace period expired, sending SIGKILL', { uuid });
+          entry.pty.kill('SIGKILL');
+        }
+      }, graceSeconds * 1000);
+    } else {
+      this.#log.warn('Cancel target session not found or not alive', { uuid });
+    }
+  }
+
+  /**
+   * Handle a unified SESSION_SIGNAL event.
+   * Forwards the specified signal to the session process.
+   */
+  async #handleSessionSignal(content) {
+    const uuid = content.session_uuid;
+    const signal = content.signal;
+    if (!uuid || !signal) return;
+
+    this.#log.info('Session signal received', { uuid, signal });
+
+    const entry = this.#sessionRegistry.get(uuid);
+    if (entry && entry.pty && entry.pty.alive) {
+      entry.pty.kill(signal);
+    } else {
+      this.#log.warn('Signal target session not found or not alive', { uuid, signal });
+    }
+  }
+
+  /**
+   * Post a SESSION_OUTPUT event to the exec room.
+   */
+  async #sendSessionOutput(roomId, uuid, stream, data, seq) {
+    try {
+      await this.#client.sendEvent(roomId, SESSION_EVENTS.OUTPUT, JSON.stringify({
+        session_uuid: uuid,
+        worker_id: this.#client.userId(),
+        stream,
+        data: Buffer.from(data).toString('base64'),
+        encoding: 'base64',
+        seq,
+        timestamp: Math.floor(Date.now() / 1000),
+      }));
+    } catch {
+      // Best effort — don't stop execution on send failure
+    }
+  }
+
+  /**
+   * Post a SESSION_RESULT event to the exec room.
+   */
+  async #sendSessionResult(roomId, uuid, result) {
+    await this.#client.sendEvent(roomId, SESSION_EVENTS.RESULT, JSON.stringify({
+      session_uuid: uuid,
+      worker_id: this.#client.userId(),
+      ...result,
+    }));
+  }
+
   async #handleInteractiveSession(content, requestId, sender) {
     const defaultShell = process.env.SHELL || '/bin/bash';
     const command = content.command || defaultShell;
@@ -675,15 +962,31 @@ export class LauncherRuntime {
         socketDir: this.#socketDir,
       });
 
+      const createdAt = new Date().toISOString();
       this.#sessionRegistry.set(sessionId, {
         tmuxName: pty.tmuxName,
         dmRoomId,
         sender,
         persistent: pty.persistent,
         pty,
-        createdAt: new Date().toISOString(),
+        createdAt,
       });
-      this.#saveSessionsFile();
+
+      // Persist session to state room (best-effort)
+      try {
+        const deviceId = this.#client.deviceId();
+        await this.#client.writeSession(this.#stateRoomId, deviceId, sessionId, JSON.stringify({
+          uuid: sessionId,
+          tmuxName: pty.tmuxName,
+          dmRoomId,
+          sender,
+          persistent: pty.persistent,
+          createdAt,
+          state: 'running',
+        }));
+      } catch (err) {
+        this.#log.warn('Failed to persist session to state room', { session_id: sessionId, error: err.message });
+      }
 
       // Respond with DM room ID and negotiated batch window
       await this.#sendSessionResponse(requestId, 'started', dmRoomId, {
@@ -741,7 +1044,11 @@ export class LauncherRuntime {
           });
         } else {
           this.#sessionRegistry.delete(sessionId);
-          this.#saveSessionsFile();
+          // Remove session from state room (best-effort)
+          const deviceId = this.#client.deviceId();
+          this.#client.removeSession(this.#stateRoomId, deviceId, sessionId).catch((err) => {
+            this.#log.warn('Failed to remove session from state room', { session_id: sessionId, error: err.message });
+          });
           this.#log.info('Interactive session ended', { request_id: requestId, session_id: sessionId });
         }
         this.#sendSessionResponse(requestId, 'ended', dmRoomId).catch(() => {});
@@ -854,7 +1161,11 @@ export class LauncherRuntime {
           this.#log.info('Reconnected session bridge detached', { session_id: sessionId });
         } else {
           this.#sessionRegistry.delete(sessionId);
-          this.#saveSessionsFile();
+          // Remove session from state room (best-effort)
+          const deviceId = this.#client.deviceId();
+          this.#client.removeSession(this.#stateRoomId, deviceId, sessionId).catch((err) => {
+            this.#log.warn('Failed to remove session from state room', { session_id: sessionId, error: err.message });
+          });
         }
         this.#sendSessionResponse(requestId, 'ended', entry.dmRoomId).catch(() => {});
         this.#activeSessions--;
@@ -1364,5 +1675,18 @@ export class LauncherRuntime {
       }
     }
     return ips;
+  }
+}
+
+/**
+ * Track the last N lines of output for the tail field of SESSION_RESULT.
+ * @param {string[]} tailLines - Mutable array of tail lines
+ * @param {string} line - New output line
+ * @param {number} maxLines - Maximum lines to retain
+ */
+function trackTail(tailLines, line, maxLines) {
+  tailLines.push(line);
+  if (tailLines.length > maxLines) {
+    tailLines.shift();
   }
 }

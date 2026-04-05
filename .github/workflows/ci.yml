@@ -270,3 +270,63 @@ jobs:
           TOML
       - name: Run public server tests
         run: node --test packages/e2e-tests/tests/public-server.test.js
+
+  e2e-release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # Pin to 1.93.1: rustc 1.94.0 has a trait solver regression
+      # ("queries overflow the depth limit") when compiling matrix-sdk 0.16
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install system deps
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev tmux
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Write test credentials
+        run: echo "$TEST_CREDENTIALS_TOML" > test-credentials.toml
+        env:
+          TEST_CREDENTIALS_TOML: ${{ secrets.TEST_CREDENTIALS_TOML }}
+
+      - name: Run E2E test suite (release profile)
+        run: ./scripts/e2e-test-suite.sh --profile release
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-test-results
+          path: test-results/
+          retention-days: 90
+
+      - name: Render Rust test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: Rust E2E Tests
+          path: test-results/rust-e2e-junit.xml
+          reporter: java-junit
+          fail-on-error: false
+
+      - name: Render npm test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: npm E2E Tests
+          path: test-results/npm-e2e-junit.xml
+          reporter: java-junit
+          fail-on-error: false

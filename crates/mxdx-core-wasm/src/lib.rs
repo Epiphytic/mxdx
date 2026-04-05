@@ -952,6 +952,476 @@ impl WasmMatrixClient {
 
         Ok("null".to_string())
     }
+
+    // -----------------------------------------------------------------------
+    // Interactive session methods
+    // -----------------------------------------------------------------------
+
+    /// Create an E2EE DM room for an interactive session.
+    /// Returns the room_id as a string. The room has E2EE enabled and
+    /// history_visibility: joined so only participants who join see messages.
+    /// This is a thin wrapper around createDmRoom.
+    #[wasm_bindgen(js_name = "createInteractiveSessionRoom")]
+    pub async fn create_interactive_session_room(
+        &self,
+        client_user_id: &str,
+    ) -> Result<String, JsValue> {
+        self.create_dm_room(client_user_id).await
+    }
+
+    /// Send terminal input to a DM room for a specific session.
+    #[wasm_bindgen(js_name = "sendTerminalInput")]
+    pub async fn send_terminal_input(
+        &self,
+        dm_room_id: &str,
+        session_id: &str,
+        data: &str,
+    ) -> Result<(), JsValue> {
+        let content = serde_json::json!({
+            "session_uuid": session_id,
+            "data": data,
+        });
+        self.send_event(
+            dm_room_id,
+            "org.mxdx.session.input",
+            &serde_json::to_string(&content).map_err(to_js_err)?,
+        )
+        .await
+    }
+
+    /// Send terminal resize to a DM room for a specific session.
+    #[wasm_bindgen(js_name = "sendTerminalResize")]
+    pub async fn send_terminal_resize(
+        &self,
+        dm_room_id: &str,
+        session_id: &str,
+        cols: u16,
+        rows: u16,
+    ) -> Result<(), JsValue> {
+        let content = serde_json::json!({
+            "session_uuid": session_id,
+            "cols": cols,
+            "rows": rows,
+        });
+        self.send_event(
+            dm_room_id,
+            "org.mxdx.session.resize",
+            &serde_json::to_string(&content).map_err(to_js_err)?,
+        )
+        .await
+    }
+
+    /// Post terminal output to a DM room for a specific session.
+    #[wasm_bindgen(js_name = "postTerminalOutput")]
+    pub async fn post_terminal_output(
+        &self,
+        dm_room_id: &str,
+        session_id: &str,
+        data: &str,
+        seq: u32,
+    ) -> Result<(), JsValue> {
+        let content = serde_json::json!({
+            "session_uuid": session_id,
+            "data": data,
+            "seq": seq,
+        });
+        self.send_event(
+            dm_room_id,
+            "org.mxdx.session.output",
+            &serde_json::to_string(&content).map_err(to_js_err)?,
+        )
+        .await
+    }
+}
+
+// ---------------------------------------------------------------------------
+// State Room WASM bindings
+// ---------------------------------------------------------------------------
+//
+// These methods implement state room operations directly on `WasmMatrixClient`
+// using `matrix-sdk` (not `mxdx-worker::state_room`) because the worker crate
+// pulls in sqlite/tokio which are incompatible with WASM.
+
+#[wasm_bindgen]
+impl WasmMatrixClient {
+    /// Get or create a worker state room. Returns the room ID as a string.
+    /// Uses alias lookup first, falls back to topic scan, then creates a new
+    /// E2EE room with a deterministic alias.
+    #[wasm_bindgen(js_name = "getOrCreateStateRoom")]
+    pub async fn get_or_create_state_room(
+        &self,
+        hostname: &str,
+        os_user: &str,
+        localpart: &str,
+    ) -> Result<String, JsValue> {
+        let server_name = self
+            .client
+            .user_id()
+            .ok_or_else(|| to_js_err("Not logged in"))?
+            .server_name()
+            .to_string();
+
+        let alias_localpart = format!("mxdx-state-{hostname}.{os_user}.{localpart}");
+        let alias = format!("#{alias_localpart}:{server_name}");
+
+        // Step 1: Try alias resolution via REST API
+        let homeserver = self.client.homeserver().to_string();
+        let encoded_alias = js_sys::encode_uri_component(&alias);
+        let url = format!(
+            "{}/_matrix/client/v3/directory/room/{}",
+            homeserver.trim_end_matches('/'),
+            encoded_alias
+        );
+
+        let http_client = reqwest::Client::new();
+        let resp = http_client.get(&url).send().await;
+        if let Ok(resp) = resp {
+            if resp.status().is_success() {
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    if let Some(room_id) = body.get("room_id").and_then(|v| v.as_str()) {
+                        // Ensure we've joined and synced this room
+                        if let Err(e) = self.client.join_room_by_id(
+                            <&matrix_sdk::ruma::RoomId>::try_from(room_id).map_err(to_js_err)?,
+                        ).await {
+                            web_sys::console::warn_1(
+                                &format!("[mxdx] join state room warning: {e}").into(),
+                            );
+                        }
+                        return Ok(room_id.to_string());
+                    }
+                }
+            }
+        }
+
+        // Step 2: Fall back to topic scan
+        self.sync_once().await?;
+        let expected_topic =
+            format!("org.mxdx.worker.state:{hostname}.{os_user}.{localpart}");
+        for room in self.client.joined_rooms() {
+            if room.topic().unwrap_or_default() == expected_topic {
+                return Ok(room.room_id().to_string());
+            }
+        }
+
+        // Step 3: Create new E2EE state room with alias
+        let topic = format!("org.mxdx.worker.state:{hostname}.{os_user}.{localpart}");
+        let encryption_event = InitialStateEvent::new(
+            EmptyStateKey,
+            RoomEncryptionEventContent::with_recommended_defaults(),
+        );
+        let history_event = InitialStateEvent::new(
+            EmptyStateKey,
+            RoomHistoryVisibilityEventContent::new(HistoryVisibility::Joined),
+        );
+        let topic_event =
+            InitialStateEvent::new(EmptyStateKey, RoomTopicEventContent::new(topic));
+
+        let mut request = CreateRoomRequest::new();
+        request.name = Some(format!(
+            "mxdx: state — {hostname}.{os_user}.{localpart}"
+        ));
+        request.room_alias_name = Some(alias_localpart);
+        request.initial_state = vec![
+            encryption_event.to_raw_any(),
+            history_event.to_raw_any(),
+            topic_event.to_raw_any(),
+        ];
+
+        let response = self.client.create_room(request).await.map_err(to_js_err)?;
+        Ok(response.room_id().to_string())
+    }
+
+    /// Write config to state room.
+    #[wasm_bindgen(js_name = "writeStateRoomConfig")]
+    pub async fn write_state_room_config(
+        &self,
+        room_id: &str,
+        config_json: &str,
+    ) -> Result<(), JsValue> {
+        self.send_state_event(
+            room_id,
+            mxdx_types::events::state_room::WORKER_STATE_CONFIG,
+            "",
+            config_json,
+        )
+        .await
+    }
+
+    /// Read config from state room. Returns JSON string or null.
+    #[wasm_bindgen(js_name = "readStateRoomConfig")]
+    pub async fn read_state_room_config(&self, room_id: &str) -> Result<JsValue, JsValue> {
+        self.read_single_state_event(
+            room_id,
+            mxdx_types::events::state_room::WORKER_STATE_CONFIG,
+            "",
+        )
+        .await
+    }
+
+    /// Write a session entry. State key: {device_id}/{uuid}
+    #[wasm_bindgen(js_name = "writeSession")]
+    pub async fn write_session(
+        &self,
+        room_id: &str,
+        device_id: &str,
+        uuid: &str,
+        session_json: &str,
+    ) -> Result<(), JsValue> {
+        let state_key = format!("{device_id}/{uuid}");
+        self.send_state_event(
+            room_id,
+            mxdx_types::events::state_room::WORKER_STATE_SESSION,
+            &state_key,
+            session_json,
+        )
+        .await
+    }
+
+    /// Remove a session entry (writes empty content). State key: {device_id}/{uuid}
+    #[wasm_bindgen(js_name = "removeSession")]
+    pub async fn remove_session(
+        &self,
+        room_id: &str,
+        device_id: &str,
+        uuid: &str,
+    ) -> Result<(), JsValue> {
+        let state_key = format!("{device_id}/{uuid}");
+        self.send_state_event(
+            room_id,
+            mxdx_types::events::state_room::WORKER_STATE_SESSION,
+            &state_key,
+            "{}",
+        )
+        .await
+    }
+
+    /// Read all sessions from state room. Returns JSON array string.
+    #[wasm_bindgen(js_name = "readSessions")]
+    pub async fn read_sessions(&self, room_id: &str) -> Result<String, JsValue> {
+        self.read_all_state_events_of_type(
+            room_id,
+            mxdx_types::events::state_room::WORKER_STATE_SESSION,
+        )
+        .await
+    }
+
+    /// Write a tracked room entry. State key: room_id_key
+    #[wasm_bindgen(js_name = "writeRoom")]
+    pub async fn write_room(
+        &self,
+        room_id: &str,
+        room_id_key: &str,
+        entry_json: &str,
+    ) -> Result<(), JsValue> {
+        self.send_state_event(
+            room_id,
+            mxdx_types::events::state_room::WORKER_STATE_ROOM,
+            room_id_key,
+            entry_json,
+        )
+        .await
+    }
+
+    /// Read all tracked rooms. Returns JSON array string.
+    #[wasm_bindgen(js_name = "readRooms")]
+    pub async fn read_rooms(&self, room_id: &str) -> Result<String, JsValue> {
+        self.read_all_state_events_of_type(
+            room_id,
+            mxdx_types::events::state_room::WORKER_STATE_ROOM,
+        )
+        .await
+    }
+
+    /// Write a trusted entity. entity_type is "client" or "coordinator".
+    #[wasm_bindgen(js_name = "writeTrustedEntity")]
+    pub async fn write_trusted_entity(
+        &self,
+        room_id: &str,
+        entity_type: &str,
+        user_id: &str,
+        entity_json: &str,
+    ) -> Result<(), JsValue> {
+        let event_type = match entity_type {
+            "client" => mxdx_types::events::state_room::WORKER_STATE_TRUSTED_CLIENT,
+            "coordinator" => mxdx_types::events::state_room::WORKER_STATE_TRUSTED_COORDINATOR,
+            _ => return Err(to_js_err(format!("Unknown entity type: {entity_type}"))),
+        };
+        self.send_state_event(room_id, event_type, user_id, entity_json)
+            .await
+    }
+
+    /// Read trusted entities. Returns JSON array string.
+    #[wasm_bindgen(js_name = "readTrustedEntities")]
+    pub async fn read_trusted_entities(
+        &self,
+        room_id: &str,
+        entity_type: &str,
+    ) -> Result<String, JsValue> {
+        let event_type = match entity_type {
+            "client" => mxdx_types::events::state_room::WORKER_STATE_TRUSTED_CLIENT,
+            "coordinator" => mxdx_types::events::state_room::WORKER_STATE_TRUSTED_COORDINATOR,
+            _ => return Err(to_js_err(format!("Unknown entity type: {entity_type}"))),
+        };
+        self.read_all_state_events_of_type(room_id, event_type)
+            .await
+    }
+
+    /// Write topology to state room.
+    #[wasm_bindgen(js_name = "writeTopology")]
+    pub async fn write_topology(
+        &self,
+        room_id: &str,
+        topology_json: &str,
+    ) -> Result<(), JsValue> {
+        self.send_state_event(
+            room_id,
+            mxdx_types::events::state_room::WORKER_STATE_TOPOLOGY,
+            "",
+            topology_json,
+        )
+        .await
+    }
+
+    /// Read topology from state room. Returns JSON string or null.
+    #[wasm_bindgen(js_name = "readTopology")]
+    pub async fn read_topology(&self, room_id: &str) -> Result<JsValue, JsValue> {
+        self.read_single_state_event(
+            room_id,
+            mxdx_types::events::state_room::WORKER_STATE_TOPOLOGY,
+            "",
+        )
+        .await
+    }
+
+    /// Get state room event type constants as JSON.
+    #[wasm_bindgen(js_name = "stateRoomEventTypes")]
+    pub fn state_room_event_types() -> String {
+        serde_json::json!({
+            "WORKER_STATE_CONFIG": mxdx_types::events::state_room::WORKER_STATE_CONFIG,
+            "WORKER_STATE_IDENTITY": mxdx_types::events::state_room::WORKER_STATE_IDENTITY,
+            "WORKER_STATE_ROOM": mxdx_types::events::state_room::WORKER_STATE_ROOM,
+            "WORKER_STATE_SESSION": mxdx_types::events::state_room::WORKER_STATE_SESSION,
+            "WORKER_STATE_TOPOLOGY": mxdx_types::events::state_room::WORKER_STATE_TOPOLOGY,
+            "WORKER_STATE_ROOM_POINTER": mxdx_types::events::state_room::WORKER_STATE_ROOM_POINTER,
+            "WORKER_STATE_TRUSTED_CLIENT": mxdx_types::events::state_room::WORKER_STATE_TRUSTED_CLIENT,
+            "WORKER_STATE_TRUSTED_COORDINATOR": mxdx_types::events::state_room::WORKER_STATE_TRUSTED_COORDINATOR,
+        })
+        .to_string()
+    }
+}
+
+// Private helpers for state room operations
+impl WasmMatrixClient {
+    /// Read a single state event by type and state key.
+    /// Returns JsValue::NULL if not found, or a JSON string JsValue if found.
+    async fn read_single_state_event(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+    ) -> Result<JsValue, JsValue> {
+        let homeserver = self.client.homeserver().to_string();
+        let token = self
+            .client
+            .matrix_auth()
+            .session()
+            .map(|s| s.tokens.access_token.clone())
+            .ok_or_else(|| to_js_err("No active session"))?;
+
+        let url = format!(
+            "{}/_matrix/client/v3/rooms/{}/state/{}/{}",
+            homeserver.trim_end_matches('/'),
+            js_sys::encode_uri_component(room_id),
+            js_sys::encode_uri_component(event_type),
+            js_sys::encode_uri_component(state_key),
+        );
+
+        let http_client = reqwest::Client::new();
+        let resp = http_client
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .map_err(|e| to_js_err(format!("State event fetch failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Ok(JsValue::NULL);
+        }
+
+        let body = resp.text().await.map_err(to_js_err)?;
+
+        // Check for errcode or empty content
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
+            if val.get("errcode").is_some() {
+                return Ok(JsValue::NULL);
+            }
+            if val.is_object() && val.as_object().map(|o| o.is_empty()).unwrap_or(false) {
+                return Ok(JsValue::NULL);
+            }
+        }
+
+        Ok(JsValue::from_str(&body))
+    }
+
+    /// Read all state events of a given type from a room.
+    /// Returns a JSON array string, filtering out empty content (removed entries).
+    async fn read_all_state_events_of_type(
+        &self,
+        room_id: &str,
+        event_type: &str,
+    ) -> Result<String, JsValue> {
+        let homeserver = self.client.homeserver().to_string();
+        let token = self
+            .client
+            .matrix_auth()
+            .session()
+            .map(|s| s.tokens.access_token.clone())
+            .ok_or_else(|| to_js_err("No active session"))?;
+
+        // GET /_matrix/client/v3/rooms/{roomId}/state returns all state events
+        let url = format!(
+            "{}/_matrix/client/v3/rooms/{}/state",
+            homeserver.trim_end_matches('/'),
+            js_sys::encode_uri_component(room_id),
+        );
+
+        let http_client = reqwest::Client::new();
+        let resp = http_client
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .map_err(|e| to_js_err(format!("State fetch failed: {e}")))?;
+
+        if !resp.status().is_success() {
+            return Ok("[]".to_string());
+        }
+
+        let all_events: Vec<serde_json::Value> =
+            resp.json().await.map_err(to_js_err)?;
+
+        let mut results: Vec<serde_json::Value> = Vec::new();
+        for event in all_events {
+            let etype = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            if etype != event_type {
+                continue;
+            }
+            if let Some(content) = event.get("content") {
+                // Skip empty content (removed entries)
+                if content.is_object()
+                    && content.as_object().map(|o| o.is_empty()).unwrap_or(false)
+                {
+                    continue;
+                }
+                if content.is_null() {
+                    continue;
+                }
+                results.push(content.clone());
+            }
+        }
+
+        serde_json::to_string(&results).map_err(to_js_err)
+    }
 }
 
 // Private helpers
@@ -975,4 +1445,98 @@ impl WasmMatrixClient {
         let response = self.client.create_room(request).await.map_err(to_js_err)?;
         Ok(response.room_id().to_string())
     }
+}
+
+// === Unified Session Types ===
+
+/// Create a SessionTask JSON string from parameters.
+/// `timeout_seconds_js` accepts a JS number or null/undefined for None.
+#[wasm_bindgen]
+pub fn create_session_task(
+    bin: &str,
+    args: JsValue,
+    interactive: bool,
+    no_room_output: bool,
+    timeout_seconds_js: JsValue,
+    heartbeat_interval_seconds: u64,
+    sender_id: &str,
+) -> Result<String, JsValue> {
+    let args_vec: Vec<String> = serde_wasm_bindgen::from_value(args).map_err(to_js_err)?;
+    let timeout_seconds: Option<u64> = if timeout_seconds_js.is_null() || timeout_seconds_js.is_undefined() {
+        None
+    } else {
+        Some(
+            timeout_seconds_js
+                .as_f64()
+                .ok_or_else(|| to_js_err("timeout_seconds must be a number or null"))? as u64,
+        )
+    };
+    let task = mxdx_types::events::session::SessionTask {
+        uuid: uuid::Uuid::new_v4().to_string(),
+        sender_id: sender_id.to_string(),
+        bin: bin.to_string(),
+        args: args_vec,
+        env: None,
+        cwd: None,
+        interactive,
+        no_room_output,
+        timeout_seconds,
+        heartbeat_interval_seconds,
+        plan: None,
+        required_capabilities: vec![],
+        routing_mode: None,
+        on_timeout: None,
+        on_heartbeat_miss: None,
+    };
+    serde_json::to_string(&task).map_err(to_js_err)
+}
+
+/// Parse a SessionResult JSON string and return it (for JS consumption).
+#[wasm_bindgen]
+pub fn parse_session_result(json: &str) -> Result<String, JsValue> {
+    let result: mxdx_types::events::session::SessionResult =
+        serde_json::from_str(json).map_err(to_js_err)?;
+    serde_json::to_string(&result).map_err(to_js_err)
+}
+
+/// Parse an ActiveSessionState JSON string.
+#[wasm_bindgen]
+pub fn parse_active_session(json: &str) -> Result<String, JsValue> {
+    let state: mxdx_types::events::session::ActiveSessionState =
+        serde_json::from_str(json).map_err(to_js_err)?;
+    serde_json::to_string(&state).map_err(to_js_err)
+}
+
+/// Parse a CompletedSessionState JSON string.
+#[wasm_bindgen]
+pub fn parse_completed_session(json: &str) -> Result<String, JsValue> {
+    let state: mxdx_types::events::session::CompletedSessionState =
+        serde_json::from_str(json).map_err(to_js_err)?;
+    serde_json::to_string(&state).map_err(to_js_err)
+}
+
+/// Parse a WorkerInfo JSON string.
+#[wasm_bindgen]
+pub fn parse_worker_info(json: &str) -> Result<String, JsValue> {
+    let info: mxdx_types::events::worker_info::WorkerInfo =
+        serde_json::from_str(json).map_err(to_js_err)?;
+    serde_json::to_string(&info).map_err(to_js_err)
+}
+
+/// Get session event type constants as JSON.
+#[wasm_bindgen]
+pub fn session_event_types() -> String {
+    serde_json::json!({
+        "SESSION_TASK": mxdx_types::events::session::SESSION_TASK,
+        "SESSION_START": mxdx_types::events::session::SESSION_START,
+        "SESSION_OUTPUT": mxdx_types::events::session::SESSION_OUTPUT,
+        "SESSION_HEARTBEAT": mxdx_types::events::session::SESSION_HEARTBEAT,
+        "SESSION_RESULT": mxdx_types::events::session::SESSION_RESULT,
+        "SESSION_INPUT": mxdx_types::events::session::SESSION_INPUT,
+        "SESSION_SIGNAL": mxdx_types::events::session::SESSION_SIGNAL,
+        "SESSION_RESIZE": mxdx_types::events::session::SESSION_RESIZE,
+        "SESSION_CANCEL": mxdx_types::events::session::SESSION_CANCEL,
+        "WORKER_INFO": mxdx_types::events::worker_info::WORKER_INFO,
+    })
+    .to_string()
 }

@@ -26,6 +26,23 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 
+/**
+ * Write a performance JSON entry to TEST_PERF_OUTPUT (if set).
+ */
+function writePerfEntry(name, transport, durationMs, exitCode, stdoutLines) {
+  const perfPath = process.env.TEST_PERF_OUTPUT;
+  if (!perfPath) return;
+  const entry = JSON.stringify({
+    name,
+    transport,
+    duration_ms: durationMs,
+    exit_code: exitCode ?? 0,
+    stdout_lines: stdoutLines ?? 0,
+    status: (exitCode ?? 0) === 0 ? 'pass' : 'fail',
+  });
+  fs.appendFileSync(perfPath, entry + '\n');
+}
+
 const ROOT = path.resolve(import.meta.dirname, '..', '..', '..');
 const LAUNCHER_BIN = path.join(ROOT, 'packages', 'launcher', 'bin', 'mxdx-launcher.js');
 const WEB_CONSOLE_DIR = path.join(ROOT, 'packages', 'web-console');
@@ -209,6 +226,7 @@ test.setTimeout(180000);
 
 test.describe('Public Server Session Persistence', () => {
   test('full flow: login, terminal, navigate away, reconnect', async ({ page }) => {
+    const testStart = Date.now();
     // Determine the server hostname for login form
     // test-credentials.toml uses matrix-client.matrix.org but login form wants matrix.org
     const serverForLogin = creds.serverUrl.replace('matrix-client.matrix.org', 'matrix.org');
@@ -374,6 +392,7 @@ test.describe('Public Server Session Persistence', () => {
       console.log(`[pub-e2e] Reconnected session saved: id=${parsed.sessionId}`);
     }
 
+    writePerfEntry('session-persistence', 'npm-public', Date.now() - testStart, 0, 0);
     console.log('[pub-e2e] PASS (full persistence flow with reconnect)');
   });
 

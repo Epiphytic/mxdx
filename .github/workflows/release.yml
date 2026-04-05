@@ -9,10 +9,12 @@ permissions:
   id-token: write
   issues: write
   pull-requests: write
+  checks: write
 
 jobs:
-  release:
+  e2e-gate:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,28 +35,40 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - name: Install system deps
-        run: sudo apt-get install -y libsqlite3-dev libssl-dev
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev tmux
 
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
-      - name: Build workspace
-        run: cargo build --workspace --exclude mxdx-core-wasm
+      - name: Write test credentials
+        if: env.TEST_CREDENTIALS_TOML != ''
+        run: echo "$TEST_CREDENTIALS_TOML" > test-credentials.toml
+        env:
+          TEST_CREDENTIALS_TOML: ${{ secrets.TEST_CREDENTIALS_TOML }}
 
-      - name: Run Rust tests
+      # Run unit tests first (fast gate)
+      - name: Run Rust unit tests
         run: cargo test --workspace --lib --exclude mxdx-core-wasm
 
-      - name: Build WASM (nodejs)
-        run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
+      # Run E2E test suite (builds release binaries + WASM, runs both suites)
+      - name: Run E2E test suite (release profile)
+        if: env.TEST_CREDENTIALS_TOML != ''
+        run: ./scripts/e2e-test-suite.sh --profile release
+        env:
+          TEST_CREDENTIALS_TOML: ${{ secrets.TEST_CREDENTIALS_TOML }}
 
-      - name: Build WASM (web)
-        run: wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/core/wasm/web
-
-      - name: Clean wasm-pack artifacts that block npm pack
-        run: rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/nodejs/package.json packages/core/wasm/web/.gitignore packages/core/wasm/web/package.json
-
-      - name: Install npm deps
-        run: npm install
+      # Build release binaries (if E2E was skipped due to missing secret, build here)
+      - name: Build release binaries (fallback)
+        if: env.TEST_CREDENTIALS_TOML == ''
+        run: |
+          cargo build --release -p mxdx-worker -p mxdx-client
+          wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
+          wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/core/wasm/web
+          rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/nodejs/package.json \
+                packages/core/wasm/web/.gitignore packages/core/wasm/web/package.json
+          npm install
+        env:
+          TEST_CREDENTIALS_TOML: ${{ secrets.TEST_CREDENTIALS_TOML }}
 
       - name: Build web-console
         run: cd packages/web-console && npx vite build
@@ -65,6 +79,102 @@ jobs:
           node packages/mxdx/bin/mxdx.js --version
           node packages/mxdx/bin/mxdx.js launcher --help
           node packages/mxdx/bin/mxdx.js client --help
+
+      # Upload release binaries as artifacts for the release job
+      - name: Upload release binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries
+          path: |
+            target/release/mxdx-worker
+            target/release/mxdx-client
+          retention-days: 1
+
+      # Upload test results
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-e2e-results
+          path: test-results/
+          retention-days: 90
+
+      - name: Render Rust test report
+        if: always() && hashFiles('test-results/rust-e2e-junit.xml') != ''
+        uses: dorny/test-reporter@v1
+        with:
+          name: Release Rust E2E Tests
+          path: test-results/rust-e2e-junit.xml
+          reporter: java-junit
+          fail-on-error: false
+
+      - name: Render npm test report
+        if: always() && hashFiles('test-results/npm-e2e-junit.xml') != ''
+        uses: dorny/test-reporter@v1
+        with:
+          name: Release npm E2E Tests
+          path: test-results/npm-e2e-junit.xml
+          reporter: java-junit
+          fail-on-error: false
+
+  release:
+    needs: e2e-gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Pin to 1.93.1: rustc 1.94.0 has a trait solver regression
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Install system deps
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM (nodejs)
+        run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
+
+      - name: Build WASM (web)
+        run: wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/core/wasm/web
+
+      - name: Clean wasm-pack artifacts
+        run: rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/nodejs/package.json packages/core/wasm/web/.gitignore packages/core/wasm/web/package.json
+
+      - name: Install npm deps
+        run: npm install
+
+      - name: Build web-console
+        run: cd packages/web-console && npx vite build
+
+      # Download pre-built release binaries from e2e-gate
+      - name: Download release binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: release-binaries
+          path: release-binaries/
+
+      - name: Make binaries executable
+        run: chmod +x release-binaries/mxdx-worker release-binaries/mxdx-client
+
+      # Rename binaries with platform suffix for GitHub Release
+      - name: Prepare release assets
+        run: |
+          mkdir -p release-assets
+          cp release-binaries/mxdx-worker release-assets/mxdx-worker-x86_64-unknown-linux-gnu
+          cp release-binaries/mxdx-client release-assets/mxdx-client-x86_64-unknown-linux-gnu
 
       - name: Release
         env:

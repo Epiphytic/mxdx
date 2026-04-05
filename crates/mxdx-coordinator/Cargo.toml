@@ -1,0 +1,36 @@
+[package]
+name = "mxdx-coordinator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Coordinator for mxdx: routes tasks to workers, monitors sessions"
+
+[[bin]]
+name = "mxdx-coordinator"
+path = "src/main.rs"
+
+[lib]
+name = "mxdx_coordinator"
+path = "src/lib.rs"
+
+[dependencies]
+mxdx-types = { path = "../mxdx-types", version = "1.1.0" }
+mxdx-matrix = { path = "../mxdx-matrix", version = "1.1.0" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
+hostname = "0.4"
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+tokio = { workspace = true }
+mxdx-types = { path = "../mxdx-types", version = "1.1.0" }

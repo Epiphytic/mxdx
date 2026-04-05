@@ -1,0 +1,110 @@
+{
+  "timestamp": "2026-03-29T06:00:30.630992611+00:00",
+  "server": "tuwunel-local",
+  "federated": false,
+  "git_sha": "025c11eedeb5b438bc6c5931a7bb82e68d9b428b",
+  "metrics": [
+    {
+      "name": "login",
+      "operation": "MatrixClient::register_and_connect",
+      "latency_ms": 499.0445245,
+      "samples": 1,
+      "min_ms": 499.0445245,
+      "max_ms": 499.0445245,
+      "p50_ms": 499.0445245,
+      "p95_ms": 499.0445245,
+      "p99_ms": 499.0445245
+    },
+    {
+      "name": "room_creation",
+      "operation": "MatrixClient::create_encrypted_room",
+      "latency_ms": 2.666541,
+      "samples": 1,
+      "min_ms": 2.666541,
+      "max_ms": 2.666541,
+      "p50_ms": 2.666541,
+      "p95_ms": 2.666541,
+      "p99_ms": 2.666541
+    },
+    {
+      "name": "e2ee_key_exchange",
+      "operation": "4x sync_once round-trip",
+      "latency_ms": 30176.386549,
+      "samples": 1,
+      "min_ms": 30176.386549,
+      "max_ms": 30176.386549,
+      "p50_ms": 30176.386549,
+      "p95_ms": 30176.386549,
+      "p99_ms": 30176.386549
+    },
+    {
+      "name": "event_send",
+      "operation": "send_event (session task)",
+      "latency_ms": 17.523935799999997,
+      "samples": 5,
+      "min_ms": 7.187342,
+      "max_ms": 55.086017,
+      "p50_ms": 7.791176,
+      "p95_ms": 55.086017,
+      "p99_ms": 55.086017
+    },
+    {
+      "name": "event_delivery",
+      "operation": "send -> sync_and_collect",
+      "latency_ms": 5117.190421,
+      "samples": 5,
+      "min_ms": 5091.0795259999995,
+      "max_ms": 5191.5170499999995,
+      "p50_ms": 5101.8159430000005,
+      "p95_ms": 5191.5170499999995,
+      "p99_ms": 5191.5170499999995
+    },
+    {
+      "name": "threaded_event_send",
+      "operation": "send_threaded_event (session output)",
+      "latency_ms": 17.6072396,
+      "samples": 5,
+      "min_ms": 10.498923,
+      "max_ms": 42.101197,
+      "p50_ms": 11.987199,
+      "p95_ms": 42.101197,
+      "p99_ms": 42.101197
+    },
+    {
+      "name": "state_event_roundtrip",
+      "operation": "send_state_event + sync + get_room_state_event",
+      "latency_ms": 52.709287999999994,
+      "samples": 5,
+      "min_ms": 27.992564,
+      "max_ms": 137.640822,
+      "p50_ms": 32.673621,
+      "p95_ms": 137.640822,
+      "p99_ms": 137.640822
+    },
+    {
+      "name": "full_session_lifecycle",
+      "operation": "task -> start -> output -> heartbeat -> result",
+      "latency_ms": 5270.957896999999,
+      "samples": 3,
+      "min_ms": 5262.844669,
+      "max_ms": 5282.413705999999,
+      "p50_ms": 5267.615315999999,
+      "p95_ms": 5282.413705999999,
+      "p99_ms": 5282.413705999999
+    },
+    {
+      "name": "burst_throughput",
+      "operation": "20 events sequential",
+      "latency_ms": 242.15049,
+      "throughput_ops_per_sec": 82.59326669130424,
+      "samples": 20
+    },
+    {
+      "name": "sustained_throughput",
+      "operation": "10 events with sync between sends",
+      "latency_ms": 509.68809400000004,
+      "throughput_ops_per_sec": 19.61984224807103,
+      "samples": 10
+    }
+  ]
+}

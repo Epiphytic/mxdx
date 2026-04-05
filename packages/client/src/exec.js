@@ -1,6 +1,10 @@
 import crypto from 'node:crypto';
+import { run } from './run.js';
 
 /**
+ * @deprecated Use `run()` from './run.js' instead. This function is retained
+ * for backward compatibility during the unified session migration.
+ *
  * Send a command to a launcher and collect the result.
  * @param {WasmMatrixClient} client - Connected WASM client
  * @param {Object} topology - Launcher topology with exec_room_id
