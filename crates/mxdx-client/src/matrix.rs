@@ -341,8 +341,10 @@ pub async fn connect_multi(
         "connected to Matrix"
     );
 
-    // After fresh login, remove passwords from config (now saved in keychain)
-    if fresh_logins.iter().any(|&f| f) {
+    // After fresh login, remove passwords from config (now saved in keychain).
+    // Set MXDX_KEEP_PASSWORDS=1 to skip stripping (used by E2E test suite).
+    let keep_passwords = std::env::var("MXDX_KEEP_PASSWORDS").map_or(false, |v| v == "1");
+    if !keep_passwords && fresh_logins.iter().any(|&f| f) {
         if let Err(e) = mxdx_types::config::remove_passwords_from_config("defaults.toml", None) {
             tracing::warn!(error = %e, "failed to remove passwords from config");
         }
