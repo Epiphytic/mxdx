@@ -41,6 +41,8 @@ struct SharedTestState {
     creds: TestCreds,
     store_dir: PathBuf,
     keychain_dir: PathBuf,
+    /// HOME directory for config files — daemon reads defaults.toml from here.
+    config_home: PathBuf,
 }
 
 /// Check if security gates have failed; if so, skip the current test.
@@ -173,6 +175,45 @@ fn isolated_test_dirs(test_name: &str) -> (tempfile::TempDir, tempfile::TempDir)
         .tempdir()
         .expect("failed to create temp keychain dir");
     (store_dir, keychain_dir)
+}
+
+/// Write mxdx config files (defaults.toml + client.toml) into a config HOME dir.
+/// The daemon reads these to connect to Matrix without CLI flags.
+fn write_test_config(config_home: &std::path::Path, creds: &TestCreds, worker_room: &str) {
+    let mxdx_dir = config_home.join(".mxdx");
+    std::fs::create_dir_all(&mxdx_dir).expect("failed to create .mxdx config dir");
+
+    // Write defaults.toml with test account
+    let localpart = creds.client_user
+        .split(':')
+        .next()
+        .unwrap_or(&creds.client_user)
+        .trim_start_matches('@');
+    let defaults_toml = format!(
+        r#"[[accounts]]
+user_id = "@{localpart}:{server}"
+homeserver = "{homeserver}"
+password = "{password}"
+"#,
+        localpart = localpart,
+        server = creds.server_url.trim_start_matches("https://").trim_start_matches("http://"),
+        homeserver = creds.server_url,
+        password = creds.client_pass,
+    );
+    std::fs::write(mxdx_dir.join("defaults.toml"), &defaults_toml)
+        .expect("failed to write defaults.toml");
+
+    // Write client.toml with default worker room
+    let client_toml = format!(
+        r#"default_worker_room = "{worker_room}"
+
+[daemon]
+idle_timeout_seconds = 300
+"#,
+        worker_room = worker_room,
+    );
+    std::fs::write(mxdx_dir.join("client.toml"), &client_toml)
+        .expect("failed to write client.toml");
 }
 
 /// Get persistent store directories for shared state tests.
@@ -333,13 +374,42 @@ fn run_client_with_liveness(hs: &str, user: &str, pass: &str, worker_room: &str,
         .expect("failed to wait for mxdx-client")
 }
 
-/// Run the client with --skip-liveness-check (standard operation).
-/// Uses daemon mode by default — the daemon auto-spawns on first call and
-/// holds a persistent Matrix connection for subsequent calls.
+/// Run the client via daemon mode using config files.
+/// Credentials come from defaults.toml in the config_home dir, not CLI flags.
+/// The daemon auto-spawns on first call and holds a persistent Matrix connection.
+fn run_client_daemon(config_home: &std::path::Path, extra_args: &[&str],
+                     store_dir: &std::path::Path, keychain_dir: &std::path::Path) -> Output {
+    let mut full: Vec<&str> = Vec::new();
+    if !extra_args.is_empty() {
+        full.push(extra_args[0]); // subcommand
+        full.push("--skip-liveness-check");
+        if extra_args[0] == "run" || extra_args[0] == "exec" {
+            full.extend_from_slice(&["--cwd", "/tmp"]);
+        }
+        full.extend_from_slice(&extra_args[1..]);
+    }
+    Command::new("timeout")
+        .arg("330")
+        .arg(cargo_bin("mxdx-client"))
+        .args(&full)
+        .env("HOME", config_home.to_str().unwrap())
+        .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
+        .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn mxdx-client")
+        .wait_with_output()
+        .expect("failed to wait for mxdx-client")
+}
+
+/// Run the client in direct mode (--no-daemon) with CLI credentials.
+/// Used for security gate tests and isolated tests that need their own connection.
 fn run_client(hs: &str, user: &str, pass: &str, worker_room: &str, extra_args: &[&str],
               store_dir: &std::path::Path, keychain_dir: &std::path::Path) -> Output {
     let mut full: Vec<&str> = vec![
         "--homeserver", hs, "--username", user, "--password", pass,
+        "--no-daemon",
     ];
     if !extra_args.is_empty() {
         full.push(extra_args[0]);
@@ -658,7 +728,10 @@ async fn t02_security_capability_mismatch() {
 // PHASE 1 — SYNC PROFILE (start persistent worker, measure timing)
 // ===========================================================================
 
-/// Start the persistent worker and measure startup + sync timing.
+/// Start the persistent worker, write config, and measure startup + sync timing.
+/// The warmup call uses direct mode to seed the keychain. Phase 2+ tests then
+/// use daemon mode — the daemon reads config from config_home and holds a
+/// persistent Matrix connection.
 #[tokio::test]
 #[ignore = "requires test-credentials.toml + beta server"]
 async fn t10_start_worker_and_sync() {
@@ -667,6 +740,15 @@ async fn t10_start_worker_and_sync() {
     let auth_user = c.client_matrix_id();
     let worker_room = default_worker_room(&c.worker_user);
     let (store_dir, keychain_dir) = persistent_test_dirs();
+
+    // Write config files for daemon mode
+    let config_home = dirs::home_dir()
+        .expect("cannot resolve home dir")
+        .join(".mxdx")
+        .join("e2e-local")
+        .join("home");
+    std::fs::create_dir_all(&config_home).expect("failed to create config home");
+    write_test_config(&config_home, &c, &worker_room);
 
     let worker_start = Instant::now();
     let w = start_worker(
@@ -677,7 +759,8 @@ async fn t10_start_worker_and_sync() {
     let worker_startup = worker_start.elapsed();
     report("worker-startup", "setup", worker_startup, Some(0), 0);
 
-    // Warmup command: measure client connect time
+    // Warmup: direct mode to seed keychain and establish session.
+    // This is the "cold start" — subsequent daemon calls will be fast.
     let client_start = Instant::now();
     let warmup = run_client(
         &c.server_url, &c.client_user, &c.client_pass,
@@ -687,11 +770,9 @@ async fn t10_start_worker_and_sync() {
     let client_connect = client_start.elapsed();
     report("client-connect", "setup", client_connect, warmup.status.code(), 0);
 
-    // Total sync time (worker start to warmup complete)
     let sync_total = worker_start.elapsed();
     report("sync-total", "setup", sync_total, Some(0), 0);
 
-    // Log connection type from warmup stderr
     let stderr = String::from_utf8_lossy(&warmup.stderr);
     if stderr.contains("fresh login completed") {
         eprintln!("[t10] connection type: fresh login (cold start)");
@@ -710,6 +791,7 @@ async fn t10_start_worker_and_sync() {
         creds: c,
         store_dir,
         keychain_dir,
+        config_home,
     });
 
     eprintln!("[t10] persistent worker started, shared state initialized");
@@ -724,18 +806,16 @@ async fn t10_start_worker_and_sync() {
 async fn t20_echo_local() {
     skip_if_gate_failed!();
     let state = SHARED_STATE.get().expect("t10 must run first");
-    let c = &state.creds;
 
     let start = Instant::now();
-    let out = run_client(
-        &c.server_url, &c.client_user, &c.client_pass,
-        &state.worker_room, &["run", "/bin/echo", "hello", "world"],
+    let out = run_client_daemon(
+        &state.config_home, &["run", "/bin/echo", "hello", "world"],
         &state.store_dir, &state.keychain_dir,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
-    report("echo", "mxdx-local", start.elapsed(), out.status.code(), stdout.lines().count());
+    report("echo", "mxdx-local-daemon", start.elapsed(), out.status.code(), stdout.lines().count());
 }
 
 #[tokio::test]
@@ -743,16 +823,14 @@ async fn t20_echo_local() {
 async fn t21_exit_code_local() {
     skip_if_gate_failed!();
     let state = SHARED_STATE.get().expect("t10 must run first");
-    let c = &state.creds;
 
     let start = Instant::now();
-    let out = run_client(
-        &c.server_url, &c.client_user, &c.client_pass,
-        &state.worker_room, &["run", "/bin/false"],
+    let out = run_client_daemon(
+        &state.config_home, &["run", "/bin/false"],
         &state.store_dir, &state.keychain_dir,
     );
     assert!(!out.status.success());
-    report("exit-code(/bin/false)", "mxdx-local", start.elapsed(), out.status.code(), 0);
+    report("exit-code(/bin/false)", "mxdx-local-daemon", start.elapsed(), out.status.code(), 0);
 }
 
 #[tokio::test]
@@ -760,20 +838,18 @@ async fn t21_exit_code_local() {
 async fn t22_md5sum_local() {
     skip_if_gate_failed!();
     let state = SHARED_STATE.get().expect("t10 must run first");
-    let c = &state.creds;
 
     let fp = large_file(10_000);
     let script = md5_script(&fp);
     let start = Instant::now();
-    let out = run_client(
-        &c.server_url, &c.client_user, &c.client_pass,
-        &state.worker_room, &["run", "--", "/bin/sh", "-c", &script],
+    let out = run_client_daemon(
+        &state.config_home, &["run", "--", "/bin/sh", "-c", &script],
         &state.store_dir, &state.keychain_dir,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
-    report("md5sum(10k lines)", "mxdx-local", start.elapsed(), out.status.code(), stdout.lines().count());
+    report("md5sum(10k lines)", "mxdx-local-daemon", start.elapsed(), out.status.code(), stdout.lines().count());
     let _ = std::fs::remove_file(&fp);
 }
 
@@ -782,12 +858,10 @@ async fn t22_md5sum_local() {
 async fn t23_ping_local() {
     skip_if_gate_failed!();
     let state = SHARED_STATE.get().expect("t10 must run first");
-    let c = &state.creds;
 
     let start = Instant::now();
-    let out = run_client(
-        &c.server_url, &c.client_user, &c.client_pass,
-        &state.worker_room, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"],
+    let out = run_client_daemon(
+        &state.config_home, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"],
         &state.store_dir, &state.keychain_dir,
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
