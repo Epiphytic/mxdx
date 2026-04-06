@@ -77,13 +77,95 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        // All other commands: --no-daemon or daemon mode
+        // All other commands: daemon mode (default) or direct mode (--no-daemon)
         _ => {
-            // For now, always use direct mode. Daemon forwarding will be added in Task 10.
-            // When daemon forwarding is ready, check `cli.no_daemon` here.
-            run_direct(&cli).await
+            if cli.no_daemon {
+                run_direct(&cli).await
+            } else {
+                run_via_daemon(&cli).await
+            }
         }
     }
+}
+
+/// Forward command through the daemon via Unix socket IPC.
+async fn run_via_daemon(cli: &Cli) -> Result<()> {
+    use mxdx_client::cli::connect::{connect_or_spawn, send_request};
+    use mxdx_client::protocol::methods::SessionRunResult;
+
+    let stream = connect_or_spawn(&cli.profile).await?;
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = tokio::io::BufReader::new(reader);
+
+    match &cli.command {
+        Commands::Run { command, args, detach, interactive, no_room_output, timeout, cwd, worker_room, skip_liveness_check: _ }
+        | Commands::Exec { command, args, detach, interactive, no_room_output, timeout, cwd, worker_room, skip_liveness_check: _ } => {
+            let params = serde_json::json!({
+                "bin": command,
+                "args": args,
+                "detach": detach,
+                "interactive": interactive,
+                "no_room_output": no_room_output,
+                "timeout_seconds": timeout,
+                "cwd": cwd,
+                "worker_room": worker_room,
+            });
+            let result = send_request(&mut reader, &mut writer, "session.run", Some(params), 1).await?;
+            let run_result: SessionRunResult = serde_json::from_value(result)?;
+
+            if *detach {
+                println!("{}", run_result.uuid);
+                return Ok(());
+            }
+
+            // For now, daemon returns UUID and client needs to tail.
+            // When daemon streaming is ready, notifications will arrive here.
+            // Until then, print the UUID like detach mode.
+            eprintln!("Session {} submitted via daemon", run_result.uuid);
+            println!("{}", run_result.uuid);
+        }
+
+        Commands::Cancel { uuid, signal, worker_room } => {
+            let params = serde_json::json!({
+                "uuid": uuid,
+                "signal": signal,
+                "worker_room": worker_room,
+            });
+            send_request(&mut reader, &mut writer, "session.cancel", Some(params), 1).await?;
+            eprintln!("Cancel sent for session {}", uuid);
+        }
+
+        Commands::Ls { all, worker_room } => {
+            let params = serde_json::json!({
+                "all": all,
+                "worker_room": worker_room,
+            });
+            let result = send_request(&mut reader, &mut writer, "session.ls", Some(params), 1).await?;
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        }
+
+        Commands::Logs { uuid, follow, worker_room } => {
+            let params = serde_json::json!({
+                "uuid": uuid,
+                "follow": follow,
+                "worker_room": worker_room,
+            });
+            let result = send_request(&mut reader, &mut writer, "session.logs", Some(params), 1).await?;
+            if let Some(lines) = result.get("lines").and_then(|l| l.as_array()) {
+                for line in lines {
+                    if let Some(s) = line.as_str() {
+                        println!("{}", s);
+                    }
+                }
+            }
+        }
+
+        // Commands not yet forwarded via daemon -- fall back to direct
+        _ => {
+            return run_direct(cli).await;
+        }
+    }
+    Ok(())
 }
 
 /// Run command directly (no daemon). This is the existing behavior preserved verbatim.
