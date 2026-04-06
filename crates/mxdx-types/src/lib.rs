@@ -1,7 +1,10 @@
 pub mod config;
 pub mod events;
 pub mod identity;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod keychain_chain;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod keychain_file;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod keychain_os;
 pub mod trust;
