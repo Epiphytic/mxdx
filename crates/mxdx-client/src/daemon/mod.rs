@@ -5,7 +5,7 @@ pub mod transport;
 
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::{info, error};
+use tracing::{info, warn, error};
 
 use crate::config::ClientRuntimeConfig;
 use handler::Handler;
@@ -32,6 +32,29 @@ pub async fn run_daemon(
 
     // Create handler
     let handler = Arc::new(Handler::new(profile));
+
+    // Connect to Matrix (best-effort — daemon still starts if Matrix is unavailable)
+    let accounts = config.resolve_accounts();
+    if accounts.is_empty() {
+        warn!("no Matrix accounts configured — session commands will fail until connected");
+    } else {
+        let default_room = config.client.default_worker_room.clone()
+            .unwrap_or_else(|| "default".to_string());
+        match crate::matrix::connect_multi(
+            &accounts,
+            &default_room,
+            None,
+            config.force_new_device,
+        ).await {
+            Ok(mx_room) => {
+                info!(room_id = %mx_room.room_id(), "daemon connected to Matrix");
+                handler.set_matrix(mx_room).await;
+            }
+            Err(e) => {
+                error!(error = %e, "daemon failed to connect to Matrix — session commands will fail");
+            }
+        }
+    }
 
     // Start Unix socket transport
     let socket_path = transport::unix::socket_path(profile);

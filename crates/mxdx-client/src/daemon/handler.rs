@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::Mutex;
 
+use crate::matrix::MatrixClientRoom;
 use crate::protocol::{Request, Response, ErrorResponse, RequestId};
 use crate::protocol::error;
 use crate::protocol::methods::*;
@@ -18,6 +19,8 @@ pub struct Handler {
     pub profile_name: String,
     /// Epoch millis of last client activity, for idle timeout tracking.
     pub last_activity_ms: AtomicU64,
+    /// Shared Matrix connection — None until connected.
+    pub matrix: Arc<Mutex<Option<MatrixClientRoom>>>,
 }
 
 impl Handler {
@@ -32,6 +35,7 @@ impl Handler {
             started_at: Instant::now(),
             profile_name: profile_name.to_string(),
             last_activity_ms: AtomicU64::new(now_ms),
+            matrix: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -52,6 +56,12 @@ impl Handler {
             .as_millis() as u64;
         let last = self.last_activity_ms.load(Ordering::Relaxed);
         (now_ms.saturating_sub(last)) / 1000
+    }
+
+    /// Store a live Matrix connection for use by session commands.
+    pub async fn set_matrix(&self, room: MatrixClientRoom) {
+        let mut mx = self.matrix.lock().await;
+        *mx = Some(room);
     }
 
     pub async fn handle_request(&self, request: &Request, sink: &NotificationSink) -> String {
@@ -92,13 +102,15 @@ impl Handler {
 
     async fn handle_daemon_status(&self, id: &RequestId) -> String {
         let sessions = self.sessions.lock().await;
+        let mx_guard = self.matrix.lock().await;
+        let matrix_status = if mx_guard.is_some() { "connected" } else { "disconnected" };
         let result = DaemonStatusResult {
             uptime_seconds: self.started_at.elapsed().as_secs(),
             profile: self.profile_name.clone(),
             connected_clients: 0,
             active_sessions: sessions.active_count() as u32,
             transports: vec![],
-            matrix_status: "disconnected".into(),
+            matrix_status: matrix_status.into(),
             accounts: vec![],
         };
         serde_json::to_string(&Response::new(id.clone(), serde_json::to_value(result).unwrap()))
@@ -119,17 +131,87 @@ impl Handler {
         params: &Option<serde_json::Value>,
         _sink: &NotificationSink,
     ) -> String {
-        let _params = match parse_params::<SessionRunParams>(id, params) {
+        let params = match parse_params::<SessionRunParams>(id, params) {
             Ok(p) => p,
             Err(e) => return e,
         };
 
-        // Matrix connection not yet wired — return unavailable
-        // When wired: build task, post to room, track session, stream output via sink
-        serde_json::to_string(&ErrorResponse::new(
+        let mut mx_guard = self.matrix.lock().await;
+        let mx_room = match mx_guard.as_mut() {
+            Some(r) => r,
+            None => {
+                return serde_json::to_string(&ErrorResponse::new(
+                    id.clone(),
+                    error::MATRIX_UNAVAILABLE,
+                    "Matrix connection not yet available",
+                ))
+                .unwrap_or_default();
+            }
+        };
+
+        // Resolve worker room name (for session tracking)
+        let worker_room_name = params.worker_room.clone()
+            .unwrap_or_else(|| "default".to_string());
+
+        // Build task event
+        let sender_id = mx_room.user_id_string();
+        let task = crate::submit::build_task(
+            &params.bin,
+            &params.args,
+            params.interactive,
+            params.no_room_output,
+            params.timeout_seconds,
+            params.heartbeat_interval.unwrap_or(30),
+            &sender_id,
+            params.cwd.as_deref(),
+        );
+
+        let task_uuid = task.uuid.clone();
+        let task_content = match crate::matrix::serialize_event(&task) {
+            Ok(c) => c,
+            Err(e) => {
+                return serde_json::to_string(&ErrorResponse::new(
+                    id.clone(),
+                    error::INTERNAL_ERROR,
+                    format!("failed to serialize task: {e}"),
+                ))
+                .unwrap_or_default();
+            }
+        };
+
+        // Submit task to Matrix room
+        let event_id = match mx_room
+            .post_event_mut(mxdx_types::events::session::SESSION_TASK, task_content)
+            .await
+        {
+            Ok(eid) => eid,
+            Err(e) => {
+                return serde_json::to_string(&ErrorResponse::new(
+                    id.clone(),
+                    error::INTERNAL_ERROR,
+                    format!("failed to submit task: {e}"),
+                ))
+                .unwrap_or_default();
+            }
+        };
+
+        tracing::info!(uuid = %task_uuid, event_id = %event_id, "task submitted via daemon");
+
+        // Track session
+        let _rx = {
+            let mut sessions = self.sessions.lock().await;
+            sessions.track(&task_uuid, &worker_room_name)
+        };
+
+        // Return UUID — streaming output via notifications will be added
+        // when the daemon has its own background sync loop.
+        let result = SessionRunResult {
+            uuid: task_uuid,
+            status: "submitted".into(),
+        };
+        serde_json::to_string(&Response::new(
             id.clone(),
-            error::MATRIX_UNAVAILABLE,
-            "Matrix connection not yet available in daemon mode",
+            serde_json::to_value(result).unwrap(),
         ))
         .unwrap_or_default()
     }
@@ -139,15 +221,79 @@ impl Handler {
         id: &RequestId,
         params: &Option<serde_json::Value>,
     ) -> String {
-        let _params = match parse_params::<SessionCancelParams>(id, params) {
+        let params = match parse_params::<SessionCancelParams>(id, params) {
             Ok(p) => p,
             Err(e) => return e,
         };
 
-        serde_json::to_string(&ErrorResponse::new(
+        let mut mx_guard = self.matrix.lock().await;
+        let mx_room = match mx_guard.as_mut() {
+            Some(r) => r,
+            None => {
+                return serde_json::to_string(&ErrorResponse::new(
+                    id.clone(),
+                    error::MATRIX_UNAVAILABLE,
+                    "Matrix connection not yet available",
+                ))
+                .unwrap_or_default();
+            }
+        };
+
+        use mxdx_types::events::session::{SESSION_CANCEL, SESSION_SIGNAL};
+
+        if let Some(ref sig) = params.signal {
+            // Send signal event
+            let event = crate::cancel::build_signal(&params.uuid, sig);
+            let content = match crate::matrix::serialize_event(&event) {
+                Ok(c) => c,
+                Err(e) => {
+                    return serde_json::to_string(&ErrorResponse::new(
+                        id.clone(),
+                        error::INTERNAL_ERROR,
+                        format!("failed to serialize signal: {e}"),
+                    ))
+                    .unwrap_or_default();
+                }
+            };
+            if let Err(e) = mx_room.post_event_mut(SESSION_SIGNAL, content).await {
+                return serde_json::to_string(&ErrorResponse::new(
+                    id.clone(),
+                    error::INTERNAL_ERROR,
+                    format!("failed to send signal: {e}"),
+                ))
+                .unwrap_or_default();
+            }
+        } else {
+            // Send cancel event
+            let event = crate::cancel::build_cancel(&params.uuid, None, None);
+            let content = match crate::matrix::serialize_event(&event) {
+                Ok(c) => c,
+                Err(e) => {
+                    return serde_json::to_string(&ErrorResponse::new(
+                        id.clone(),
+                        error::INTERNAL_ERROR,
+                        format!("failed to serialize cancel: {e}"),
+                    ))
+                    .unwrap_or_default();
+                }
+            };
+            if let Err(e) = mx_room.post_event_mut(SESSION_CANCEL, content).await {
+                return serde_json::to_string(&ErrorResponse::new(
+                    id.clone(),
+                    error::INTERNAL_ERROR,
+                    format!("failed to send cancel: {e}"),
+                ))
+                .unwrap_or_default();
+            }
+        }
+
+        // Mark session as complete locally
+        let mut sessions = self.sessions.lock().await;
+        sessions.complete(&params.uuid);
+
+        serde_json::to_string(&Response::new(
             id.clone(),
-            error::MATRIX_UNAVAILABLE,
-            "Matrix connection not yet available in daemon mode",
+            serde_json::json!({"status": "cancelled", "uuid": params.uuid}),
         ))
         .unwrap_or_default()
     }
