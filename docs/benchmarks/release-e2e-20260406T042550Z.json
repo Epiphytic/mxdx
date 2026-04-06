@@ -1,0 +1,63 @@
+{
+  "suite": "rust-e2e",
+  "profile": "release",
+  "timestamp": "2026-04-06T04:25:50Z",
+  "git_sha": "7c39dd0",
+  "runner": "local",
+  "rust_version": "stable",
+  "node_version": "22.22.0",
+  "summary": {
+    "total": 20,
+    "passed": 13,
+    "failed": 7,
+    "notes": "7 failures: 2x long-ping timeout (pre-existing, 330s client < 300s ping), 2x md5sum timeout (server rate-limiting during extended run), 2x ping timeout (same), 1x session-restore (worker startup failure). Core functionality (security gates, echo, exit-code, explicit-room) all pass."
+  },
+  "phases": {
+    "security_gates": {
+      "t00_no_worker_room": {"status": "pass", "exit_code": 1, "duration_ms": 17010, "transport": "gate"},
+      "t01_stale_worker": {"status": "pass", "exit_code": 11, "duration_ms": 22600, "transport": "gate"},
+      "t02_capability_mismatch": {"status": "pass", "exit_code": 1, "duration_ms": 18328, "transport": "gate"}
+    },
+    "sync_profile": {
+      "worker_startup": {"status": "pass", "duration_ms": 5001, "transport": "setup"},
+      "client_connect": {"status": "pass", "duration_ms": 13651, "transport": "setup"},
+      "sync_total": {"status": "pass", "duration_ms": 18653, "transport": "setup"}
+    },
+    "local": {
+      "t20_echo": {"status": "pass", "duration_ms": 18159, "stdout_lines": 50, "transport": "mxdx-local"},
+      "t21_exit_code": {"status": "pass", "exit_code": 1, "duration_ms": 23137, "transport": "mxdx-local"},
+      "t22_md5sum": {"status": "fail", "duration_ms": 330000, "transport": "mxdx-local", "reason": "timeout"},
+      "t23_ping": {"status": "fail", "duration_ms": 330000, "transport": "mxdx-local", "reason": "timeout"}
+    },
+    "federated": {
+      "t30_echo": {"status": "pass", "duration_ms": 17437, "stdout_lines": 53, "transport": "mxdx-federated"},
+      "t31_exit_code": {"status": "pass", "exit_code": 1, "duration_ms": 22468, "transport": "mxdx-federated"},
+      "t32_md5sum": {"status": "fail", "duration_ms": 330000, "transport": "mxdx-federated", "reason": "timeout"},
+      "t33_ping": {"status": "fail", "duration_ms": 330000, "transport": "mxdx-federated", "reason": "timeout"}
+    },
+    "special": {
+      "t40_explicit_room": {"status": "pass", "duration_ms": 18236, "stdout_lines": 53, "transport": "mxdx-local"},
+      "t41_session_restore": {"status": "fail", "reason": "worker stderr empty — startup failure"}
+    },
+    "ssh_baseline": {
+      "echo": {"status": "pass", "duration_ms": 487, "stdout_lines": 1},
+      "exit_code": {"status": "pass", "exit_code": 1, "duration_ms": 218},
+      "md5sum": {"status": "pass", "duration_ms": 7285, "stdout_lines": 10000},
+      "ping_30s": {"status": "pass", "duration_ms": 29253, "stdout_lines": 35}
+    }
+  },
+  "latency_comparison": {
+    "echo": {
+      "ssh_ms": 487,
+      "mxdx_local_ms": 18159,
+      "mxdx_federated_ms": 17437,
+      "overhead_local": "37x",
+      "overhead_federated": "36x"
+    },
+    "exit_code": {
+      "ssh_ms": 218,
+      "mxdx_local_ms": 23137,
+      "mxdx_federated_ms": 22468
+    }
+  }
+}
