@@ -149,8 +149,7 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
             .await?;
         let rid = topology.exec_room_id.clone();
 
-        // Key exchange: ensure we have encryption keys for all room members.
-        tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
+        // Key exchange: fast path returns immediately if keys are cached.
         multi
             .wait_for_key_exchange(&rid, std::time::Duration::from_secs(15))
             .await?;

@@ -387,10 +387,9 @@ pub async fn connect_multi(
         let rid = topology.exec_room_id;
         tracing::info!(exec_room = %rid, "discovered worker exec room");
 
-        // Key exchange: ensure we have encryption keys for all room members.
-        // On fresh login this establishes keys; on session restore the crypto
-        // store already has them so this completes quickly.
-        tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
+        // Key exchange: on session restore, keys are already cached in the
+        // crypto store so wait_for_key_exchange returns immediately (fast path).
+        // On fresh login, this blocks until keys arrive.
         multi
             .wait_for_key_exchange(&rid, std::time::Duration::from_secs(15))
             .await

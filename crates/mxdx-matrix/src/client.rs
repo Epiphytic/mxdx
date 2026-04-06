@@ -589,62 +589,28 @@ impl MatrixClient {
     }
 
     /// Wait until E2EE key exchange completes for a room, with timeout.
-    /// Syncs in a loop until the room has encryption keys for all members.
+    ///
+    /// **Fast path**: If the crypto store already has keys for all room members
+    /// (e.g., from a prior session), returns immediately without syncing.
+    ///
+    /// **Slow path**: If any keys are missing (fresh login, new member joined),
+    /// syncs in a loop until keys arrive or timeout is reached.
     pub async fn wait_for_key_exchange(&self, room_id: &RoomId, timeout: Duration) -> Result<()> {
+        // Fast path: check if we already have keys cached from a prior session.
+        // This avoids any network round-trips on session restore.
+        if self.has_cached_keys_for_room(room_id).await? {
+            tracing::info!(room_id = %room_id, "E2EE keys already cached, skipping sync loop");
+            return Ok(());
+        }
+
+        // Slow path: keys missing, need to sync until they arrive
+        tracing::info!(room_id = %room_id, "E2EE keys not cached, entering sync loop");
         let deadline = tokio::time::Instant::now() + timeout;
 
         while tokio::time::Instant::now() < deadline {
             self.sync_once().await?;
 
-            let room = match self.client.get_room(room_id) {
-                Some(r) => r,
-                None => continue,
-            };
-
-            // Room may not have synced encryption state yet — treat as not-ready
-            // rather than spinning. Unencrypted rooms pass immediately.
-            if !room.encryption_state().is_encrypted() {
-                // If the room has active members, it might just not have synced
-                // the encryption state event yet. Keep waiting.
-                let member_count = room.joined_members_count();
-                if member_count <= 1 {
-                    // We're the only member and encryption state hasn't synced —
-                    // no one to exchange keys with. Proceed; the SDK will handle
-                    // key sharing when new members join.
-                    tracing::info!(room_id = %room_id, "single-member room, skipping key exchange wait");
-                    return Ok(());
-                }
-                continue;
-            }
-
-            let members = room
-                .members(matrix_sdk::RoomMemberships::ACTIVE)
-                .await
-                .map_err(|e| MatrixClientError::Other(e.into()))?;
-
-            // Single member (just us) — no one to exchange keys with yet
-            if members.len() <= 1 {
-                tracing::info!(room_id = %room_id, members = members.len(), "no other members yet, key exchange complete");
-                return Ok(());
-            }
-
-            let mut all_keys_available = true;
-            for member in &members {
-                let user_id = member.user_id();
-                let devices = self
-                    .client
-                    .encryption()
-                    .get_user_devices(user_id)
-                    .await
-                    .map_err(|e| MatrixClientError::Other(e.into()))?;
-
-                if devices.devices().count() == 0 {
-                    all_keys_available = false;
-                    break;
-                }
-            }
-
-            if all_keys_available {
+            if self.has_cached_keys_for_room(room_id).await? {
                 return Ok(());
             }
         }
@@ -652,6 +618,50 @@ impl MatrixClient {
         Err(MatrixClientError::KeyExchangeTimeout(format!(
             "Timed out waiting for key exchange in room {room_id}"
         )))
+    }
+
+    /// Check if the crypto store already has device keys for all members of a room.
+    /// Returns true if we can encrypt to all members without needing a sync.
+    async fn has_cached_keys_for_room(&self, room_id: &RoomId) -> Result<bool> {
+        let room = match self.client.get_room(room_id) {
+            Some(r) => r,
+            None => return Ok(false),
+        };
+
+        // Room encryption state not yet known — need sync
+        if !room.encryption_state().is_encrypted() {
+            let member_count = room.joined_members_count();
+            if member_count <= 1 {
+                // Single-member room: no one to exchange keys with
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+
+        let members = room
+            .members(matrix_sdk::RoomMemberships::ACTIVE)
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+
+        if members.len() <= 1 {
+            return Ok(true);
+        }
+
+        for member in &members {
+            let user_id = member.user_id();
+            let devices = self
+                .client
+                .encryption()
+                .get_user_devices(user_id)
+                .await
+                .map_err(|e| MatrixClientError::Other(e.into()))?;
+
+            if devices.devices().count() == 0 {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
     }
 
     /// Set an optional delay between room creation calls (for rate-limited servers).
