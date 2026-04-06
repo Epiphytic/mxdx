@@ -34,6 +34,6 @@
     "@mxdx/core": "1.1.0",
     "commander": "^14.0.3",
     "inquirer": "^12.0.0",
-    "smol-toml": "^1.0.0"
+    "smol-toml": "^1.6.1"
   }
 }
