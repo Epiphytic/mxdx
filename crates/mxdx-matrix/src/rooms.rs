@@ -104,6 +104,7 @@ impl MatrixClient {
         self.sync_once().await?;
 
         // Auto-join any invited rooms with mxdx launcher topics
+        let mut accepted_any = false;
         for room in self.inner().rooms() {
             if room.state() == matrix_sdk::RoomState::Invited {
                 let topic = room.topic().unwrap_or_default();
@@ -112,13 +113,17 @@ impl MatrixClient {
                     tracing::info!(room_id = %rid, topic = %topic, "accepting launcher room invitation");
                     if let Err(e) = self.join_room(&rid).await {
                         tracing::warn!(room_id = %rid, error = %e, "failed to accept invitation");
+                    } else {
+                        accepted_any = true;
                     }
                 }
             }
         }
 
-        // Sync again to get full state of newly joined rooms
-        self.sync_once().await?;
+        // Only sync again if we actually accepted new invitations
+        if accepted_any {
+            self.sync_once().await?;
+        }
 
         // Collect all candidates per room type, with member count for disambiguation.
         // When multiple rooms match the same topic (e.g. from previous test runs),

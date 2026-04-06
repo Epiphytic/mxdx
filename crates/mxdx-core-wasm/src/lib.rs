@@ -562,16 +562,17 @@ impl WasmMatrixClient {
             }
         }
 
-        match (space_id, exec_room_id, logs_room_id) {
-            (Some(s), Some(e), Some(l)) => {
+        // Exec room is the minimum requirement; space and logs are optional
+        match exec_room_id {
+            Some(e) => {
                 let topology = LauncherTopology {
-                    space_id: s,
-                    exec_room_id: e,
-                    logs_room_id: l,
+                    space_id: space_id.unwrap_or_else(|| e.clone()),
+                    exec_room_id: e.clone(),
+                    logs_room_id: logs_room_id.unwrap_or_else(|| e),
                 };
                 serde_wasm_bindgen::to_value(&topology).map_err(to_js_err)
             }
-            _ => Ok(JsValue::NULL),
+            None => Ok(JsValue::NULL),
         }
     }
 
