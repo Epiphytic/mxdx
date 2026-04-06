@@ -118,11 +118,54 @@ async fn run_via_daemon(cli: &Cli) -> Result<()> {
                 return Ok(());
             }
 
-            // For now, daemon returns UUID and client needs to tail.
-            // When daemon streaming is ready, notifications will arrive here.
-            // Until then, print the UUID like detach mode.
-            eprintln!("Session {} submitted via daemon", run_result.uuid);
-            println!("{}", run_result.uuid);
+            // Non-detach: tail session output via daemon notifications.
+            // The daemon spawns a background sync loop that sends
+            // session.output and session.result notifications.
+            eprintln!("Session {} submitted, waiting for output...", run_result.uuid);
+            let mut exit_code: Option<i32> = None;
+
+            loop {
+                use tokio::io::AsyncBufReadExt;
+                let mut line = String::new();
+                let n = reader.read_line(&mut line).await?;
+                if n == 0 {
+                    break; // daemon disconnected
+                }
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+
+                let value: serde_json::Value = match serde_json::from_str(trimmed) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+
+                // Notifications have "method" but no "id"
+                if let Some(method) = value.get("method").and_then(|m| m.as_str()) {
+                    match method {
+                        "session.output" => {
+                            if let Some(data) = value.pointer("/params/data").and_then(|d| d.as_str()) {
+                                print!("{}", data);
+                                std::io::stdout().flush().ok();
+                            }
+                        }
+                        "session.result" => {
+                            exit_code = value.pointer("/params/exit_code")
+                                .and_then(|c| c.as_i64())
+                                .map(|c| c as i32);
+                            if let Some(status) = value.pointer("/params/status").and_then(|s| s.as_str()) {
+                                eprintln!("{}", status);
+                            }
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                // Response objects (with "id") are already handled by send_request
+            }
+
+            std::process::exit(exit_code.unwrap_or(1));
         }
 
         Commands::Cancel { uuid, signal, worker_room } => {

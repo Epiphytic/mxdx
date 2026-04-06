@@ -334,11 +334,12 @@ fn run_client_with_liveness(hs: &str, user: &str, pass: &str, worker_room: &str,
 }
 
 /// Run the client with --skip-liveness-check (standard operation).
+/// Uses daemon mode by default — the daemon auto-spawns on first call and
+/// holds a persistent Matrix connection for subsequent calls.
 fn run_client(hs: &str, user: &str, pass: &str, worker_room: &str, extra_args: &[&str],
               store_dir: &std::path::Path, keychain_dir: &std::path::Path) -> Output {
     let mut full: Vec<&str> = vec![
         "--homeserver", hs, "--username", user, "--password", pass,
-        "--no-daemon",
     ];
     if !extra_args.is_empty() {
         full.push(extra_args[0]);

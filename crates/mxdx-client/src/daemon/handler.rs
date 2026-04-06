@@ -129,7 +129,7 @@ impl Handler {
         &self,
         id: &RequestId,
         params: &Option<serde_json::Value>,
-        _sink: &NotificationSink,
+        sink: &NotificationSink,
     ) -> String {
         let params = match parse_params::<SessionRunParams>(id, params) {
             Ok(p) => p,
@@ -203,8 +203,21 @@ impl Handler {
             sessions.track(&task_uuid, &worker_room_name)
         };
 
-        // Return UUID — streaming output via notifications will be added
-        // when the daemon has its own background sync loop.
+        let detach = params.detach;
+
+        if !detach {
+            // Non-detach: spawn background task to tail session output and
+            // forward it as JSON-RPC notifications through the sink.
+            let matrix_arc = Arc::clone(&self.matrix);
+            let sessions_arc = Arc::clone(&self.sessions);
+            let uuid_clone = task_uuid.clone();
+            let sink_clone = sink.clone();
+
+            tokio::spawn(async move {
+                Self::tail_session(matrix_arc, sessions_arc, &uuid_clone, &sink_clone).await;
+            });
+        }
+
         let result = SessionRunResult {
             uuid: task_uuid,
             status: "submitted".into(),
@@ -214,6 +227,99 @@ impl Handler {
             serde_json::to_value(result).unwrap(),
         ))
         .unwrap_or_default()
+    }
+
+    /// Background task: sync for session output events and forward them as
+    /// JSON-RPC notifications through the client's notification sink.
+    async fn tail_session(
+        matrix: Arc<Mutex<Option<MatrixClientRoom>>>,
+        sessions: Arc<Mutex<SessionTracker>>,
+        uuid: &str,
+        sink: &NotificationSink,
+    ) {
+        use crate::matrix::IncomingClientEvent;
+        use mxdx_types::events::session::{SessionOutput, SessionResult};
+
+        loop {
+            // Acquire matrix lock briefly to sync, then release
+            let events = {
+                let mut mx_guard = matrix.lock().await;
+                let mx_room = match mx_guard.as_mut() {
+                    Some(r) => r,
+                    None => {
+                        tracing::warn!("Matrix connection lost during session tail");
+                        break;
+                    }
+                };
+                match mx_room.sync_events_mut().await {
+                    Ok(evts) => evts,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "sync failed during session tail");
+                        continue;
+                    }
+                }
+            };
+            // Lock released here — other handlers can use the Matrix connection
+
+            for event in events {
+                match event {
+                    IncomingClientEvent::SessionOutput {
+                        session_uuid,
+                        content,
+                    } => {
+                        if session_uuid != uuid {
+                            continue;
+                        }
+                        if let Ok(output) =
+                            crate::matrix::deserialize_event::<SessionOutput>(&content)
+                        {
+                            if let Ok(text) = crate::tail::format_output(&output) {
+                                let notif = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "method": "session.output",
+                                    "params": {
+                                        "uuid": uuid,
+                                        "data": text,
+                                    }
+                                });
+                                let _ = sink.send(serde_json::to_string(&notif).unwrap_or_default());
+
+                                // Also buffer in session tracker
+                                let mut s = sessions.lock().await;
+                                s.push_output(uuid, text);
+                            }
+                        }
+                    }
+                    IncomingClientEvent::SessionResult {
+                        session_uuid,
+                        content,
+                    } => {
+                        if session_uuid != uuid {
+                            continue;
+                        }
+                        if let Ok(result) =
+                            crate::matrix::deserialize_event::<SessionResult>(&content)
+                        {
+                            let notif = serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "method": "session.result",
+                                "params": {
+                                    "uuid": uuid,
+                                    "exit_code": result.exit_code,
+                                    "status": crate::tail::format_result(&result),
+                                }
+                            });
+                            let _ = sink.send(serde_json::to_string(&notif).unwrap_or_default());
+
+                            let mut s = sessions.lock().await;
+                            s.complete(uuid);
+                        }
+                        return; // Session complete, stop tailing
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 
     async fn handle_session_cancel(
