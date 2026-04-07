@@ -418,7 +418,7 @@ impl MatrixClient {
     pub async fn create_encrypted_room(&self, invite: &[OwnedUserId]) -> Result<OwnedRoomId> {
         let encryption_event = InitialStateEvent::new(
             EmptyStateKey,
-            RoomEncryptionEventContent::with_recommended_defaults(),
+            RoomEncryptionEventContent::with_recommended_defaults().with_encrypted_state(),
         );
 
         let mut request = CreateRoomRequest::new();
@@ -433,7 +433,7 @@ impl MatrixClient {
     pub async fn create_dm(&self, user_id: &UserId) -> Result<OwnedRoomId> {
         let encryption_event = InitialStateEvent::new(
             EmptyStateKey,
-            RoomEncryptionEventContent::with_recommended_defaults(),
+            RoomEncryptionEventContent::with_recommended_defaults().with_encrypted_state(),
         );
 
         let mut request = CreateRoomRequest::new();
@@ -537,55 +537,79 @@ impl MatrixClient {
         Ok(())
     }
 
-    /// Sync and collect decrypted timeline events for a specific room within a timeout.
-    /// Extracts new events from the sync response timeline, which are automatically
-    /// decrypted by the SDK for E2EE rooms.
+    /// Sync and collect decrypted timeline events for a specific room.
+    ///
+    /// Performs a single sync with the given timeout (server long-poll duration),
+    /// then extracts new timeline events from the response. Events encrypted with
+    /// megolm keys already in the crypto store are automatically decrypted by the SDK.
+    ///
+    /// If encrypted events are found that couldn't be decrypted (key not yet received),
+    /// an additional sync is performed to receive the key, then `room.messages()` is
+    /// used to read retroactively-decrypted events from the server.
+    ///
+    /// The caller should poll this in a loop with a short timeout (e.g., 2s) to
+    /// receive events promptly.
     pub async fn sync_and_collect_events(
         &self,
         room_id: &RoomId,
         timeout: Duration,
     ) -> Result<Vec<Value>> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        let mut sync_token: Option<String> = None;
+        let response = self.client
+            .sync_once(SyncSettings::default().timeout(timeout))
+            .await?;
 
-        while tokio::time::Instant::now() < deadline {
-            let settings = match &sync_token {
-                Some(token) => SyncSettings::default()
-                    .timeout(Duration::from_secs(1))
-                    .token(token.clone()),
-                None => SyncSettings::default().timeout(Duration::from_secs(1)),
-            };
+        let mut collected: Vec<Value> = Vec::new();
+        let mut saw_encrypted = false;
 
-            let response = self.client.sync_once(settings).await?;
-            sync_token = Some(response.next_batch.clone());
-
-            // Extract timeline events from the sync response for our room
-            let mut collected: Vec<Value> = Vec::new();
-
-            if let Some(joined) = response.rooms.joined.get(&room_id.to_owned()) {
-                for timeline_event in &joined.timeline.events {
-                    // TimelineEvent has .raw() which returns the decrypted event JSON
-                    let json_str = timeline_event.raw().json().get();
-                    if let Ok(json) = serde_json::from_str::<Value>(json_str) {
-                        let event_type = json.get("type").and_then(|t| t.as_str());
-                        // Skip infrastructure events
-                        if event_type != Some("m.room.encrypted")
-                            && event_type != Some("m.room.encryption")
-                            && event_type != Some("m.room.member")
-                            && event_type != Some("m.room.power_levels")
-                        {
+        if let Some(joined) = response.rooms.joined.get(&room_id.to_owned()) {
+            for timeline_event in &joined.timeline.events {
+                let json_str = timeline_event.raw().json().get();
+                if let Ok(json) = serde_json::from_str::<Value>(json_str) {
+                    let event_type = json.get("type").and_then(|t| t.as_str());
+                    match event_type {
+                        Some("m.room.encrypted") => {
+                            saw_encrypted = true;
+                        }
+                        Some("m.room.encryption") | Some("m.room.member") | Some("m.room.power_levels") => {}
+                        _ => {
                             collected.push(json);
                         }
                     }
                 }
             }
+        }
 
-            if !collected.is_empty() {
-                return Ok(collected);
+        // If we saw encrypted events we couldn't decrypt, the megolm key may
+        // arrive in the next sync via to-device. Do one more sync to receive it,
+        // then fall back to room.messages() which re-decrypts from the server.
+        if saw_encrypted && collected.is_empty() {
+            tracing::debug!("saw undecryptable events, doing extra sync for key exchange");
+            let _ = self.client
+                .sync_once(SyncSettings::default().timeout(Duration::from_secs(2)))
+                .await;
+
+            // Now read from the server — the SDK will decrypt with newly-received keys
+            let room = self.client.get_room(room_id);
+            if let Some(room) = room {
+                if let Ok(messages) = room.messages(MessagesOptions::backward()).await {
+                    for event in &messages.chunk {
+                        let json_str = event.raw().json().get();
+                        if let Ok(json) = serde_json::from_str::<Value>(json_str) {
+                            let event_type = json.get("type").and_then(|t| t.as_str());
+                            match event_type {
+                                Some("m.room.encrypted") | Some("m.room.encryption")
+                                | Some("m.room.member") | Some("m.room.power_levels") => {}
+                                _ => {
+                                    collected.push(json);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        Ok(Vec::new())
+        Ok(collected)
     }
 
     /// Wait until E2EE key exchange completes for a room, with timeout.
@@ -683,6 +707,22 @@ impl MatrixClient {
     /// Get access to the inner matrix-sdk Client (escape hatch for advanced use).
     pub fn inner(&self) -> &Client {
         &self.client
+    }
+
+    /// Leave and forget a room. Best-effort; non-fatal if the room is unknown.
+    pub async fn leave_and_forget_room(
+        &self,
+        room_id: &matrix_sdk::ruma::RoomId,
+    ) -> Result<()> {
+        if let Some(room) = self.client.get_room(room_id) {
+            if let Err(e) = room.leave().await {
+                tracing::warn!(room_id=%room_id, error=%e, "leave_room failed");
+            }
+            if let Err(e) = room.forget().await {
+                tracing::warn!(room_id=%room_id, error=%e, "forget_room failed");
+            }
+        }
+        Ok(())
     }
 
     /// Create a room with a 30-second timeout.

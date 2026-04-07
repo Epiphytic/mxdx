@@ -2,6 +2,7 @@ pub mod backup;
 pub mod client;
 pub mod error;
 pub mod multi_hs;
+pub mod reencrypt;
 pub mod rest;
 pub mod rooms;
 pub mod session;

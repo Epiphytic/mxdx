@@ -387,7 +387,7 @@ impl MatrixClient {
     }
 
     /// Create a named encrypted room with a topic for discoverability.
-    async fn create_named_encrypted_room(
+    pub async fn create_named_encrypted_room(
         &self,
         name: &str,
         topic: &str,
