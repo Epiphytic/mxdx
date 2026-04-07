@@ -19,6 +19,16 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
+/// Local + server-side key-backup state gathered via pure REST + keychain (no matrix-sdk Client).
+#[derive(Debug, Clone, serde::Serialize, Default)]
+pub struct BackupReport {
+    pub keychain_present: bool,
+    pub server_has_version: bool,
+    pub version: Option<String>,
+    pub algorithm: Option<String>,
+    pub error: Option<String>,
+}
+
 /// Which binary is invoking the diagnose run.
 #[derive(Debug, Clone, Copy)]
 pub enum DiagnoseBinary {
@@ -163,6 +173,37 @@ async fn build_report(binary: DiagnoseBinary, input: DiagnoseInput) -> Value {
     };
     report.insert("trust".into(), trust_section);
 
+    // -------- backup (keychain + server-side REST) --------
+    let unix_user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "unknown".into());
+    // Prefer the full user_id from collect_matrix; fall back to constructing one.
+    let matrix_user_for_backup = user_id.clone().or_else(|| {
+        match (resolved_username.as_deref(), resolved_homeserver.as_deref()) {
+            (Some(u), Some(hs)) => {
+                let server = hs
+                    .trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .trim_end_matches('/');
+                let server = server.split('/').next().unwrap_or(server);
+                let local = u.trim_start_matches('@').split(':').next().unwrap_or(u);
+                Some(format!("@{}:{}", local, server))
+            }
+            _ => None,
+        }
+    });
+    let backup_section = gather_backup_report(
+        resolved_homeserver.as_deref().unwrap_or(""),
+        access_token.as_deref(),
+        matrix_user_for_backup.as_deref().unwrap_or(""),
+        &unix_user,
+    )
+    .await;
+    report.insert(
+        "backup".into(),
+        serde_json::to_value(&backup_section).unwrap_or(json!({"error": "serialization failed"})),
+    );
+
     // engagement is partly populated inside collect_matrix already; keep a top-level summary
     report.insert(
         "engagement".into(),
@@ -203,6 +244,116 @@ async fn build_report(binary: DiagnoseBinary, input: DiagnoseInput) -> Value {
     }
 
     Value::Object(report)
+}
+
+/// Gather key-backup state without spawning a matrix-sdk Client.
+///
+/// * Checks the local OS keychain for a stored recovery key.
+/// * If an access token is available, queries the server-side backup version via REST.
+async fn gather_backup_report(
+    homeserver: &str,
+    access_token: Option<&str>,
+    matrix_user: &str,
+    unix_user: &str,
+) -> BackupReport {
+    let mut report = BackupReport::default();
+
+    // --- local keychain probe ---
+    if !homeserver.is_empty() && !matrix_user.is_empty() {
+        match ChainedKeychain::default_chain() {
+            Ok(keychain) => {
+                let key = mxdx_types::identity::backup_keychain_key(homeserver, matrix_user, unix_user);
+                match keychain.get(&key) {
+                    Ok(Some(_)) => report.keychain_present = true,
+                    Ok(None) => report.keychain_present = false,
+                    Err(e) => {
+                        report.error = Some(format!("keychain lookup failed: {e}"));
+                    }
+                }
+            }
+            Err(e) => {
+                report.error = Some(format!("keychain init failed: {e}"));
+            }
+        }
+    }
+
+    // --- server-side backup version (REST) ---
+    let Some(token) = access_token else {
+        return report;
+    };
+    if homeserver.is_empty() {
+        return report;
+    }
+
+    let url = format!(
+        "{}/_matrix/client/v3/room_keys/version",
+        homeserver.trim_end_matches('/')
+    );
+
+    let http = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            let msg = format!("http client build failed: {e}");
+            report.error = Some(match report.error {
+                Some(existing) => format!("{existing}; {msg}"),
+                None => msg,
+            });
+            return report;
+        }
+    };
+
+    match http
+        .get(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            if status.as_u16() == 404 {
+                report.server_has_version = false;
+            } else if status.is_success() {
+                report.server_has_version = true;
+                match resp.json::<serde_json::Value>().await {
+                    Ok(body) => {
+                        report.version = body
+                            .get("version")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        report.algorithm = body
+                            .get("algorithm")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                    }
+                    Err(e) => {
+                        let msg = format!("failed to parse backup version response: {e}");
+                        report.error = Some(match report.error {
+                            Some(existing) => format!("{existing}; {msg}"),
+                            None => msg,
+                        });
+                    }
+                }
+            } else {
+                let msg = format!("backup version endpoint returned HTTP {status}");
+                report.error = Some(match report.error {
+                    Some(existing) => format!("{existing}; {msg}"),
+                    None => msg,
+                });
+            }
+        }
+        Err(e) => {
+            let msg = format!("backup version request failed: {e}");
+            report.error = Some(match report.error {
+                Some(existing) => format!("{existing}; {msg}"),
+                None => msg,
+            });
+        }
+    }
+
+    report
 }
 
 /// Best-effort decrypt of joined-room state events using a *temporary* matrix-sdk
