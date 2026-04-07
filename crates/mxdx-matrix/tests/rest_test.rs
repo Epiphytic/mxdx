@@ -32,3 +32,73 @@ async fn list_invited_rooms_returns_invite_keys() {
     let rooms = client.list_invited_rooms().await.unwrap();
     assert_eq!(rooms.len(), 2);
 }
+
+#[tokio::test]
+async fn get_room_topic_returns_topic() {
+    let mut server = mockito::Server::new_async().await;
+    let _m = server
+        .mock("GET", "/_matrix/client/v3/rooms/%21abc%3Aexample.org/state/m.room.topic/")
+        .with_status(200)
+        .with_body(r#"{"topic":"org.mxdx.launcher.exec:test"}"#)
+        .create_async().await;
+    let client = RestClient::new(&server.url(), "tok");
+    let rid = matrix_sdk::ruma::RoomId::parse("!abc:example.org").unwrap();
+    let topic = client.get_room_topic(&rid).await.unwrap();
+    assert_eq!(topic.as_deref(), Some("org.mxdx.launcher.exec:test"));
+}
+
+#[tokio::test]
+async fn get_room_topic_404_returns_none() {
+    let mut server = mockito::Server::new_async().await;
+    let _m = server
+        .mock("GET", mockito::Matcher::Regex(r"^/_matrix/client/v3/rooms/.*/state/m.room.topic/".into()))
+        .with_status(404)
+        .with_body(r#"{"errcode":"M_NOT_FOUND"}"#)
+        .create_async().await;
+    let client = RestClient::new(&server.url(), "tok");
+    let rid = matrix_sdk::ruma::RoomId::parse("!abc:example.org").unwrap();
+    assert!(client.get_room_topic(&rid).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn get_room_encryption_accepts_canonical_key() {
+    let mut server = mockito::Server::new_async().await;
+    let _m = server
+        .mock("GET", mockito::Matcher::Regex(r"^/_matrix/client/v3/rooms/.*/state/m.room.encryption/".into()))
+        .with_status(200)
+        .with_body(r#"{"algorithm":"m.megolm.v1.aes-sha2","encrypt_state_events":true}"#)
+        .create_async().await;
+    let client = RestClient::new(&server.url(), "tok");
+    let rid = matrix_sdk::ruma::RoomId::parse("!abc:example.org").unwrap();
+    let enc = client.get_room_encryption(&rid).await.unwrap().unwrap();
+    assert_eq!(enc.algorithm, "m.megolm.v1.aes-sha2");
+    assert!(enc.encrypt_state_events);
+}
+
+#[tokio::test]
+async fn get_room_encryption_accepts_msc4362_key() {
+    let mut server = mockito::Server::new_async().await;
+    let _m = server
+        .mock("GET", mockito::Matcher::Regex(r"^/_matrix/client/v3/rooms/.*/state/m.room.encryption/".into()))
+        .with_status(200)
+        .with_body(r#"{"algorithm":"m.megolm.v1.aes-sha2","io.element.msc4362.encrypt_state_events":true}"#)
+        .create_async().await;
+    let client = RestClient::new(&server.url(), "tok");
+    let rid = matrix_sdk::ruma::RoomId::parse("!abc:example.org").unwrap();
+    let enc = client.get_room_encryption(&rid).await.unwrap().unwrap();
+    assert!(enc.encrypt_state_events);
+}
+
+#[tokio::test]
+async fn get_room_tombstone_returns_replacement() {
+    let mut server = mockito::Server::new_async().await;
+    let _m = server
+        .mock("GET", mockito::Matcher::Regex(r"^/_matrix/client/v3/rooms/.*/state/m.room.tombstone/".into()))
+        .with_status(200)
+        .with_body(r#"{"replacement_room":"!new:example.org","body":"replaced"}"#)
+        .create_async().await;
+    let client = RestClient::new(&server.url(), "tok");
+    let rid = matrix_sdk::ruma::RoomId::parse("!old:example.org").unwrap();
+    let r = client.get_room_tombstone(&rid).await.unwrap();
+    assert_eq!(r.unwrap().as_str(), "!new:example.org");
+}
