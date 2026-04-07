@@ -146,10 +146,23 @@ async fn load_from_secret_storage(
 
 /// Download every megolm key currently in the server-side backup.
 ///
-/// STUB: matrix-sdk 0.16 only exposes `download_room_keys_for_room(room_id)`
-/// and `download_room_key(room_id, session_id)`; there is no "download all"
-/// helper on `Backups`. A later task will iterate joined rooms and call
-/// `download_room_keys_for_room` for each, returning the real count.
-pub async fn download_all_keys(_client: &Client) -> Result<u64> {
-    anyhow::bail!("not yet implemented: download_all_keys (iterate joined rooms in later task)")
+/// matrix-sdk 0.16 does not expose a bulk "download all" helper on `Backups`,
+/// so we iterate the client's joined rooms and call `download_room_keys_for_room`
+/// for each. Per-room failures are logged at DEBUG and do not abort the
+/// operation; we return the number of rooms whose keys downloaded successfully.
+pub async fn download_all_keys(client: &Client) -> Result<u64> {
+    let backups = client.encryption().backups();
+    let mut count: u64 = 0;
+    for room in client.joined_rooms() {
+        match backups.download_room_keys_for_room(room.room_id()).await {
+            Ok(()) => count += 1,
+            Err(e) => tracing::debug!(
+                room_id = %room.room_id(),
+                error = %e,
+                "backup: download_room_keys_for_room failed"
+            ),
+        }
+    }
+    tracing::info!(rooms = count, "backup: downloaded keys for joined rooms");
+    Ok(count)
 }
