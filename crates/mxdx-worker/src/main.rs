@@ -65,6 +65,36 @@ enum Commands {
         #[arg(long = "authorized-user")]
         authorized_users: Vec<String>,
     },
+    /// Diagnose runtime state — emits a single JSON report on stdout.
+    ///
+    /// Safe to run whether or not a worker is active; uses REST and local
+    /// file reads only, never takes over the crypto store.
+    Diagnose {
+        /// Named profile (default: "default")
+        #[arg(long, default_value = "default")]
+        profile: String,
+
+        /// Matrix homeserver URL
+        #[arg(long, env = "MXDX_HOMESERVER")]
+        homeserver: Option<String>,
+
+        /// Matrix username
+        #[arg(long, env = "MXDX_USERNAME")]
+        username: Option<String>,
+
+        /// Matrix password
+        #[arg(long, env = "MXDX_PASSWORD")]
+        password: Option<String>,
+
+        /// Pretty-print JSON output
+        #[arg(long)]
+        pretty: bool,
+
+        /// Spawn a temporary matrix-sdk client and decrypt joined-room state
+        /// events into the report. Requires homeserver/username/password.
+        #[arg(long, default_value_t = false)]
+        decrypt: bool,
+    },
 }
 
 #[tokio::main]
@@ -106,6 +136,28 @@ async fn main() -> Result<()> {
             };
             let config = WorkerRuntimeConfig::load()?.with_cli_overrides(&args);
             mxdx_worker::run_worker(config).await?;
+        }
+        Commands::Diagnose {
+            profile,
+            homeserver,
+            username,
+            password,
+            pretty,
+            decrypt,
+        } => {
+            let input = mxdx_client::diagnose::DiagnoseInput {
+                profile,
+                homeserver,
+                username,
+                password,
+                pretty,
+                decrypt,
+            };
+            mxdx_client::diagnose::run_diagnose(
+                mxdx_client::diagnose::DiagnoseBinary::Worker,
+                input,
+            )
+            .await?;
         }
     }
 

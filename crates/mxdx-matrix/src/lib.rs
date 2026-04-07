@@ -7,6 +7,7 @@ pub mod rest;
 pub mod rooms;
 pub mod session;
 
+pub use matrix_sdk;
 pub use client::{default_store_base_path, short_hash, MatrixClient};
 pub use error::MatrixClientError;
 pub use matrix_sdk::ruma::{OwnedRoomId, OwnedUserId, RoomId, UserId};

@@ -77,6 +77,21 @@ async fn main() -> Result<()> {
                 }
             }
         }
+        Commands::Diagnose { pretty, decrypt } => {
+            let input = mxdx_client::diagnose::DiagnoseInput {
+                profile: cli.profile.clone(),
+                homeserver: cli.homeserver.clone(),
+                username: cli.username.clone(),
+                password: cli.password.clone(),
+                pretty: *pretty,
+                decrypt: *decrypt,
+            };
+            mxdx_client::diagnose::run_diagnose(
+                mxdx_client::diagnose::DiagnoseBinary::Client,
+                input,
+            )
+            .await
+        }
         // All other commands: daemon mode (default) or direct mode (--no-daemon)
         _ => {
             if cli.no_daemon {
@@ -156,6 +171,11 @@ async fn run_via_daemon(cli: &Cli) -> Result<()> {
                                 .map(|c| c as i32);
                             if let Some(status) = value.pointer("/params/status").and_then(|s| s.as_str()) {
                                 eprintln!("{}", status);
+                            }
+                            if let Some(tail) = value.pointer("/params/tail").and_then(|t| t.as_str()) {
+                                if !tail.is_empty() {
+                                    eprintln!("  reason: {}", tail);
+                                }
                             }
                             break;
                         }
@@ -359,16 +379,20 @@ async fn run_direct(cli: &Cli) -> Result<()> {
                 // Tail the session: sync for output and result events
                 eprintln!("Session {} submitted, waiting for output...", task_uuid);
                 let mut exit_code: Option<i32> = None;
+                let mut seen_ids = std::collections::HashSet::new();
 
                 loop {
                     let events = mx_room.sync_events_mut().await?;
                     for event in events {
                         match event {
                             IncomingClientEvent::SessionOutput {
+                                event_id,
                                 session_uuid,
                                 content,
                             } => {
-                                if session_uuid != task_uuid {
+                                if session_uuid != task_uuid
+                                    || (!event_id.is_empty() && !seen_ids.insert(event_id.clone()))
+                                {
                                     continue;
                                 }
                                 if let Ok(output) =
@@ -381,10 +405,13 @@ async fn run_direct(cli: &Cli) -> Result<()> {
                                 }
                             }
                             IncomingClientEvent::SessionResult {
+                                event_id,
                                 session_uuid,
                                 content,
                             } => {
-                                if session_uuid != task_uuid {
+                                if session_uuid != task_uuid
+                                    || (!event_id.is_empty() && !seen_ids.insert(event_id.clone()))
+                                {
                                     continue;
                                 }
                                 if let Ok(result) =
@@ -448,6 +475,7 @@ async fn run_direct(cli: &Cli) -> Result<()> {
                 if let IncomingClientEvent::SessionStart {
                     session_uuid,
                     content,
+                    ..
                 } = e
                 {
                     if session_uuid == uuid {
@@ -604,6 +632,7 @@ async fn run_direct(cli: &Cli) -> Result<()> {
                 if let IncomingClientEvent::SessionOutput {
                     session_uuid,
                     content,
+                    ..
                 } = event
                 {
                     if session_uuid == *uuid {
@@ -629,6 +658,7 @@ async fn run_direct(cli: &Cli) -> Result<()> {
                             IncomingClientEvent::SessionOutput {
                                 session_uuid,
                                 content,
+                                ..
                             } => {
                                 if session_uuid != *uuid {
                                     continue;
@@ -781,7 +811,7 @@ async fn run_direct(cli: &Cli) -> Result<()> {
             }
         },
         // These are handled above in main(), not in run_direct
-        Commands::Daemon { .. } | Commands::InternalDaemon { .. } => unreachable!(),
+        Commands::Daemon { .. } | Commands::InternalDaemon { .. } | Commands::Diagnose { .. } => unreachable!(),
     }
     Ok(())
 }

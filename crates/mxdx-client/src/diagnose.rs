@@ -44,6 +44,9 @@ pub struct DiagnoseInput {
     pub username: Option<String>,
     pub password: Option<String>,
     pub pretty: bool,
+    /// If true, spawn a temporary matrix-sdk client and try to decrypt
+    /// joined-room state events, embedding results into the report.
+    pub decrypt: bool,
 }
 
 /// Entry point: gather everything we can, emit JSON, never panic.
@@ -55,6 +58,7 @@ pub async fn run_diagnose(binary: DiagnoseBinary, input: DiagnoseInput) -> Resul
 
     let pretty = input.pretty;
     let report = build_report(binary, input).await;
+
 
     let serialized = if pretty {
         serde_json::to_string_pretty(&report)
@@ -80,6 +84,7 @@ pub async fn run_diagnose(binary: DiagnoseBinary, input: DiagnoseInput) -> Resul
 }
 
 async fn build_report(binary: DiagnoseBinary, input: DiagnoseInput) -> Value {
+    let decrypt_requested = input.decrypt;
     let mut report = serde_json::Map::new();
     report.insert("binary".into(), json!(binary.as_str()));
     report.insert("version".into(), json!(env!("CARGO_PKG_VERSION")));
@@ -168,7 +173,188 @@ async fn build_report(binary: DiagnoseBinary, input: DiagnoseInput) -> Value {
 
     let _ = login_device_id; // already in matrix section
 
+    // -------- optional decrypt pass --------
+    if decrypt_requested {
+        match (
+            resolved_homeserver.as_deref(),
+            resolved_username.as_deref(),
+            resolved_password.as_deref(),
+        ) {
+            (Some(hs), Some(user), Some(pw)) => {
+                match decrypt_with_temp_client(hs, user, pw, &joined_room_ids).await {
+                    Ok(map) => {
+                        report.insert(
+                            "decrypted_state".into(),
+                            serde_json::to_value(&map).unwrap_or(Value::Null),
+                        );
+                    }
+                    Err(e) => {
+                        report.insert("decrypt_error".into(), json!(e.to_string()));
+                    }
+                }
+            }
+            _ => {
+                report.insert(
+                    "decrypt_error".into(),
+                    json!("--decrypt requires homeserver, username, and password"),
+                );
+            }
+        }
+    }
+
     Value::Object(report)
+}
+
+/// Best-effort decrypt of joined-room state events using a *temporary* matrix-sdk
+/// client backed by a throwaway sqlite store. The temp store is removed on exit
+/// so we never collide with the real daemon/worker crypto store.
+///
+/// Coverage is intentionally minimal — we only enumerate a handful of well-known
+/// state event types via `Room::get_state_events(StateEventType)`. The infrastructure
+/// (temp client, login, key download) is the load-bearing part; expanding the type
+/// list later is trivial.
+async fn decrypt_with_temp_client(
+    homeserver: &str,
+    matrix_user: &str,
+    password: &str,
+    rooms: &[String],
+) -> anyhow::Result<std::collections::HashMap<String, serde_json::Value>> {
+    use anyhow::Context;
+    use mxdx_matrix::matrix_sdk::ruma::events::StateEventType;
+    use mxdx_matrix::matrix_sdk::Client;
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "mxdx-diagnose-{}-{}",
+        std::process::id(),
+        rfc3339_now().replace(':', "-")
+    ));
+    std::fs::create_dir_all(&temp_dir)?;
+
+    // Ensure the temp dir is cleaned up even on error paths.
+    struct TempDirGuard(std::path::PathBuf);
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _guard = TempDirGuard(temp_dir.clone());
+
+    let client = Client::builder()
+        .homeserver_url(homeserver)
+        .sqlite_store(&temp_dir, None)
+        .build()
+        .await
+        .context("diagnose temp client build failed")?;
+
+    client
+        .matrix_auth()
+        .login_username(matrix_user, password)
+        .send()
+        .await
+        .context("diagnose temp client login failed")?;
+
+    // One sync to populate the state store with current room state.
+    let _ = client
+        .sync_once(mxdx_matrix::matrix_sdk::config::SyncSettings::default())
+        .await;
+
+    // Best-effort: pull megolm session keys from server-side backup so MSC4362
+    // encrypted state events can be decrypted by the SDK.
+    let unix_user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "unknown".into());
+    if let Some(user_id) = client.user_id() {
+        let user_id = user_id.to_owned();
+        match ChainedKeychain::default_chain() {
+            Ok(keychain) => {
+                if let Err(e) = mxdx_matrix::backup::ensure_backup(
+                    &client,
+                    &keychain,
+                    homeserver,
+                    &user_id,
+                    &unix_user,
+                    false,
+                )
+                .await
+                {
+                    tracing::warn!(error=%e, "diagnose: ensure_backup failed, continuing");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(error=%e, "diagnose: keychain unavailable, skipping ensure_backup");
+            }
+        }
+        let _ = mxdx_matrix::backup::download_all_keys(&client).await;
+        // Sync once more so freshly-downloaded keys can decrypt cached events.
+        let _ = client
+            .sync_once(mxdx_matrix::matrix_sdk::config::SyncSettings::default())
+            .await;
+    }
+
+    // Known state event types we attempt to surface. Keep small — this is
+    // diagnostic, not exhaustive.
+    let known_types: &[StateEventType] = &[
+        StateEventType::RoomEncryption,
+        StateEventType::RoomName,
+        StateEventType::RoomTopic,
+        StateEventType::RoomCreate,
+        StateEventType::RoomPowerLevels,
+        StateEventType::RoomJoinRules,
+        StateEventType::RoomHistoryVisibility,
+    ];
+
+    let mut decrypted: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::new();
+
+    for rid_str in rooms {
+        let Ok(rid) = mxdx_matrix::matrix_sdk::ruma::RoomId::parse(rid_str) else {
+            continue;
+        };
+        let Some(room) = client.get_room(&rid) else {
+            continue;
+        };
+        for ev_type in known_types {
+            match room.get_state_events(ev_type.clone()).await {
+                Ok(raws) => {
+                    for raw in raws {
+                        // Parse the raw JSON bytes — this is what the SDK has
+                        // after decrypt (or the encrypted envelope if decrypt
+                        // wasn't possible). Either way, valid JSON.
+                        use mxdx_matrix::matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
+                        let raw_json = match &raw {
+                            RawAnySyncOrStrippedState::Sync(r) => r.json().get(),
+                            RawAnySyncOrStrippedState::Stripped(r) => r.json().get(),
+                        };
+                        let value: serde_json::Value =
+                            match serde_json::from_str(raw_json) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    tracing::debug!(error=%e, "diagnose decrypt: bad json");
+                                    continue;
+                                }
+                            };
+                        let state_key = value
+                            .get("state_key")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let ev_type_str = serde_json::to_value(ev_type)
+                            .ok()
+                            .and_then(|v| v.as_str().map(|s| s.to_string()))
+                            .unwrap_or_else(|| format!("{:?}", ev_type));
+                        let key =
+                            format!("{}:{}:{}", rid_str, ev_type_str, state_key);
+                        decrypted.insert(key, value);
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(room=%rid_str, error=%e, "diagnose decrypt: get_state_events failed");
+                }
+            }
+        }
+    }
+
+    drop(client);
+    Ok(decrypted)
 }
 
 // ---------------------------------------------------------------------------

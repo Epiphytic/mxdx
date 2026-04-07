@@ -148,6 +148,19 @@ pub enum Commands {
         #[arg(long)]
         delete_all_sessions: bool,
     },
+    /// Diagnose runtime state — emits a single JSON report on stdout.
+    ///
+    /// Safe to run whether or not a daemon/worker is active; uses REST
+    /// and local file reads only, never takes over the crypto store.
+    Diagnose {
+        /// Pretty-print the JSON output
+        #[arg(long)]
+        pretty: bool,
+        /// Spawn a temporary matrix-sdk client and decrypt joined-room state
+        /// events into the report. Requires homeserver/username/password.
+        #[arg(long, default_value_t = false)]
+        decrypt: bool,
+    },
     /// Internal: run as daemon (hidden)
     #[command(name = "_daemon", hide = true)]
     InternalDaemon {
