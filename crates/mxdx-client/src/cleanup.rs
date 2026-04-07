@@ -1,4 +1,5 @@
 use anyhow::Result;
+use mxdx_matrix::rest::RestClient;
 use serde::Deserialize;
 
 #[derive(Deserialize)]
@@ -79,29 +80,6 @@ async fn delete_device(
     Ok(())
 }
 
-/// List joined rooms.
-async fn list_joined_rooms(homeserver: &str, access_token: &str) -> Result<Vec<String>> {
-    let client = reqwest::Client::new();
-    let url = format!(
-        "{}/_matrix/client/v3/joined_rooms",
-        homeserver.trim_end_matches('/')
-    );
-    let resp = client.get(&url).bearer_auth(access_token).send().await?;
-    if !resp.status().is_success() {
-        anyhow::bail!("Failed to list rooms: {}", resp.status());
-    }
-    let data: serde_json::Value = resp.json().await?;
-    let rooms = data["joined_rooms"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str().map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(rooms)
-}
-
 /// Leave and forget a room.
 async fn leave_and_forget(homeserver: &str, access_token: &str, room_id: &str) -> Result<()> {
     let client = reqwest::Client::new();
@@ -168,12 +146,29 @@ pub async fn run_cleanup(
         }
         // Leave all rooms first (must happen before logout invalidates the token)
         eprintln!("Leaving all rooms before logout...");
-        let rooms = list_joined_rooms(homeserver, access_token).await?;
-        for room_id in &rooms {
+        let rest = RestClient::new(homeserver, access_token);
+        let joined = rest.list_joined_rooms().await?;
+        let invited = rest.list_invited_rooms().await.unwrap_or_else(|e| {
+            eprintln!("  Warning: failed to list invited rooms: {}", e);
+            Vec::new()
+        });
+        eprintln!(
+            "Found {} joined room(s) and {} invited room(s)",
+            joined.len(),
+            invited.len()
+        );
+        let mut all_rooms: Vec<String> = joined
+            .iter()
+            .map(|r| r.to_string())
+            .chain(invited.iter().map(|r| r.to_string()))
+            .collect();
+        all_rooms.sort();
+        all_rooms.dedup();
+        for room_id in &all_rooms {
             let _ = leave_and_forget(homeserver, access_token, room_id).await;
         }
-        if !rooms.is_empty() {
-            eprintln!("Left {} room(s)", rooms.len());
+        if !all_rooms.is_empty() {
+            eprintln!("Left {} room(s)", all_rooms.len());
         }
         eprintln!("Logging out all sessions...");
         logout_all(homeserver, access_token).await?;
@@ -242,8 +237,24 @@ pub async fn run_cleanup(
 
     if do_rooms {
         eprintln!("Cleaning up rooms...");
-        let rooms = list_joined_rooms(homeserver, access_token).await?;
-        eprintln!("Found {} joined room(s)", rooms.len());
+        let rest = RestClient::new(homeserver, access_token);
+        let joined = rest.list_joined_rooms().await?;
+        let invited = rest.list_invited_rooms().await.unwrap_or_else(|e| {
+            eprintln!("  Warning: failed to list invited rooms: {}", e);
+            Vec::new()
+        });
+        eprintln!(
+            "Found {} joined room(s) and {} invited room(s)",
+            joined.len(),
+            invited.len()
+        );
+        let mut rooms: Vec<String> = joined
+            .iter()
+            .map(|r| r.to_string())
+            .chain(invited.iter().map(|r| r.to_string()))
+            .collect();
+        rooms.sort();
+        rooms.dedup();
 
         if !force && !rooms.is_empty() {
             for r in &rooms {
