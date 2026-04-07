@@ -709,6 +709,12 @@ impl MatrixClient {
         &self.client
     }
 
+    /// Returns the current access token from the underlying matrix-sdk client,
+    /// if logged in.
+    pub fn access_token(&self) -> Option<String> {
+        self.client.access_token()
+    }
+
     /// Leave and forget a room. Best-effort; non-fatal if the room is unknown.
     pub async fn leave_and_forget_room(
         &self,

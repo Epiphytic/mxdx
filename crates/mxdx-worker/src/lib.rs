@@ -221,9 +221,65 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
         tracing::info!(room_id = %rid, "using direct room ID");
         rid
     } else {
-        let topology = multi
-            .get_or_create_launcher_space(&config.resolved_room_name)
-            .await?;
+        let launcher_id = config.resolved_room_name.as_str();
+        let homeserver = config
+            .credentials
+            .as_ref()
+            .map(|c| c.homeserver.clone())
+            .or_else(|| {
+                config
+                    .defaults
+                    .accounts
+                    .first()
+                    .map(|a| a.homeserver.clone())
+            })
+            .ok_or_else(|| anyhow::anyhow!("no homeserver configured for REST discovery"))?;
+        let access_token = multi
+            .preferred()
+            .access_token()
+            .ok_or_else(|| anyhow::anyhow!("no access token available on preferred client"))?;
+
+        let topology = match multi
+            .preferred()
+            .find_launcher_space_via_rest(launcher_id, &homeserver, &access_token)
+            .await?
+        {
+            Some(t) => {
+                tracing::info!(launcher_id, "discovered existing launcher space via REST");
+                t
+            }
+            None => {
+                tracing::info!(launcher_id, "no existing launcher space found; creating");
+                multi.preferred().create_launcher_space(launcher_id).await?
+            }
+        };
+
+        // Self-heal: verify exec/logs rooms are encrypted and have correct topology,
+        // replacing any that are unencrypted or misconfigured.
+        let topology = {
+            use mxdx_matrix::reencrypt::verify_or_replace_topology;
+            use mxdx_matrix::rest::RestClient;
+            let rest = RestClient::new(&homeserver, &access_token);
+            let mut authorized: Vec<mxdx_matrix::OwnedUserId> = Vec::new();
+            for user_str in &config.worker.authorized_users {
+                match mxdx_matrix::UserId::parse(user_str.as_str()) {
+                    Ok(uid) => authorized.push(uid),
+                    Err(e) => tracing::warn!(
+                        user = %user_str, error = %e,
+                        "invalid authorized user ID for reencrypt; skipping"
+                    ),
+                }
+            }
+            verify_or_replace_topology(
+                multi.preferred(),
+                &rest,
+                topology,
+                launcher_id,
+                &authorized,
+            )
+            .await?
+        };
+
         let rid = topology.exec_room_id.clone();
 
         // Key exchange: fast path returns immediately if keys are cached.
