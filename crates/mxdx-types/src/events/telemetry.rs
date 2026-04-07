@@ -6,10 +6,19 @@ pub const WORKER_TELEMETRY: &str = "org.mxdx.host_telemetry";
 
 /// Unified telemetry state event posted periodically by workers and launchers.
 /// Matches the npm launcher's `org.mxdx.host_telemetry` state event format.
+///
+/// State key: `worker/{worker_name}` — each worker instance owns a unique name.
+/// The `worker_uuid` field acts as an instance lock: if another process finds
+/// an active (non-timed-out) telemetry event with a different UUID for the same
+/// worker name, it must refuse to start.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkerTelemetryState {
     pub timestamp: String,              // ISO 8601
     pub heartbeat_interval_ms: u64,     // default 60000
+    /// Unique instance ID — generated on each worker startup.
+    /// Used to detect competing worker processes for the same worker name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_uuid: Option<String>,
     pub hostname: String,
     pub platform: String,
     pub arch: String,
@@ -152,6 +161,7 @@ mod tests {
         let state = WorkerTelemetryState {
             timestamp: "2026-03-31T12:00:00Z".into(),
             heartbeat_interval_ms: 60000,
+            worker_uuid: None,
             hostname: "worker-01".into(),
             platform: "linux".into(),
             arch: "x86_64".into(),
@@ -174,6 +184,7 @@ mod tests {
         let state = WorkerTelemetryState {
             timestamp: "2026-03-31T12:00:00Z".into(),
             heartbeat_interval_ms: 60000,
+            worker_uuid: None,
             hostname: "worker-01".into(),
             platform: "linux".into(),
             arch: "x86_64".into(),

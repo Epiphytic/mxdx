@@ -71,10 +71,24 @@ mod tests {
         let key = "mxdx:test_os_keychain_roundtrip";
 
         // Set
-        kc.set(key, b"test-secret-value").unwrap();
+        let set_result = kc.set(key, b"test-secret-value");
+        eprintln!("set result: {:?}", set_result);
+        set_result.unwrap();
 
-        // Get
-        let val = kc.get(key).unwrap();
+        // Get with same OsKeychain instance
+        let val = kc.get(key);
+        eprintln!("get result (same instance): {:?}", val);
+
+        // Get with fresh Entry object
+        let entry = Entry::new("mxdx", key).unwrap();
+        let raw = entry.get_password();
+        eprintln!("get_password (raw keyring): {:?}", raw);
+
+        // Check credential backend
+        let cred = entry.get_credential();
+        eprintln!("credential backend: {:?}", cred);
+
+        let val = val.unwrap();
         assert_eq!(val, Some(b"test-secret-value".to_vec()));
 
         // Delete

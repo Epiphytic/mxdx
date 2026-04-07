@@ -48,11 +48,11 @@ impl KeychainBackend for ChainedKeychain {
     }
 
     fn set(&self, key: &str, value: &[u8]) -> Result<()> {
-        // Try primary; if it succeeds, return immediately (no disk write needed).
-        // Only fall back to file storage when the OS keychain is unavailable.
-        if self.primary.set(key, value).is_ok() {
-            return Ok(());
-        }
+        // Always write to BOTH backends. The OS keychain may silently fail to
+        // persist (e.g., session-scoped Secret Service on Linux), so the file
+        // keychain ensures durability. On read, the primary is tried first for
+        // speed; file fallback catches cases where the OS keychain lost data.
+        let _ = self.primary.set(key, value); // best-effort
         self.fallback.set(key, value)
     }
 

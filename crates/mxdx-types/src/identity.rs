@@ -33,6 +33,17 @@ pub fn state_room_key(user_id: &str) -> String {
     format!("mxdx/{user_id}/state-room-id")
 }
 
+/// Compute the chained-keychain key for a backup recovery key, scoped per
+/// (homeserver, matrix_user, unix_user) so multiple unix users on the same host
+/// independently store their copy of the recovery key.
+pub fn backup_keychain_key(homeserver: &str, matrix_user: &str, unix_user: &str) -> String {
+    let host = homeserver
+        .trim_end_matches('/')
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    format!("mxdx:backup:{host}:{matrix_user}:{unix_user}")
+}
+
 // ---------------------------------------------------------------------------
 // Keychain backend trait
 // ---------------------------------------------------------------------------
@@ -123,6 +134,14 @@ mod tests {
         assert_eq!(
             state_room_key("@user:example.com"),
             "mxdx/@user:example.com/state-room-id"
+        );
+    }
+
+    #[test]
+    fn backup_keychain_key_format() {
+        assert_eq!(
+            backup_keychain_key("https://ca1-beta.mxdx.dev", "@alice:ca1-beta.mxdx.dev", "bob"),
+            "mxdx:backup:ca1-beta.mxdx.dev:@alice:ca1-beta.mxdx.dev:bob"
         );
     }
 
