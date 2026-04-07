@@ -30,6 +30,32 @@ use mxdx_types::events::session::{
 use mxdx_types::events::telemetry::WORKER_TELEMETRY;
 use state_room::WorkerStateRoom;
 
+/// Parse a basic ISO 8601 timestamp (e.g., "2026-04-06T12:00:00Z") to epoch millis.
+fn parse_iso8601(ts: &str) -> Result<u64> {
+    // Parse "YYYY-MM-DDTHH:MM:SSZ" or "YYYY-MM-DDTHH:MM:SS.sssZ"
+    let ts = ts.trim_end_matches('Z');
+    let (date, time) = ts.split_once('T')
+        .ok_or_else(|| anyhow::anyhow!("invalid ISO 8601 timestamp: {}", ts))?;
+    let parts: Vec<&str> = date.split('-').collect();
+    if parts.len() != 3 { anyhow::bail!("invalid date in timestamp"); }
+    let year: u64 = parts[0].parse()?;
+    let month: u64 = parts[1].parse()?;
+    let day: u64 = parts[2].parse()?;
+
+    let time_parts: Vec<&str> = time.split(':').collect();
+    if time_parts.len() != 3 { anyhow::bail!("invalid time in timestamp"); }
+    let hour: u64 = time_parts[0].parse()?;
+    let min: u64 = time_parts[1].parse()?;
+    let sec: u64 = time_parts[2].split('.').next().unwrap_or("0").parse()?;
+
+    // Approximate days since epoch (good enough for staleness checks)
+    let days = (year - 1970) * 365 + (year - 1969) / 4
+        + [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334][(month - 1) as usize]
+        + day - 1;
+    let epoch_secs = days * 86400 + hour * 3600 + min * 60 + sec;
+    Ok(epoch_secs * 1000)
+}
+
 /// Exponential backoff for sync failures.
 pub struct SyncBackoff {
     current: Duration,
@@ -120,6 +146,57 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
     }
 
     let any_fresh = fresh_logins.iter().any(|&f| f);
+
+    // Server-side megolm key backup. Run after login but before room
+    // discovery so any keys recovered from backup are available when we
+    // start decrypting room history.
+    {
+        use mxdx_matrix::backup::{download_all_keys, ensure_backup, BackupState};
+        let unix_user = std::env::var("USER")
+            .or_else(|_| std::env::var("LOGNAME"))
+            .unwrap_or_else(|_| "unknown".into());
+        let sdk_client = multi.preferred().inner().clone();
+        let matrix_user = sdk_client
+            .user_id()
+            .ok_or_else(|| anyhow::anyhow!("no user_id after login"))?
+            .to_owned();
+        let server = multi.preferred_server().to_string();
+        let is_first_run = any_fresh;
+
+        let backup_state = match ensure_backup(
+            &sdk_client,
+            keychain.as_ref(),
+            &server,
+            &matrix_user,
+            &unix_user,
+            is_first_run,
+        )
+        .await
+        {
+            Ok(state) => state,
+            Err(e) if is_first_run => return Err(e),
+            Err(e) => {
+                tracing::warn!(error=%e, "backup setup failed (subsequent run); continuing degraded");
+                BackupState {
+                    enabled: false,
+                    degraded: true,
+                    error: Some(e.to_string()),
+                    ..Default::default()
+                }
+            }
+        };
+        if backup_state.enabled {
+            match download_all_keys(&sdk_client).await {
+                Ok(n) => tracing::info!(rooms = n, "backup: room keys downloaded"),
+                Err(e) => tracing::warn!(error=%e, "backup: download_all_keys failed"),
+            }
+        }
+        tracing::info!(
+            enabled = backup_state.enabled,
+            degraded = backup_state.degraded,
+            "backup state"
+        );
+    }
 
     let room_id = if let Some(ref direct_room_id) = config.room_id {
         // Use a specific room ID directly (for E2E tests or pre-arranged rooms)
@@ -289,16 +366,67 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
     .await?;
     tracing::info!("posted WorkerInfo state event");
 
+    // Telemetry state key: unique per worker name
+    let telemetry_state_key = format!("worker/{}", config.resolved_room_name);
+
+    // Check for competing worker instance before claiming the name.
+    // If another worker with a different UUID has a non-timed-out telemetry
+    // event for this name, refuse to start.
+    {
+        let existing = room.read_state(
+            &room_id_str,
+            WORKER_TELEMETRY,
+            &telemetry_state_key,
+        ).await;
+        if let Ok(Some(state_json)) = existing {
+            if let Ok(existing_state) = serde_json::from_value::<mxdx_types::events::telemetry::WorkerTelemetryState>(state_json) {
+                if existing_state.status == "online" {
+                    if let Some(ref existing_uuid) = existing_state.worker_uuid {
+                        if existing_uuid != telemetry.worker_uuid() {
+                            // Check if the existing worker is still alive (within 2x heartbeat)
+                            if let Ok(existing_ts) = parse_iso8601(&existing_state.timestamp) {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64;
+                                let stale_threshold = existing_state.heartbeat_interval_ms * 2;
+                                let age_ms = now.saturating_sub(existing_ts);
+                                if age_ms < stale_threshold {
+                                    anyhow::bail!(
+                                        "Another worker instance owns '{}' (uuid={}, last seen {}ms ago). \
+                                         Wait for it to shut down or time out before starting a new instance.",
+                                        config.resolved_room_name,
+                                        existing_uuid,
+                                        age_ms,
+                                    );
+                                }
+                                tracing::info!(
+                                    existing_uuid,
+                                    age_ms,
+                                    "previous worker instance is stale, taking over"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Post initial telemetry (status: "online") immediately after WorkerInfo
     let initial_telemetry = telemetry.collect_telemetry_state(0, "online")?;
     room.write_state(
         &room_id_str,
         WORKER_TELEMETRY,
-        "",
+        &telemetry_state_key,
         serde_json::to_value(&initial_telemetry)?,
     )
     .await?;
-    tracing::info!("posted initial telemetry (online)");
+    tracing::info!(
+        worker_uuid = %telemetry.worker_uuid(),
+        state_key = %telemetry_state_key,
+        "posted initial telemetry (online)"
+    );
     let mut last_telemetry = Instant::now();
     let telemetry_interval = Duration::from_secs(config.worker.telemetry_refresh_seconds);
 
@@ -398,7 +526,7 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
                         .write_state(
                             &room_id_str,
                             WORKER_TELEMETRY,
-                            "",
+                            &telemetry_state_key,
                             serde_json::to_value(&state)?,
                         )
                         .await
@@ -446,12 +574,12 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
             }
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("received SIGINT, shutting down gracefully");
-                post_offline_telemetry(&telemetry, &mut room, &room_id_str, &session_manager).await;
+                post_offline_telemetry(&telemetry, &mut room, &room_id_str, &telemetry_state_key, &session_manager).await;
                 break;
             }
             _ = sigterm_recv(&mut sigterm) => {
                 tracing::info!("received SIGTERM, shutting down gracefully");
-                post_offline_telemetry(&telemetry, &mut room, &room_id_str, &session_manager).await;
+                post_offline_telemetry(&telemetry, &mut room, &room_id_str, &telemetry_state_key, &session_manager).await;
                 break;
             }
         };
@@ -460,7 +588,7 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
             match event {
                 matrix::IncomingEvent::TaskSubmission { event_id, content } => {
                     let task: SessionTask = serde_json::from_value(content)?;
-                    tracing::info!(uuid = %task.uuid, bin = %task.bin, "received task");
+                    tracing::info!(uuid = %task.uuid, bin = %task.bin, sender = %task.sender_id, "received task");
 
                     // Check authorized users (empty list = allow all)
                     if !config.worker.authorized_users.is_empty()
@@ -473,6 +601,7 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
                         tracing::warn!(
                             uuid = %task.uuid,
                             sender = %task.sender_id,
+                            authorized = ?config.worker.authorized_users,
                             "unauthorized sender, rejecting task"
                         );
                         let result = SessionResult {
@@ -768,6 +897,7 @@ async fn post_offline_telemetry(
     telemetry: &telemetry::TelemetryCollector,
     room: &mut matrix::MatrixWorkerRoom,
     room_id_str: &str,
+    telemetry_state_key: &str,
     session_manager: &session::SessionManager,
 ) {
     let active_count = session_manager.active_sessions().len() as u32;
@@ -787,7 +917,7 @@ async fn post_offline_telemetry(
     };
     let result = tokio::time::timeout(
         Duration::from_secs(2),
-        room.write_state(room_id_str, WORKER_TELEMETRY, "", value),
+        room.write_state(room_id_str, WORKER_TELEMETRY, telemetry_state_key, value),
     )
     .await;
     match result {
