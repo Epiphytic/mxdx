@@ -68,9 +68,10 @@ impl MatrixClient {
             tokio::time::sleep(d).await;
         }
         let logs_room_id = self
-            .create_named_unencrypted_room(
+            .create_named_encrypted_room(
                 &format!("mxdx: {launcher_id} — logs"),
                 &format!("org.mxdx.launcher.logs:{launcher_id}"),
+                &[],
             )
             .await?;
 
@@ -190,6 +191,76 @@ impl MatrixClient {
         }
     }
 
+    /// Find the launcher topology by querying the Matrix REST API directly,
+    /// bypassing the SDK's local cache. Follows m.room.tombstone chains to
+    /// the latest replacement room.
+    pub async fn find_launcher_space_via_rest(
+        &self,
+        launcher_id: &str,
+        homeserver: &str,
+        access_token: &str,
+    ) -> Result<Option<LauncherTopology>> {
+        use crate::rest::RestClient;
+        let rest = RestClient::new(homeserver, access_token);
+
+        let expected_space_topic = format!("org.mxdx.launcher.space:{launcher_id}");
+        let expected_exec_topic = format!("org.mxdx.launcher.exec:{launcher_id}");
+        let expected_logs_topic = format!("org.mxdx.launcher.logs:{launcher_id}");
+
+        // Auto-accept any pending invites first (worker may have been re-invited).
+        for invited in rest.list_invited_rooms().await.unwrap_or_default() {
+            if let Err(e) = self.join_room(&invited).await {
+                tracing::debug!(room_id=%invited, error=%e, "could not auto-join invited room");
+            }
+        }
+
+        let joined = rest.list_joined_rooms().await?;
+        let mut space: Option<OwnedRoomId> = None;
+        let mut exec: Option<OwnedRoomId> = None;
+        let mut logs: Option<OwnedRoomId> = None;
+
+        for rid in joined {
+            let mut current = rid.clone();
+            for _ in 0..10 {
+                match rest.get_room_tombstone(&current).await {
+                    Ok(Some(replacement)) => {
+                        tracing::debug!(old=%current, new=%replacement, "following tombstone");
+                        current = replacement;
+                    }
+                    _ => break,
+                }
+            }
+            let topic = match rest.get_room_topic(&current).await {
+                Ok(Some(t)) => t,
+                _ => continue,
+            };
+            if topic == expected_space_topic && space.is_none() {
+                space = Some(current);
+            } else if topic == expected_exec_topic && exec.is_none() {
+                exec = Some(current);
+            } else if topic == expected_logs_topic && logs.is_none() {
+                logs = Some(current);
+            }
+        }
+
+        match (space, exec, logs) {
+            (Some(s), Some(e), Some(l)) => Ok(Some(LauncherTopology {
+                space_id: s,
+                exec_room_id: e,
+                logs_room_id: l,
+            })),
+            (_, Some(e), _) => {
+                tracing::warn!(launcher_id=%launcher_id, "partial topology — only exec room found");
+                Ok(Some(LauncherTopology {
+                    space_id: e.clone(),
+                    exec_room_id: e.clone(),
+                    logs_room_id: e,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Find an existing launcher space or create a new one.
     /// NOTE: Only workers/launchers should call this. Clients must use find_launcher_space()
     /// and fail if no worker room is found — clients must never create rooms.
@@ -207,7 +278,7 @@ impl MatrixClient {
     pub async fn create_terminal_session_dm(&self, user_id: &UserId) -> Result<OwnedRoomId> {
         let encryption_event = InitialStateEvent::new(
             EmptyStateKey,
-            RoomEncryptionEventContent::with_recommended_defaults(),
+            RoomEncryptionEventContent::with_recommended_defaults().with_encrypted_state(),
         );
 
         let history_event = InitialStateEvent::new(
@@ -324,7 +395,7 @@ impl MatrixClient {
     ) -> Result<OwnedRoomId> {
         let encryption_event = InitialStateEvent::new(
             EmptyStateKey,
-            RoomEncryptionEventContent::with_recommended_defaults(),
+            RoomEncryptionEventContent::with_recommended_defaults().with_encrypted_state(),
         );
         let topic_event =
             InitialStateEvent::new(EmptyStateKey, RoomTopicEventContent::new(topic.to_string()));
@@ -373,7 +444,7 @@ impl MatrixClient {
 
         let encryption_event = InitialStateEvent::new(
             EmptyStateKey,
-            RoomEncryptionEventContent::with_recommended_defaults(),
+            RoomEncryptionEventContent::with_recommended_defaults().with_encrypted_state(),
         );
         let history_event = InitialStateEvent::new(
             EmptyStateKey,
