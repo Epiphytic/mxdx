@@ -1,3 +1,4 @@
+pub mod backup;
 pub mod client;
 pub mod error;
 pub mod multi_hs;
