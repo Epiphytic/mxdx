@@ -49,7 +49,11 @@ impl MatrixClient {
             matrix_sdk::ruma::serde::Raw::new(&creation_content)
                 .expect("serialize creation_content"),
         );
-        space_request.initial_state = vec![space_topic.to_raw_any()];
+        let space_encryption = InitialStateEvent::new(
+            EmptyStateKey,
+            RoomEncryptionEventContent::with_recommended_defaults().with_encrypted_state(),
+        );
+        space_request.initial_state = vec![space_topic.to_raw_any(), space_encryption.to_raw_any()];
 
         let space_response = self.create_room_with_timeout(space_request).await?;
         let space_id = space_response.room_id().to_owned();
