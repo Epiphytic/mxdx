@@ -33,30 +33,8 @@ pub async fn run_daemon(
     // Create handler
     let handler = Arc::new(Handler::new(profile));
 
-    // Connect to Matrix (best-effort — daemon still starts if Matrix is unavailable)
-    let accounts = config.resolve_accounts();
-    if accounts.is_empty() {
-        warn!("no Matrix accounts configured — session commands will fail until connected");
-    } else {
-        let default_room = config.client.default_worker_room.clone()
-            .unwrap_or_else(|| "default".to_string());
-        match crate::matrix::connect_multi(
-            &accounts,
-            &default_room,
-            None,
-            config.force_new_device,
-        ).await {
-            Ok(mx_room) => {
-                info!(room_id = %mx_room.room_id(), "daemon connected to Matrix");
-                handler.set_matrix(mx_room).await;
-            }
-            Err(e) => {
-                error!(error = %e, "daemon failed to connect to Matrix — session commands will fail");
-            }
-        }
-    }
-
-    // Start Unix socket transport
+    // Start Unix socket transport FIRST so clients can connect immediately.
+    // Matrix connection happens in the background; session.run waits for it.
     let socket_path = transport::unix::socket_path(profile);
     let handler_clone = Arc::clone(&handler);
     tokio::spawn(async move {
@@ -64,6 +42,126 @@ pub async fn run_daemon(
             error!(error = %e, "Unix socket transport failed");
         }
     });
+
+    info!(profile, "daemon socket ready, connecting to Matrix...");
+
+    // Connect to Matrix in the background — handler.set_matrix() signals readiness
+    let accounts = config.resolve_accounts();
+    if accounts.is_empty() {
+        warn!("no Matrix accounts configured — session commands will fail until connected");
+    } else {
+        let default_room = config.client.default_worker_room.clone()
+            .unwrap_or_else(|| "default".to_string());
+        let handler_mx = Arc::clone(&handler);
+        let force_new = config.force_new_device;
+        tokio::spawn(async move {
+            match crate::matrix::connect_multi(
+                &accounts,
+                &default_room,
+                None,
+                force_new,
+            ).await {
+                Ok(mx_room) => {
+                    info!(room_id = %mx_room.room_id(), "daemon connected to Matrix");
+
+                    // Server-side megolm key backup. Mirrors the worker's setup so
+                    // recovered keys are available before serving session commands.
+                    // Clients never reencrypt — only ensure_backup + download_all_keys.
+                    {
+                        use mxdx_matrix::backup::{download_all_keys, ensure_backup, BackupState};
+                        use mxdx_types::identity::backup_keychain_key;
+
+                        // Build a fresh keychain (same chain used by connect_multi).
+                        let keychain: Box<dyn mxdx_types::identity::KeychainBackend> =
+                            match mxdx_types::keychain_chain::ChainedKeychain::default_chain() {
+                                Ok(kc) => Box::new(kc),
+                                Err(e) => {
+                                    warn!(error = %e, "failed to create keychain for backup, using in-memory");
+                                    Box::new(mxdx_types::identity::InMemoryKeychain::new())
+                                }
+                            };
+
+                        let unix_user = std::env::var("USER")
+                            .or_else(|_| std::env::var("LOGNAME"))
+                            .unwrap_or_else(|_| "unknown".into());
+                        let sdk_client = mx_room.client().inner().clone();
+                        let server = sdk_client.homeserver().to_string();
+
+                        match sdk_client.user_id().map(|u| u.to_owned()) {
+                            None => {
+                                warn!("backup: no user_id after login, skipping");
+                            }
+                            Some(matrix_user) => {
+                                // Keychain-presence fallback: MatrixClientRoom doesn't
+                                // expose fresh_logins, so derive is_first_run from
+                                // whether a recovery key is already stored.
+                                let kc_key = backup_keychain_key(
+                                    &server,
+                                    matrix_user.as_str(),
+                                    &unix_user,
+                                );
+                                let is_first_run = match keychain.get(&kc_key) {
+                                    Ok(Some(_)) => false,
+                                    Ok(None) => true,
+                                    Err(e) => {
+                                        warn!(error = %e, "keychain lookup failed; assuming first run");
+                                        true
+                                    }
+                                };
+
+                                let backup_state = match ensure_backup(
+                                    &sdk_client,
+                                    keychain.as_ref(),
+                                    &server,
+                                    &matrix_user,
+                                    &unix_user,
+                                    is_first_run,
+                                )
+                                .await
+                                {
+                                    Ok(state) => state,
+                                    Err(e) if is_first_run => {
+                                        error!(error = %e, "backup setup failed (first run); session commands may fail to decrypt history");
+                                        BackupState {
+                                            enabled: false,
+                                            degraded: true,
+                                            error: Some(e.to_string()),
+                                            ..Default::default()
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(error = %e, "backup setup failed (subsequent run); continuing degraded");
+                                        BackupState {
+                                            enabled: false,
+                                            degraded: true,
+                                            error: Some(e.to_string()),
+                                            ..Default::default()
+                                        }
+                                    }
+                                };
+                                if backup_state.enabled {
+                                    match download_all_keys(&sdk_client).await {
+                                        Ok(n) => info!(rooms = n, "backup: room keys downloaded"),
+                                        Err(e) => warn!(error = %e, "backup: download_all_keys failed"),
+                                    }
+                                }
+                                info!(
+                                    enabled = backup_state.enabled,
+                                    degraded = backup_state.degraded,
+                                    "backup state"
+                                );
+                            }
+                        }
+                    }
+
+                    handler_mx.set_matrix(mx_room).await;
+                }
+                Err(e) => {
+                    error!(error = %e, "daemon failed to connect to Matrix — session commands will fail");
+                }
+            }
+        });
+    }
 
     info!(profile, "daemon ready");
 
