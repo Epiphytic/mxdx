@@ -1153,6 +1153,143 @@ async fn t11_backup_round_trip() {
     eprintln!("[t11] PASS: backup round trip across distinct store dirs");
 }
 
+/// Login to Matrix via REST and return an access token. Used by helpers that
+/// need to call the client API directly without spinning up a full SDK client.
+async fn rest_login_token(server_url: &str, user: &str, pass: &str) -> anyhow::Result<String> {
+    let url = format!("{}/_matrix/client/v3/login", server_url.trim_end_matches('/'));
+    let body = serde_json::json!({
+        "type": "m.login.password",
+        "identifier": { "type": "m.id.user", "user": user },
+        "password": pass,
+        "initial_device_display_name": "mxdx-e2e-helper",
+    });
+    let client = reqwest::Client::new();
+    let resp = client.post(&url).json(&body).send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("rest_login: HTTP {}", resp.status());
+    }
+    let v: serde_json::Value = resp.json().await?;
+    Ok(v["access_token"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("rest_login: no access_token in response"))?
+        .to_string())
+}
+
+/// Create an UNENCRYPTED room with the given name and topic via REST.
+/// Returns the new room_id. Used to seed a malformed launcher exec room so
+/// the worker can detect and tombstone it on startup.
+async fn rest_create_unencrypted_room(
+    creds: &TestCreds,
+    name: &str,
+    topic: &str,
+) -> anyhow::Result<String> {
+    let token = rest_login_token(&creds.server_url, &creds.worker_user, &creds.worker_pass).await?;
+    let url = format!(
+        "{}/_matrix/client/v3/createRoom",
+        creds.server_url.trim_end_matches('/')
+    );
+    let body = serde_json::json!({
+        "name": name,
+        "topic": topic,
+        "preset": "private_chat",
+    });
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        anyhow::bail!("rest_create_unencrypted_room: HTTP {}: {}", status, text);
+    }
+    let v: serde_json::Value = resp.json().await?;
+    Ok(v["room_id"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("rest_create_unencrypted_room: no room_id"))?
+        .to_string())
+}
+
+/// Fetch the m.room.tombstone state event for a room. Returns Ok(None) if the
+/// room has no tombstone (404). Returns Ok(Some(replacement_room_id)) on hit.
+async fn rest_get_tombstone(creds: &TestCreds, room_id: &str) -> anyhow::Result<Option<String>> {
+    let token = rest_login_token(&creds.server_url, &creds.worker_user, &creds.worker_pass).await?;
+    let url = format!(
+        "{}/_matrix/client/v3/rooms/{}/state/m.room.tombstone/",
+        creds.server_url.trim_end_matches('/'),
+        room_id,
+    );
+    let client = reqwest::Client::new();
+    let resp = client.get(&url).bearer_auth(&token).send().await?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !resp.status().is_success() {
+        anyhow::bail!("rest_get_tombstone: HTTP {}", resp.status());
+    }
+    let v: serde_json::Value = resp.json().await?;
+    Ok(v.get("replacement_room")
+        .and_then(|r| r.as_str())
+        .map(|s| s.to_string()))
+}
+
+/// t12 — Worker self-heals an unencrypted launcher exec room.
+///
+/// We pre-create an UNENCRYPTED room with the exact topic the worker expects
+/// (`org.mxdx.launcher.exec:{launcher_id}`) via direct REST. When the worker
+/// starts up, its room reconciliation pass must detect that the existing room
+/// is missing m.room.encryption, tombstone it, and create an encrypted
+/// replacement. We then verify a tombstone event exists on the bad room.
+#[tokio::test]
+#[ignore = "requires test-credentials.toml + beta server"]
+async fn t12_unencrypted_room_self_heal() {
+    skip_if_gate_failed!();
+    let c = match load_creds() {
+        Some(c) => c,
+        None => return,
+    };
+    let auth_user = c.client_matrix_id();
+    // launcher_id matches `WorkerRuntimeConfig::compute_room_name()` exactly:
+    // `{host}.{unix_user}.{worker_user_localpart}` — this is the same value
+    // the worker uses internally as `launcher_id` (see crates/mxdx-worker/src/lib.rs).
+    let launcher_id = default_worker_room(&c.worker_user);
+    let topic = format!("org.mxdx.launcher.exec:{launcher_id}");
+
+    let bad_room = match rest_create_unencrypted_room(&c, "mxdx-test-bad", &topic).await {
+        Ok(id) => id,
+        Err(e) => security_gate_fail!("t12: failed to seed unencrypted room: {}", e),
+    };
+    eprintln!("[t12] seeded unencrypted exec room: {}", bad_room);
+
+    let (store, kc) = persistent_test_dirs_named("t12");
+    let _ = std::fs::remove_dir_all(&store);
+    let _ = std::fs::remove_dir_all(&kc);
+    std::fs::create_dir_all(&store).unwrap();
+    std::fs::create_dir_all(&kc).unwrap();
+
+    let mut worker = start_worker(
+        &c.server_url, &c.worker_user, &c.worker_pass, &auth_user,
+        &store, &kc,
+    );
+    tokio::time::sleep(Duration::from_secs(20)).await;
+
+    let tomb = rest_get_tombstone(&c, &bad_room).await;
+    let _ = worker.kill();
+    let _ = worker.wait();
+
+    match tomb {
+        Ok(Some(replacement)) => {
+            eprintln!("[t12] PASS: bad room tombstoned -> {}", replacement);
+        }
+        Ok(None) => {
+            security_gate_fail!("t12: worker did not tombstone the unencrypted room {}", bad_room);
+        }
+        Err(e) => security_gate_fail!("t12: tombstone lookup failed: {}", e),
+    }
+}
+
 // ===========================================================================
 // SSH BASELINE (standalone, not part of phased execution)
 // ===========================================================================
