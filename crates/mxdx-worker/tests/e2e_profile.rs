@@ -20,6 +20,36 @@
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
+
+/// Open a log file for worker stdio redirection. Without this, `Stdio::piped()`
+/// lets the OS pipe buffer (~64KB) fill up during backup/reencrypt/debug output
+/// and the worker's next write blocks forever, hanging every test. Returns a
+/// pair of owned File handles (stdout + stderr clone) suitable for
+/// `Stdio::from(...)`.
+/// Path of the current worker log. Tests that previously read worker stderr
+/// via `wait_with_output` can now read this file instead.
+fn worker_log_path() -> String {
+    std::env::var("MXDX_TEST_WORKER_LOG_FILE")
+        .unwrap_or_else(|_| "/tmp/mxdx-worker-current.log".to_string())
+}
+
+/// Open worker log file for stdio redirection. Without file redirection the
+/// `Stdio::piped()` pipe buffer (~64KB) fills up during backup/reencrypt/debug
+/// output and the worker blocks on its next write, hanging every test.
+fn worker_log_files() -> (std::fs::File, std::fs::File) {
+    let path = worker_log_path();
+    eprintln!("[e2e] worker log -> {path}");
+    let f = std::fs::OpenOptions::new()
+        .create(true).write(true).truncate(true).open(&path)
+        .unwrap_or_else(|e| panic!("open worker log {path}: {e}"));
+    let f2 = f.try_clone().expect("clone worker log fd");
+    (f, f2)
+}
+
+/// Read the current worker log file as a String (best-effort).
+fn worker_log_contents() -> String {
+    std::fs::read_to_string(worker_log_path()).unwrap_or_default()
+}
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -244,12 +274,13 @@ fn start_worker(hs: &str, user: &str, pass: &str, authorized_user: &str,
         args.push("--allowed-command".to_string());
         args.push(cmd.to_string());
     }
+    let (out, err) = worker_log_files();
     Command::new(cargo_bin("mxdx-worker"))
         .args(&args)
         .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
         .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::from(err))
         .spawn()
         .expect("failed to start mxdx-worker")
 }
@@ -281,13 +312,14 @@ fn start_worker_with_telemetry_refresh(
         args.push("--allowed-command".to_string());
         args.push(cmd.to_string());
     }
+    let (out, err) = worker_log_files();
     Command::new(cargo_bin("mxdx-worker"))
         .args(&args)
         .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
         .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
         .env("HOME", config_dir.to_str().unwrap()) // config loads from $HOME/.mxdx/
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::from(err))
         .spawn()
         .expect("failed to start mxdx-worker")
 }
@@ -307,12 +339,13 @@ fn start_worker_with_room(hs: &str, user: &str, pass: &str, room: &str, authoriz
         args.push("--allowed-command".to_string());
         args.push(cmd.to_string());
     }
+    let (out, err) = worker_log_files();
     Command::new(cargo_bin("mxdx-worker"))
         .args(&args)
         .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
         .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::from(err))
         .spawn()
         .expect("failed to start mxdx-worker")
 }
@@ -334,12 +367,13 @@ fn start_worker_with_commands(
         args.push("--allowed-command".to_string());
         args.push(cmd.to_string());
     }
+    let (out, err) = worker_log_files();
     Command::new(cargo_bin("mxdx-worker"))
         .args(&args)
         .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
         .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::from(err))
         .spawn()
         .expect("failed to start mxdx-worker")
 }
@@ -1014,9 +1048,9 @@ async fn t41_session_restore() {
     tokio::time::sleep(Duration::from_secs(15)).await;
 
     let _ = w1.kill();
-    let output1 = w1.wait_with_output().expect("failed to collect worker output");
-    let stderr1 = String::from_utf8_lossy(&output1.stderr);
-    eprintln!("[t41] first run stderr (last 500 chars): {}", &stderr1[stderr1.len().saturating_sub(500)..]);
+    let _ = w1.wait();
+    let stderr1 = worker_log_contents();
+    eprintln!("[t41] first run log (last 500 chars): {}", &stderr1[stderr1.len().saturating_sub(500)..]);
 
     let first_logged_in = stderr1.contains("fresh login completed")
         || stderr1.contains("session restored successfully")
@@ -1034,9 +1068,9 @@ async fn t41_session_restore() {
     tokio::time::sleep(Duration::from_secs(15)).await;
 
     let _ = w2.kill();
-    let output2 = w2.wait_with_output().expect("failed to collect worker output");
-    let stderr2 = String::from_utf8_lossy(&output2.stderr);
-    eprintln!("[t41] second run stderr (last 500 chars): {}", &stderr2[stderr2.len().saturating_sub(500)..]);
+    let _ = w2.wait();
+    let stderr2 = worker_log_contents();
+    eprintln!("[t41] second run log (last 500 chars): {}", &stderr2[stderr2.len().saturating_sub(500)..]);
 
     assert!(
         stderr2.contains("session restored successfully")
