@@ -1290,6 +1290,107 @@ async fn t12_unencrypted_room_self_heal() {
     }
 }
 
+/// t13 — `mxdx-client diagnose --decrypt` surfaces decrypted state events.
+///
+/// Generates a recent encrypted session event so there's something to
+/// decrypt, then runs `mxdx-client diagnose --decrypt` and verifies the
+/// emitted JSON has a non-empty top-level `decrypted_state` map. The shape
+/// is `{ "{room_id}:{event_type}:{state_key}": value, ... }` (see
+/// `crates/mxdx-client/src/diagnose.rs`, the `decrypted_state` insert).
+#[tokio::test]
+#[ignore = "requires test-credentials.toml + beta server"]
+async fn t13_diagnose_decrypts_state() {
+    skip_if_gate_failed!();
+    let c = match load_creds() {
+        Some(c) => c,
+        None => return,
+    };
+    let auth_user = c.client_matrix_id();
+    let worker_room = default_worker_room(&c.worker_user);
+
+    // Bring up a worker so the launcher rooms exist with encrypted state.
+    let (store, kc) = persistent_test_dirs_named("t13");
+    let config_home = tempfile::Builder::new()
+        .prefix("mxdx-config-t13-")
+        .tempdir()
+        .expect("failed to create temp config dir");
+    write_test_config(config_home.path(), &c, &worker_room);
+
+    let mut worker = start_worker(
+        &c.server_url, &c.worker_user, &c.worker_pass, &auth_user,
+        &store, &kc,
+    );
+    wait_ready().await;
+
+    // Produce a recent encrypted session event so there's state to decrypt.
+    let _ = run_client_daemon(
+        config_home.path(),
+        &["run", "/bin/echo", "t13-marker"],
+        &store,
+        &kc,
+    );
+
+    // Now run diagnose --decrypt as the worker user (so it has access to the
+    // encrypted state events in its own launcher rooms).
+    let client_bin = cargo_bin("mxdx-client");
+    let out = Command::new(client_bin)
+        .args([
+            "diagnose",
+            "--decrypt",
+            "--homeserver", &c.server_url,
+            "--username", &c.worker_user,
+            "--password", &c.worker_pass,
+        ])
+        .env("MXDX_STORE_DIR", store.to_str().unwrap())
+        .env("MXDX_KEYCHAIN_DIR", kc.to_str().unwrap())
+        .env("MXDX_KEEP_PASSWORDS", "1")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("diagnose failed to run");
+
+    let _ = worker.kill();
+    let _ = worker.wait();
+
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        security_gate_fail!(
+            "t13: diagnose --decrypt exit {:?} stderr={}",
+            out.status.code(),
+            &stderr[stderr.len().saturating_sub(500)..]
+        );
+    }
+
+    let json: serde_json::Value = match serde_json::from_slice(&out.stdout) {
+        Ok(v) => v,
+        Err(e) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            security_gate_fail!(
+                "t13: diagnose output is not valid JSON: {} stdout_tail={}",
+                e,
+                &stdout[stdout.len().saturating_sub(500)..]
+            );
+        }
+    };
+
+    // Top-level `decrypted_state` is a flat map keyed by
+    // `{room_id}:{event_type}:{state_key}` — verify it's present and non-empty.
+    let found = json
+        .get("decrypted_state")
+        .and_then(|d| d.as_object())
+        .map(|o| !o.is_empty())
+        .unwrap_or(false);
+    if !found {
+        // Surface decrypt_error if present so debugging is easier.
+        let err = json.get("decrypt_error").cloned().unwrap_or(serde_json::Value::Null);
+        security_gate_fail!(
+            "t13: diagnose --decrypt produced no decrypted_state events. decrypt_error={}",
+            err
+        );
+    }
+    eprintln!("[t13] PASS: diagnose --decrypt surfaced decrypted state events");
+}
+
 // ===========================================================================
 // SSH BASELINE (standalone, not part of phased execution)
 // ===========================================================================
