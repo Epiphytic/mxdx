@@ -1049,6 +1049,111 @@ async fn t41_session_restore() {
 }
 
 // ===========================================================================
+// PHASE 5 — KEY BACKUP & ENCRYPTION SELF-HEAL TESTS
+// ===========================================================================
+
+/// Persistent test dirs with a label suffix, for tests that need multiple
+/// distinct stores (e.g. backup round-trip with worker A vs worker B).
+/// Layout: `~/.mxdx/e2e-{label}/store` and `~/.mxdx/e2e-{label}/keychain`.
+fn persistent_test_dirs_named(label: &str) -> (PathBuf, PathBuf) {
+    let base = dirs::home_dir()
+        .expect("cannot resolve home dir")
+        .join(".mxdx")
+        .join(format!("e2e-{label}"));
+    let store = base.join("store");
+    let keychain = base.join("keychain");
+    std::fs::create_dir_all(&store).expect("failed to create persistent store dir");
+    std::fs::create_dir_all(&keychain).expect("failed to create persistent keychain dir");
+    (store, keychain)
+}
+
+/// t11 — Backup round trip across distinct store dirs.
+///
+/// Worker A logs in fresh, posts an encrypted session, then exits. Worker B
+/// starts with a *different* persistent store_dir (no on-disk crypto overlap
+/// with A) and must successfully restore the room key from server-side key
+/// backup in order to decrypt new traffic.
+#[tokio::test]
+#[ignore = "requires test-credentials.toml + beta server"]
+async fn t11_backup_round_trip() {
+    skip_if_gate_failed!();
+    let c = match load_creds() {
+        Some(c) => c,
+        None => return,
+    };
+    let auth_user = c.client_matrix_id();
+    let worker_room = default_worker_room(&c.worker_user);
+
+    // --- Phase 1: worker A creates the backup and posts a session ---
+    let (store_a, kc_a) = persistent_test_dirs_named("t11-a");
+    let config_a = tempfile::Builder::new()
+        .prefix("mxdx-config-t11a-")
+        .tempdir()
+        .expect("failed to create temp config dir");
+    write_test_config(config_a.path(), &c, &worker_room);
+
+    let mut worker_a = start_worker(
+        &c.server_url, &c.worker_user, &c.worker_pass, &auth_user,
+        &store_a, &kc_a,
+    );
+    wait_ready().await;
+
+    let out_a = run_client_daemon(
+        config_a.path(),
+        &["run", "/bin/echo", "round-trip-marker"],
+        &store_a,
+        &kc_a,
+    );
+    if !out_a.status.success() {
+        let stderr = String::from_utf8_lossy(&out_a.stderr);
+        eprintln!(
+            "[t11] phase 1 client output (non-fatal): {}",
+            &stderr[stderr.len().saturating_sub(500)..]
+        );
+    }
+    let _ = worker_a.kill();
+    let _ = worker_a.wait();
+
+    // --- Phase 2: worker B uses a FRESH store_dir (no crypto overlap with A) ---
+    let (store_b, kc_b) = persistent_test_dirs_named("t11-b");
+    let _ = std::fs::remove_dir_all(&store_b);
+    let _ = std::fs::remove_dir_all(&kc_b);
+    std::fs::create_dir_all(&store_b).unwrap();
+    std::fs::create_dir_all(&kc_b).unwrap();
+
+    let config_b = tempfile::Builder::new()
+        .prefix("mxdx-config-t11b-")
+        .tempdir()
+        .expect("failed to create temp config dir");
+    write_test_config(config_b.path(), &c, &worker_room);
+
+    let mut worker_b = start_worker(
+        &c.server_url, &c.worker_user, &c.worker_pass, &auth_user,
+        &store_b, &kc_b,
+    );
+    tokio::time::sleep(Duration::from_secs(20)).await;
+
+    let out_b = run_client_daemon(
+        config_b.path(),
+        &["run", "/bin/echo", "after-backup-restore"],
+        &store_b,
+        &kc_b,
+    );
+    let _ = worker_b.kill();
+    let _ = worker_b.wait();
+
+    if !out_b.status.success() {
+        let stderr = String::from_utf8_lossy(&out_b.stderr);
+        security_gate_fail!(
+            "t11: second worker failed to decrypt after backup restore: exit={:?} stderr={}",
+            out_b.status.code(),
+            &stderr[stderr.len().saturating_sub(800)..]
+        );
+    }
+    eprintln!("[t11] PASS: backup round trip across distinct store dirs");
+}
+
+// ===========================================================================
 // SSH BASELINE (standalone, not part of phased execution)
 // ===========================================================================
 
