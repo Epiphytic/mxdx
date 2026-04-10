@@ -2,11 +2,10 @@
 //! or missing encrypt_state_events, tombstones them, and creates encrypted
 //! replacements with the same name/topic/members.
 //!
-//! Security note: tombstone state events are sent via
-//! `MatrixClient::tombstone_room`, which goes through `send_state_event` on
-//! a room with `encrypt_state_events=true` (MSC4362). The MSC4362 feature is
-//! enabled project-wide on `matrix-sdk-base`, so state events on properly
-//! encrypted rooms are encrypted on the wire.
+//! Tombstone state events are sent via REST directly (not through the SDK)
+//! because the old room may not be in the SDK's local cache yet (it was
+//! discovered via REST before a sync). Since the old room is unencrypted,
+//! a plain REST PUT is the correct approach.
 
 use crate::client::MatrixClient;
 use crate::error::Result;
@@ -114,8 +113,24 @@ async fn ensure_encrypted(
     let new_id = matrix
         .create_mxdx_encrypted_room(&name, &topic, authorized_users, launcher_id, role_key)
         .await?;
-    matrix.tombstone_room(room, &new_id).await?;
-    if let Err(e) = matrix.leave_and_forget_room(room).await {
+
+    // Tombstone the old room via REST. We cannot use the SDK's
+    // `tombstone_room` here because the SDK may not know about the old room
+    // yet (it was discovered via REST, not via sync). The old room is
+    // unencrypted, so a plain REST PUT is correct.
+    let tombstone_content = serde_json::json!({
+        "body": "This room has been replaced",
+        "replacement_room": new_id.to_string(),
+    });
+    if let Err(e) = rest
+        .put_state_event(room, "m.room.tombstone", "", tombstone_content)
+        .await
+    {
+        tracing::warn!(room=%room, error=%e, "failed to tombstone old room (non-fatal)");
+    }
+
+    // Best-effort leave via REST — the SDK may not know about this room.
+    if let Err(e) = rest.leave_room(room).await {
         tracing::warn!(room=%room, error=%e, "failed to leave old room (non-fatal)");
     }
     Ok(new_id)

@@ -129,6 +129,40 @@ impl RestClient {
         Ok(Some(EncryptionState { algorithm, encrypt_state_events }))
     }
 
+    /// Send a state event to a room via the REST API.
+    ///
+    /// This bypasses the SDK entirely, which is necessary when the SDK's local
+    /// cache doesn't know about the room (e.g. rooms discovered via REST before
+    /// a sync). The event is sent as plain JSON — on unencrypted rooms this is
+    /// correct; on encrypted rooms use the SDK path instead.
+    pub async fn put_state_event(
+        &self,
+        room: &RoomId,
+        event_type: &str,
+        state_key: &str,
+        content: serde_json::Value,
+    ) -> Result<()> {
+        let encoded_room = urlencoding::encode(room.as_str());
+        let encoded_key = urlencoding::encode(state_key);
+        let url = format!(
+            "{}/_matrix/client/v3/rooms/{}/state/{}/{}",
+            self.homeserver, encoded_room, event_type, encoded_key
+        );
+        let resp = self
+            .http
+            .put(&url)
+            .bearer_auth(&self.access_token)
+            .json(&content)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("put_state_event({event_type}): HTTP {status}: {body}");
+        }
+        Ok(())
+    }
+
     pub async fn get_room_tombstone(&self, room: &RoomId) -> Result<Option<OwnedRoomId>> {
         let url = self.state_url(room, "m.room.tombstone");
         let resp = self.http.get(&url).bearer_auth(&self.access_token).send().await?;
@@ -167,6 +201,31 @@ impl RestClient {
         }
         let events: Vec<serde_json::Value> = resp.json().await?;
         Ok(events)
+    }
+
+    /// Leave a room via the REST API.
+    ///
+    /// Used when the SDK's local cache doesn't know about the room (e.g. rooms
+    /// discovered via REST before a sync).
+    pub async fn leave_room(&self, room: &RoomId) -> Result<()> {
+        let encoded = urlencoding::encode(room.as_str());
+        let url = format!(
+            "{}/_matrix/client/v3/rooms/{}/leave",
+            self.homeserver, encoded
+        );
+        let resp = self
+            .http
+            .post(&url)
+            .bearer_auth(&self.access_token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            anyhow::bail!("leave_room: HTTP {status}: {body}");
+        }
+        Ok(())
     }
 
     pub async fn list_invited_rooms(&self) -> Result<Vec<OwnedRoomId>> {

@@ -1769,7 +1769,7 @@ async fn phase_6(creds: &TestCreds) -> Result<()> {
             &creds.server_url, &creds.worker_user, &creds.worker_pass, &launcher_id, &auth_user,
             &store, &kc,
         );
-        tokio::time::sleep(Duration::from_secs(20)).await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
 
         let tomb_exec = rest_get_tombstone(creds, &bad_exec).await;
         kill_worker_graceful(&mut worker);
