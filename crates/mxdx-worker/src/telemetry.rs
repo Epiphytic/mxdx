@@ -8,17 +8,24 @@ use sysinfo::{Disks, System};
 
 pub struct TelemetryCollector {
     worker_id: String,
+    worker_uuid: String,
     refresh_seconds: u64,
     extra_capabilities: Vec<String>,
 }
 
 impl TelemetryCollector {
     pub fn new(worker_id: String, refresh_seconds: u64, extra_capabilities: Vec<String>) -> Self {
+        let worker_uuid = uuid::Uuid::new_v4().to_string();
         Self {
             worker_id,
+            worker_uuid,
             refresh_seconds,
             extra_capabilities,
         }
+    }
+
+    pub fn worker_uuid(&self) -> &str {
+        &self.worker_uuid
     }
 
     /// Collect current system info and build a WorkerInfo event.
@@ -124,6 +131,7 @@ impl TelemetryCollector {
         Ok(WorkerTelemetryState {
             timestamp: iso8601_now(),
             heartbeat_interval_ms: self.refresh_seconds * 1000,
+            worker_uuid: Some(self.worker_uuid.clone()),
             hostname: host,
             platform,
             arch,

@@ -12,13 +12,54 @@ use matrix_sdk::{
                 history_visibility::{HistoryVisibility, RoomHistoryVisibilityEventContent},
                 topic::RoomTopicEventContent,
             },
-            EmptyStateKey, InitialStateEvent,
+            EmptyStateKey, InitialStateEvent, StateEventType,
         },
-        room::RoomType,
+        serde::Raw,
         OwnedUserId,
     },
     Client,
 };
+
+/// Custom field key inside `m.room.create` content identifying the launcher
+/// this room belongs to. `m.room.create` is NEVER encrypted per Matrix spec —
+/// it's the foundational state event that establishes the room — so this
+/// field is the one place we can put discovery metadata that survives
+/// MSC4362 encrypted state events.
+const MXDX_LAUNCHER_ID_KEY: &str = "org.mxdx.launcher_id";
+
+/// Custom field key inside `m.room.create` content identifying the role of
+/// this room within the launcher topology (`space`, `exec`, or `logs`).
+const MXDX_ROLE_KEY: &str = "org.mxdx.role";
+
+/// Build a `Raw<CreationContent>` that embeds the mxdx discovery fields in
+/// the room's `m.room.create` event. See the Rust worker's
+/// `mxdx_creation_content_raw` helper in `mxdx-matrix/src/rooms.rs` for the
+/// matching logic — both sides of the ecosystem must produce and consume
+/// the same custom keys.
+fn mxdx_creation_content_raw(
+    launcher_id: &str,
+    role: &str,
+    is_space: bool,
+) -> Raw<CreationContent> {
+    let mut obj = serde_json::Map::new();
+    if is_space {
+        obj.insert(
+            "type".to_string(),
+            serde_json::Value::String("m.space".to_string()),
+        );
+    }
+    obj.insert(
+        MXDX_LAUNCHER_ID_KEY.to_string(),
+        serde_json::Value::String(launcher_id.to_string()),
+    );
+    obj.insert(
+        MXDX_ROLE_KEY.to_string(),
+        serde_json::Value::String(role.to_string()),
+    );
+    let json_string = serde_json::to_string(&serde_json::Value::Object(obj))
+        .expect("mxdx creation content serializes");
+    Raw::from_json_string(json_string).expect("mxdx creation content is valid JSON")
+}
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use wasm_bindgen::prelude::*;
@@ -475,21 +516,17 @@ impl WasmMatrixClient {
             .server_name()
             .to_string();
 
-        // Create space room
-        let mut creation_content = CreationContent::new();
-        creation_content.room_type = Some(RoomType::Space);
-
+        // Space room. The launcher_id + role marker are embedded in
+        // `m.room.create` content (never encrypted) so discovery works even
+        // when every other state event is encrypted via MSC4362.
         let space_topic = InitialStateEvent::new(
             EmptyStateKey,
             RoomTopicEventContent::new(format!("org.mxdx.launcher.space:{launcher_id}")),
         );
-
         let mut space_request = CreateRoomRequest::new();
         space_request.name = Some(format!("mxdx: {launcher_id}"));
-        space_request.creation_content = Some(
-            matrix_sdk::ruma::serde::Raw::new(&creation_content)
-                .map_err(|e| to_js_err(format!("Failed to serialize creation content: {e}")))?,
-        );
+        space_request.creation_content =
+            Some(mxdx_creation_content_raw(launcher_id, "space", true));
         space_request.initial_state = vec![space_topic.to_raw_any()];
 
         let space = self
@@ -499,19 +536,23 @@ impl WasmMatrixClient {
             .map_err(to_js_err)?;
         let space_id = space.room_id().to_string();
 
-        // Create exec room (E2EE + MSC4362)
+        // Create exec room (E2EE + MSC4362 + mxdx discovery fields)
         let exec_room_id = self
-            .create_named_encrypted_room(
+            .create_named_encrypted_mxdx_room(
                 &format!("mxdx: {launcher_id} — exec"),
                 &format!("org.mxdx.launcher.exec:{launcher_id}"),
+                launcher_id,
+                "exec",
             )
             .await?;
 
-        // Create logs room (E2EE + MSC4362)
+        // Create logs room (E2EE + MSC4362 + mxdx discovery fields)
         let logs_room_id = self
-            .create_named_encrypted_room(
+            .create_named_encrypted_mxdx_room(
                 &format!("mxdx: {launcher_id} — logs"),
                 &format!("org.mxdx.launcher.logs:{launcher_id}"),
+                launcher_id,
+                "logs",
             )
             .await?;
 
@@ -535,30 +576,57 @@ impl WasmMatrixClient {
         serde_wasm_bindgen::to_value(&topology).map_err(to_js_err)
     }
 
-    /// Find an existing launcher space by scanning joined rooms for matching topics.
+    /// Find an existing launcher space by scanning joined rooms for matching
+    /// mxdx discovery metadata in their `m.room.create` content. That event
+    /// is never encrypted per Matrix spec, so this works even when every
+    /// other state event is MSC4362-encrypted and the client has not yet
+    /// received the room keys needed to decrypt the topic.
+    ///
     /// Returns JSON topology or null.
     #[wasm_bindgen(js_name = "findLauncherSpace")]
     pub async fn find_launcher_space(&self, launcher_id: &str) -> Result<JsValue, JsValue> {
         self.sync_once().await?;
 
-        let expected_space = format!("org.mxdx.launcher.space:{launcher_id}");
-        let expected_exec = format!("org.mxdx.launcher.exec:{launcher_id}");
-        let expected_logs = format!("org.mxdx.launcher.logs:{launcher_id}");
-
-        let mut space_id = None;
-        let mut exec_room_id = None;
-        let mut logs_room_id = None;
+        let mut space_id: Option<String> = None;
+        let mut exec_room_id: Option<String> = None;
+        let mut logs_room_id: Option<String> = None;
 
         for room in self.client.joined_rooms() {
-            let topic = room.topic().unwrap_or_default();
             let rid = room.room_id().to_string();
 
-            if topic == expected_space {
-                space_id = Some(rid);
-            } else if topic == expected_exec {
-                exec_room_id = Some(rid);
-            } else if topic == expected_logs {
-                logs_room_id = Some(rid);
+            // Read m.room.create (never encrypted). Parse the raw JSON so we
+            // can access custom `org.mxdx.*` fields that the typed ruma
+            // struct doesn't expose.
+            let raw = match room
+                .get_state_event(StateEventType::RoomCreate, "")
+                .await
+            {
+                Ok(Some(raw)) => raw,
+                _ => continue,
+            };
+            let json_str = match &raw {
+                matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState::Sync(r) => {
+                    r.json().get().to_string()
+                }
+                matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState::Stripped(r) => {
+                    r.json().get().to_string()
+                }
+            };
+            let value: serde_json::Value = match serde_json::from_str(&json_str) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let content = value.get("content").unwrap_or(&value);
+            let lid = content.get(MXDX_LAUNCHER_ID_KEY).and_then(|v| v.as_str());
+            if lid != Some(launcher_id) {
+                continue;
+            }
+            let role = content.get(MXDX_ROLE_KEY).and_then(|v| v.as_str());
+            match role {
+                Some("space") if space_id.is_none() => space_id = Some(rid),
+                Some("exec") if exec_room_id.is_none() => exec_room_id = Some(rid),
+                Some("logs") if logs_room_id.is_none() => logs_room_id = Some(rid),
+                _ => {}
             }
         }
 
@@ -592,29 +660,53 @@ impl WasmMatrixClient {
     /// List all launcher spaces by scanning joined rooms for matching topic patterns.
     /// Returns JSON string: array of { space_id, exec_room_id, logs_room_id, launcher_id }.
     /// Reads from local cache — call syncOnce() before this if you need fresh data.
+    ///
+    /// Uses the mxdx discovery fields in `m.room.create` (never encrypted)
+    /// rather than reading the encrypted `m.room.topic` from state cache.
     #[wasm_bindgen(js_name = "listLauncherSpaces")]
     pub async fn list_launcher_spaces(&self) -> Result<String, JsValue> {
-        let space_prefix = "org.mxdx.launcher.space:";
-        let exec_prefix = "org.mxdx.launcher.exec:";
-        let logs_prefix = "org.mxdx.launcher.logs:";
-
-        // Collect all rooms by topic prefix
-        let mut spaces: Vec<(String, String)> = Vec::new(); // (launcher_id, room_id)
+        let mut spaces: Vec<(String, String)> = Vec::new();
         let mut exec_rooms: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         let mut logs_rooms: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
 
         for room in self.client.joined_rooms() {
-            let topic = room.topic().unwrap_or_default();
             let rid = room.room_id().to_string();
-
-            if let Some(id) = topic.strip_prefix(space_prefix) {
-                spaces.push((id.to_string(), rid));
-            } else if let Some(id) = topic.strip_prefix(exec_prefix) {
-                exec_rooms.insert(id.to_string(), rid);
-            } else if let Some(id) = topic.strip_prefix(logs_prefix) {
-                logs_rooms.insert(id.to_string(), rid);
+            let raw = match room
+                .get_state_event(StateEventType::RoomCreate, "")
+                .await
+            {
+                Ok(Some(raw)) => raw,
+                _ => continue,
+            };
+            let json_str = match &raw {
+                matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState::Sync(r) => {
+                    r.json().get().to_string()
+                }
+                matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState::Stripped(r) => {
+                    r.json().get().to_string()
+                }
+            };
+            let value: serde_json::Value = match serde_json::from_str(&json_str) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            let content = value.get("content").unwrap_or(&value);
+            let launcher_id = match content.get(MXDX_LAUNCHER_ID_KEY).and_then(|v| v.as_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let role = content.get(MXDX_ROLE_KEY).and_then(|v| v.as_str());
+            match role {
+                Some("space") => spaces.push((launcher_id, rid)),
+                Some("exec") => {
+                    exec_rooms.insert(launcher_id, rid);
+                }
+                Some("logs") => {
+                    logs_rooms.insert(launcher_id, rid);
+                }
+                _ => {}
             }
         }
 
@@ -1442,6 +1534,34 @@ impl WasmMatrixClient {
         let mut request = CreateRoomRequest::new();
         request.name = Some(name.to_string());
         request.initial_state = vec![encryption_event.to_raw_any(), topic_event.to_raw_any()];
+
+        let response = self.client.create_room(request).await.map_err(to_js_err)?;
+        Ok(response.room_id().to_string())
+    }
+
+    /// Create an E2EE+MSC4362 room that also carries the mxdx launcher_id
+    /// and role in its `m.room.create` content. These fields remain readable
+    /// via plain REST even when every other state event is encrypted, and
+    /// form the discovery mechanism the Rust worker uses.
+    async fn create_named_encrypted_mxdx_room(
+        &self,
+        name: &str,
+        topic: &str,
+        launcher_id: &str,
+        role: &str,
+    ) -> Result<String, JsValue> {
+        let encryption_event = InitialStateEvent::new(
+            EmptyStateKey,
+            RoomEncryptionEventContent::with_recommended_defaults().with_encrypted_state(),
+        );
+        let topic_event =
+            InitialStateEvent::new(EmptyStateKey, RoomTopicEventContent::new(topic.to_string()));
+
+        let mut request = CreateRoomRequest::new();
+        request.name = Some(name.to_string());
+        request.initial_state = vec![encryption_event.to_raw_any(), topic_event.to_raw_any()];
+        request.creation_content =
+            Some(mxdx_creation_content_raw(launcher_id, role, false));
 
         let response = self.client.create_room(request).await.map_err(to_js_err)?;
         Ok(response.room_id().to_string())

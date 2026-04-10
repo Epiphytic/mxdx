@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use mxdx_types::events::session::{
     ActiveSessionState, CompletedSessionState, SessionStatus, SessionTask,
 };
@@ -38,6 +38,15 @@ impl SessionManager {
         }
     }
 
+    /// Returns true if the given UUID is already tracked (claimed, running,
+    /// or recently completed). Matrix redelivers events after reconnect and
+    /// resync, so the main worker loop must dedupe on task UUID before
+    /// calling `claim` — otherwise a redelivered task would crash the
+    /// worker. See the `[duplicate task guard]` comment in `lib.rs`.
+    pub fn contains_session(&self, uuid: &str) -> bool {
+        self.sessions.contains_key(uuid)
+    }
+
     /// Claim a session by creating the internal tracking entry.
     /// Returns the ActiveSessionState to be written as a state event.
     pub fn claim(&mut self, task: SessionTask) -> Result<ActiveSessionState> {
@@ -69,12 +78,7 @@ impl SessionManager {
     }
 
     /// Transition to running after process start.
-    pub fn mark_running(
-        &mut self,
-        uuid: &str,
-        pid: Option<u32>,
-        tmux: TmuxSession,
-    ) -> Result<()> {
+    pub fn mark_running(&mut self, uuid: &str, pid: Option<u32>, tmux: TmuxSession) -> Result<()> {
         let session = self
             .sessions
             .get_mut(uuid)
@@ -168,7 +172,9 @@ mod tests {
         TmuxSession {
             session_name: name.to_string(),
             socket_path: std::path::PathBuf::from(format!("/tmp/mxdx-tmux/mxdx-{name}")),
-            exit_notify_path: std::path::PathBuf::from(format!("/tmp/mxdx-tmux/mxdx-{name}.notify")),
+            exit_notify_path: std::path::PathBuf::from(format!(
+                "/tmp/mxdx-tmux/mxdx-{name}.notify"
+            )),
         }
     }
 
@@ -243,7 +249,8 @@ mod tests {
         mgr.claim(make_task("s-4")).unwrap();
         let tmux = make_tmux_session("s-4");
         mgr.mark_running("s-4", Some(100), tmux).unwrap();
-        mgr.complete("s-4", SessionStatus::Success, Some(0)).unwrap();
+        mgr.complete("s-4", SessionStatus::Success, Some(0))
+            .unwrap();
 
         let err = mgr
             .complete("s-4", SessionStatus::Failed, Some(1))
@@ -264,7 +271,8 @@ mod tests {
         // Complete one
         let tmux = make_tmux_session("a-2");
         mgr.mark_running("a-2", Some(100), tmux).unwrap();
-        mgr.complete("a-2", SessionStatus::Success, Some(0)).unwrap();
+        mgr.complete("a-2", SessionStatus::Success, Some(0))
+            .unwrap();
 
         let active = mgr.active_sessions();
         assert_eq!(active.len(), 2);
@@ -294,9 +302,7 @@ mod tests {
         let tmux = make_tmux_session("d-1");
         mgr.mark_running("d-1", Some(100), tmux).unwrap();
 
-        let completed = mgr
-            .complete("d-1", SessionStatus::Failed, Some(1))
-            .unwrap();
+        let completed = mgr.complete("d-1", SessionStatus::Failed, Some(1)).unwrap();
 
         // Duration should be >= 0 (essentially instant in tests)
         assert!(completed.completion_time > 0);

@@ -81,6 +81,28 @@ impl RestClient {
         Ok(v.get("topic").and_then(|t| t.as_str()).map(String::from))
     }
 
+    /// Fetch the content of the `m.room.create` state event.
+    ///
+    /// By Matrix spec `m.room.create` is the foundational event that
+    /// establishes the room — it is NEVER encrypted, even with MSC4362
+    /// encrypted state events enabled (there would be no way to decrypt it
+    /// before joining). This makes it the one place where discovery
+    /// metadata (`org.mxdx.launcher_id`, `org.mxdx.role`) can be published
+    /// and reliably read via plain REST, regardless of crypto state.
+    ///
+    /// Returns the raw JSON body of the event (not just the content wrapper).
+    /// Caller should look up custom fields directly off the returned value.
+    pub async fn get_room_create(&self, room: &RoomId) -> Result<Option<serde_json::Value>> {
+        let url = self.state_url(room, "m.room.create");
+        let resp = self.http.get(&url).bearer_auth(&self.access_token).send().await?;
+        if resp.status().as_u16() == 404 { return Ok(None); }
+        if !resp.status().is_success() {
+            anyhow::bail!("get_room_create: HTTP {}", resp.status());
+        }
+        let v: serde_json::Value = resp.json().await?;
+        Ok(Some(v))
+    }
+
     pub async fn get_room_name(&self, room: &RoomId) -> Result<Option<String>> {
         let url = self.state_url(room, "m.room.name");
         let resp = self.http.get(&url).bearer_auth(&self.access_token).send().await?;
@@ -120,6 +142,31 @@ impl RestClient {
             Some(s) => Ok(Some(RoomId::parse(s)?.to_owned())),
             None => Ok(None),
         }
+    }
+
+    /// Fetch the full list of state events for a room.
+    ///
+    /// Returns the raw JSON array from `GET /_matrix/client/v3/rooms/{roomId}/state`.
+    /// Each event includes `type`, `state_key`, `content`, `origin_server_ts`, `sender`, etc.
+    /// This is useful for reading metadata (like `origin_server_ts`) of MSC4362
+    /// encrypted state events that can't be decrypted without room keys.
+    pub async fn get_room_full_state(&self, room: &RoomId) -> Result<Vec<serde_json::Value>> {
+        let encoded = urlencoding::encode(room.as_str());
+        let url = format!(
+            "{}/_matrix/client/v3/rooms/{}/state",
+            self.homeserver, encoded
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.access_token)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("get_room_full_state: HTTP {}", resp.status());
+        }
+        let events: Vec<serde_json::Value> = resp.json().await?;
+        Ok(events)
     }
 
     pub async fn list_invited_rooms(&self) -> Result<Vec<OwnedRoomId>> {

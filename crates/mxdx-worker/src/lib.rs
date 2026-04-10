@@ -131,7 +131,7 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
     .await?;
 
     tracing::info!(
-        user_id = %multi.user_id(),
+        matrix_account = %multi.user_id(),
         servers = multi.server_count(),
         preferred = %multi.preferred_server(),
         fresh_logins = ?fresh_logins,
@@ -163,20 +163,27 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
         let server = multi.preferred_server().to_string();
         let is_first_run = any_fresh;
 
+        // Backup setup is best-effort. If it fails (e.g., the server has a
+        // stale backup from a prior device and we have no recovery key for
+        // it), the worker still operates — it just can't recover historical
+        // room keys from the server backup. The worker will set up its own
+        // keys for new rooms via normal megolm exchange.
+        //
+        // Pass `is_first_run = false` so `ensure_backup` always degrades
+        // gracefully instead of bailing on first-run + stale-server-backup.
         let backup_state = match ensure_backup(
             &sdk_client,
             keychain.as_ref(),
             &server,
             &matrix_user,
             &unix_user,
-            is_first_run,
+            false,
         )
         .await
         {
             Ok(state) => state,
-            Err(e) if is_first_run => return Err(e),
             Err(e) => {
-                tracing::warn!(error=%e, "backup setup failed (subsequent run); continuing degraded");
+                tracing::warn!(error=%e, "backup setup failed; continuing without backup");
                 BackupState {
                     enabled: false,
                     degraded: true,
@@ -185,6 +192,7 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
                 }
             }
         };
+        let _ = is_first_run; // preserved for future first-run-specific logic
         if backup_state.enabled {
             match download_all_keys(&sdk_client).await {
                 Ok(n) => tracing::info!(rooms = n, "backup: room keys downloaded"),
@@ -319,7 +327,7 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
         rid
     };
 
-    tracing::info!(room_id = %room_id, "worker room ready");
+    tracing::info!(room_id = %room_id, matrix_account = %multi.user_id(), "worker room ready");
 
     // Bootstrap cross-signing: on fresh login this sets up keys;
     // on session restore this no-ops quickly (keys already exist).
@@ -335,8 +343,15 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
 /// then connects to Matrix and enters the main sync loop processing tasks,
 /// cancellations, and session completions.
 pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
+    let matrix_account = config
+        .defaults
+        .accounts
+        .first()
+        .map(|a| a.user_id.as_str())
+        .unwrap_or("unknown");
     tracing::info!(
         room = %config.resolved_room_name,
+        matrix_account = %matrix_account,
         "starting mxdx-worker"
     );
 
@@ -483,6 +498,13 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
         state_key = %telemetry_state_key,
         "posted initial telemetry (online)"
     );
+    // Signal full readiness — synced, keys shared, telemetry posted.
+    // Tests and orchestrators can watch for this log line.
+    tracing::info!(
+        matrix_account = %user_id,
+        room_id = %room_id_str,
+        "MXDX_WORKER_READY: worker fully started, synced, and accepting tasks"
+    );
     let mut last_telemetry = Instant::now();
     let telemetry_interval = Duration::from_secs(config.worker.telemetry_refresh_seconds);
 
@@ -501,6 +523,31 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
         .to_string();
     let mut state_room_ready = false;
     let mut state_room: Option<WorkerStateRoom> = None;
+    // Real, persistent keychain for state room discovery cache. Without this,
+    // every worker start looks like a fresh account to `WorkerStateRoom::
+    // get_or_create` and falls back to alias resolution, which in turn fails
+    // when the server-side alias is bound to an older room we can no longer
+    // validate. The file/OS keychain lets a restarted worker pick up its own
+    // previously-recorded room id in O(1).
+    let state_room_keychain: Box<dyn mxdx_types::identity::KeychainBackend> =
+        match mxdx_types::keychain_chain::ChainedKeychain::default_chain() {
+            Ok(kc) => Box::new(kc),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "state room keychain unavailable, using in-memory fallback"
+                );
+                Box::new(mxdx_types::identity::InMemoryKeychain::new())
+            }
+        };
+
+    // Single-writer lock TTL matches the client's liveness rule: a worker is
+    // considered dead after two missed telemetry refreshes. Graceful shutdown
+    // releases the lock explicitly so a replacement can take over immediately.
+    let lock_ttl_ms: u64 = config.worker.telemetry_refresh_seconds.saturating_mul(2) * 1000;
+    // Did we successfully take the lock? If not, we skipped renewal entirely
+    // and must not issue a release on shutdown (we don't own it).
+    let mut lock_held = false;
 
     // Periodic trust sync (every ~60 sync cycles, ~30 minutes at 30s sync timeout)
     let mut sync_cycle_count: u64 = 0;
@@ -522,19 +569,65 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
         // so that room discovery syncs don't consume task events.
         if !state_room_ready {
             state_room_ready = true;
-            let sr_keychain = Box::new(mxdx_types::identity::InMemoryKeychain::new());
             match WorkerStateRoom::get_or_create(
                 room.client(),
                 &host,
                 &os_user,
                 &localpart,
-                sr_keychain.as_ref(),
+                state_room_keychain.as_ref(),
                 &[],
             )
             .await
             {
                 Ok(sr) => {
                     tracing::info!(state_room_id = %sr.room_id(), "state room ready");
+
+                    // Single-writer lock: refuse to start if another live
+                    // worker holds the lease. TTL is 2× telemetry refresh,
+                    // matching the client's liveness detection rule.
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    let lock = mxdx_types::events::state_room::WorkerStateLock {
+                        device_id: identity.device_id().to_string(),
+                        worker_uuid: telemetry.worker_uuid().to_string(),
+                        host: host.clone(),
+                        os_user: os_user.clone(),
+                        acquired_at: now_ms,
+                        expires_at: now_ms + lock_ttl_ms,
+                    };
+                    match sr.try_acquire_lock(room.client(), &lock, now_ms).await {
+                        Ok(true) => {
+                            tracing::info!(
+                                device_id = %identity.device_id(),
+                                ttl_ms = lock_ttl_ms,
+                                "acquired state room lock"
+                            );
+                            lock_held = true;
+                        }
+                        Ok(false) => {
+                            // A live peer holds the lock. Do not proceed —
+                            // running two workers in the same state room is
+                            // exactly the condition this lock exists to
+                            // prevent, and races between them were the root
+                            // cause of the "Unauthorized sender" test flakes.
+                            anyhow::bail!(
+                                "another worker holds the state room lock; \
+                                 refusing to start a second instance"
+                            );
+                        }
+                        Err(e) => {
+                            // Couldn't read/write the lock event — log and
+                            // continue so we don't regress availability for
+                            // single-worker deployments if, e.g., the state
+                            // room is temporarily unreachable.
+                            tracing::warn!(
+                                error = %e,
+                                "state room lock acquire failed, continuing without lock"
+                            );
+                        }
+                    }
 
                     // Recover sessions from state room
                     if let Ok(recovered) = sr.read_sessions(room.client()).await {
@@ -596,6 +689,30 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
                     tracing::warn!(error = %e, "failed to collect telemetry state");
                 }
             }
+
+            // Renew the single-writer lock on the same cadence as telemetry.
+            // This keeps `expires_at` ahead of any client/peer consulting it,
+            // so as long as this worker is alive nobody else can take over.
+            if lock_held {
+                if let Some(ref sr) = state_room {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    let lock = mxdx_types::events::state_room::WorkerStateLock {
+                        device_id: identity.device_id().to_string(),
+                        worker_uuid: telemetry.worker_uuid().to_string(),
+                        host: host.clone(),
+                        os_user: os_user.clone(),
+                        acquired_at: now_ms,
+                        expires_at: now_ms + lock_ttl_ms,
+                    };
+                    if let Err(e) = sr.renew_lock(room.client(), &lock).await {
+                        tracing::warn!(error = %e, "failed to renew state room lock");
+                    }
+                }
+            }
+
             last_telemetry = Instant::now();
         }
 
@@ -631,11 +748,29 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("received SIGINT, shutting down gracefully");
                 post_offline_telemetry(&telemetry, &mut room, &room_id_str, &telemetry_state_key, &session_manager).await;
+                if lock_held {
+                    if let Some(ref sr) = state_room {
+                        if let Err(e) = sr.release_lock(room.client()).await {
+                            tracing::warn!(error = %e, "failed to release state room lock on SIGINT");
+                        } else {
+                            tracing::info!("released state room lock");
+                        }
+                    }
+                }
                 break;
             }
             _ = sigterm_recv(&mut sigterm) => {
                 tracing::info!("received SIGTERM, shutting down gracefully");
                 post_offline_telemetry(&telemetry, &mut room, &room_id_str, &telemetry_state_key, &session_manager).await;
+                if lock_held {
+                    if let Some(ref sr) = state_room {
+                        if let Err(e) = sr.release_lock(room.client()).await {
+                            tracing::warn!(error = %e, "failed to release state room lock on SIGTERM");
+                        } else {
+                            tracing::info!("released state room lock");
+                        }
+                    }
+                }
                 break;
             }
         };
@@ -742,6 +877,20 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
                             continue;
                         }
                     };
+
+                    // [duplicate task guard] Matrix redelivers events after
+                    // reconnect and resync, so the same task UUID can arrive
+                    // more than once. Check both active sessions AND the
+                    // thread_roots map (which persists after completion).
+                    if session_manager.contains_session(&task.uuid)
+                        || thread_roots.contains_key(&task.uuid)
+                    {
+                        tracing::debug!(
+                            uuid = %task.uuid,
+                            "ignoring duplicate task event (already seen)"
+                        );
+                        continue;
+                    }
 
                     // Claim session
                     let active_state = session_manager.claim(task.clone())?;

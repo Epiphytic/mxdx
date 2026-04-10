@@ -155,6 +155,10 @@ pub async fn run_daemon(
                     }
 
                     handler_mx.set_matrix(mx_room).await;
+                    // Signal full readiness — Matrix connected, synced, backup
+                    // attempted, sync loop running. Tests and orchestrators
+                    // can watch for this log line.
+                    info!("MXDX_DAEMON_READY: daemon fully connected, synced, and accepting commands");
                 }
                 Err(e) => {
                     error!(error = %e, "daemon failed to connect to Matrix — session commands will fail");

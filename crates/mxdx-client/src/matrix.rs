@@ -50,21 +50,25 @@ pub trait ClientRoomOps: Send + Sync {
 pub enum IncomingClientEvent {
     /// Worker has started a session
     SessionStart {
+        event_id: String,
         session_uuid: String,
         content: serde_json::Value,
     },
     /// Worker is sending session output
     SessionOutput {
+        event_id: String,
         session_uuid: String,
         content: serde_json::Value,
     },
     /// Worker heartbeat for an active session
     SessionHeartbeat {
+        event_id: String,
         session_uuid: String,
         content: serde_json::Value,
     },
     /// Worker is reporting final session result
     SessionResult {
+        event_id: String,
         session_uuid: String,
         content: serde_json::Value,
     },
@@ -152,13 +156,32 @@ impl MatrixClientRoom {
     pub async fn sync_events_mut(&mut self) -> Result<Vec<IncomingClientEvent>> {
         let raw_events = self
             .multi
-            .sync_and_collect_events(&self.room_id, Duration::from_secs(5))
+            .sync_and_collect_events(&self.room_id, Duration::from_secs(2))
             .await
             .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+        if !raw_events.is_empty() {
+            tracing::debug!(
+                count = raw_events.len(),
+                room_id = %self.room_id,
+                "sync_events_mut received raw events"
+            );
+            for raw in &raw_events {
+                let event_type = raw.get("type").and_then(|t| t.as_str()).unwrap_or("unknown");
+                let has_uuid = raw.get("content")
+                    .and_then(|c| c.get("session_uuid"))
+                    .is_some();
+                tracing::debug!(event_type, has_uuid, "raw event");
+            }
+        }
 
         let mut events = Vec::new();
         for raw in raw_events {
             let event_type = raw.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let event_id = raw.get("event_id")
+                .and_then(|e| e.as_str())
+                .unwrap_or("")
+                .to_string();
             let content = raw.get("content").cloned().unwrap_or_default();
             let session_uuid = content
                 .get("session_uuid")
@@ -172,18 +195,22 @@ impl MatrixClientRoom {
 
             match event_type {
                 SESSION_START => events.push(IncomingClientEvent::SessionStart {
+                    event_id,
                     session_uuid,
                     content,
                 }),
                 SESSION_OUTPUT => events.push(IncomingClientEvent::SessionOutput {
+                    event_id,
                     session_uuid,
                     content,
                 }),
                 SESSION_HEARTBEAT => events.push(IncomingClientEvent::SessionHeartbeat {
+                    event_id,
                     session_uuid,
                     content,
                 }),
                 SESSION_RESULT => events.push(IncomingClientEvent::SessionResult {
+                    event_id,
                     session_uuid,
                     content,
                 }),
@@ -234,12 +261,81 @@ impl ClientRoomOps for MatrixClientRoom {
         _room_id: &str,
         event_type: &str,
     ) -> Result<Vec<(String, serde_json::Value)>> {
-        let state = self
+        // Read from SDK local cache (populated by sync). Handles MSC4362
+        // decryption automatically. No network call.
+        let cached = self
             .multi.preferred()
-            .get_room_state(&self.room_id, event_type)
-            .await?;
-        // get_room_state returns a single JSON value; wrap it as a single entry
-        Ok(vec![("".to_string(), state)])
+            .get_state_events_cached(&self.room_id, event_type)
+            .await;
+        // SDK cache may return old decrypted events from a prior megolm
+        // session (the old state is stored under the inner type). Check if
+        // the SDK cache shows a live worker first (fast path). Only fall
+        // back to REST (which reads origin_server_ts from the full room
+        // state) if the SDK cache is empty or shows stale/offline.
+        let sdk_entries = cached.unwrap_or_default();
+
+        // Fast path: if SDK cache has fresh data, skip REST entirely
+        let sdk_summary = crate::liveness::summarize_worker_liveness(&sdk_entries);
+        if sdk_summary.online > 0 {
+            tracing::debug!(
+                count = sdk_entries.len(),
+                event_type,
+                "read_state_events: SDK cache shows live worker, skipping REST"
+            );
+            return Ok(sdk_entries);
+        }
+
+        let rest_entries = self
+            .multi.preferred()
+            .get_telemetry_via_rest(&self.room_id, event_type)
+            .await
+            .unwrap_or_default();
+
+        if sdk_entries.is_empty() && rest_entries.is_empty() {
+            tracing::debug!(event_type, "read_state_events: no entries from SDK cache or REST");
+            return Ok(vec![]);
+        }
+
+        // If we have both SDK and REST entries for the same state_key,
+        // prefer whichever has the fresher timestamp. REST entries use
+        // origin_server_ts (always correct), SDK entries use the
+        // decrypted timestamp (may be stale if from an old session).
+        if !rest_entries.is_empty() {
+            let mut merged = std::collections::HashMap::new();
+            for (key, val) in &sdk_entries {
+                merged.insert(key.clone(), val.clone());
+            }
+            for (key, val) in &rest_entries {
+                let rest_ts = val.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
+                let existing = merged.get(key);
+                let should_replace = match existing {
+                    None => true,
+                    Some(existing_val) => {
+                        let existing_ts = existing_val.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
+                        // REST entry is fresher if its timestamp is later
+                        rest_ts > existing_ts
+                    }
+                };
+                if should_replace {
+                    merged.insert(key.clone(), val.clone());
+                }
+            }
+            tracing::debug!(
+                sdk = sdk_entries.len(),
+                rest = rest_entries.len(),
+                merged = merged.len(),
+                event_type,
+                "read_state_events: merged SDK cache + REST"
+            );
+            Ok(merged.into_iter().collect())
+        } else {
+            tracing::debug!(
+                count = sdk_entries.len(),
+                event_type,
+                "read_state_events: using SDK cache only"
+            );
+            Ok(sdk_entries)
+        }
     }
 
     async fn sync_events(&self) -> Result<Vec<IncomingClientEvent>> {
@@ -251,6 +347,10 @@ impl ClientRoomOps for MatrixClientRoom {
         let mut events = Vec::new();
         for raw in raw_events {
             let event_type = raw.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let event_id = raw.get("event_id")
+                .and_then(|e| e.as_str())
+                .unwrap_or("")
+                .to_string();
             let content = raw.get("content").cloned().unwrap_or_default();
             let session_uuid = content
                 .get("session_uuid")
@@ -264,18 +364,22 @@ impl ClientRoomOps for MatrixClientRoom {
 
             match event_type {
                 SESSION_START => events.push(IncomingClientEvent::SessionStart {
+                    event_id,
                     session_uuid,
                     content,
                 }),
                 SESSION_OUTPUT => events.push(IncomingClientEvent::SessionOutput {
+                    event_id,
                     session_uuid,
                     content,
                 }),
                 SESSION_HEARTBEAT => events.push(IncomingClientEvent::SessionHeartbeat {
+                    event_id,
                     session_uuid,
                     content,
                 }),
                 SESSION_RESULT => events.push(IncomingClientEvent::SessionResult {
+                    event_id,
                     session_uuid,
                     content,
                 }),
@@ -463,18 +567,22 @@ mod tests {
     fn incoming_client_event_variants_construct_and_match() {
         let events = vec![
             IncomingClientEvent::SessionStart {
+                event_id: "$ev1".to_string(),
                 session_uuid: "uuid-1".to_string(),
                 content: serde_json::json!({"status": "started"}),
             },
             IncomingClientEvent::SessionOutput {
+                event_id: "$ev2".to_string(),
                 session_uuid: "uuid-2".to_string(),
                 content: serde_json::json!({"data": "output line"}),
             },
             IncomingClientEvent::SessionHeartbeat {
+                event_id: "$ev3".to_string(),
                 session_uuid: "uuid-3".to_string(),
                 content: serde_json::json!({"ts": 1700000000}),
             },
             IncomingClientEvent::SessionResult {
+                event_id: "$ev4".to_string(),
                 session_uuid: "uuid-4".to_string(),
                 content: serde_json::json!({"exit_code": 0}),
             },

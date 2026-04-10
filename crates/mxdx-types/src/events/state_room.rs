@@ -12,6 +12,12 @@ pub const WORKER_STATE_TOPOLOGY: &str = "org.mxdx.worker.topology";
 pub const WORKER_STATE_ROOM_POINTER: &str = "org.mxdx.worker.state_room";
 pub const WORKER_STATE_TRUSTED_CLIENT: &str = "org.mxdx.worker.trusted_client";
 pub const WORKER_STATE_TRUSTED_COORDINATOR: &str = "org.mxdx.worker.trusted_coordinator";
+/// Single-writer lease published by the active worker. State key is the
+/// empty string; only one is ever present in a state room. Liveness detection
+/// reuses the telemetry staleness rule: `expires_at = now + 2 * refresh_secs`
+/// is renewed on every telemetry tick, and released by writing empty content
+/// on graceful shutdown so a replacement worker can start immediately.
+pub const WORKER_STATE_LOCK: &str = "org.mxdx.worker.lock";
 
 // ---------------------------------------------------------------------------
 // Data structs
@@ -96,6 +102,26 @@ pub struct CoordinatorRoomAssignment {
     pub role: String,
 }
 
+/// Worker single-writer lease. Exactly one worker device may hold this at a
+/// time. Liveness is derived from `expires_at`: if the clock has passed it,
+/// the holder is considered dead and a new worker may take over.
+///
+/// `expires_at` is ms since epoch. TTL is set to `2 * telemetry_refresh_secs`
+/// so the lock is considered dead after two missed telemetry refreshes — the
+/// same staleness rule the client already uses to decide whether a worker is
+/// live. Graceful shutdown must write empty content (`{}`) to this state key
+/// so a replacement worker can acquire the lock without waiting for the TTL
+/// to elapse.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WorkerStateLock {
+    pub device_id: String,
+    pub worker_uuid: String,
+    pub host: String,
+    pub os_user: String,
+    pub acquired_at: u64,
+    pub expires_at: u64,
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -112,11 +138,46 @@ mod tests {
         assert_eq!(WORKER_STATE_SESSION, "org.mxdx.worker.session");
         assert_eq!(WORKER_STATE_TOPOLOGY, "org.mxdx.worker.topology");
         assert_eq!(WORKER_STATE_ROOM_POINTER, "org.mxdx.worker.state_room");
-        assert_eq!(WORKER_STATE_TRUSTED_CLIENT, "org.mxdx.worker.trusted_client");
+        assert_eq!(WORKER_STATE_LOCK, "org.mxdx.worker.lock");
+        assert_eq!(
+            WORKER_STATE_TRUSTED_CLIENT,
+            "org.mxdx.worker.trusted_client"
+        );
         assert_eq!(
             WORKER_STATE_TRUSTED_COORDINATOR,
             "org.mxdx.worker.trusted_coordinator"
         );
+    }
+
+    #[test]
+    fn worker_state_lock_roundtrip() {
+        let lock = WorkerStateLock {
+            device_id: "ABCDEF123".into(),
+            worker_uuid: "550e8400-e29b-41d4-a716-446655440000".into(),
+            host: "node-01".into(),
+            os_user: "deploy".into(),
+            acquired_at: 1742572800000,
+            expires_at: 1742572920000,
+        };
+        let json = serde_json::to_string(&lock).unwrap();
+        let back: WorkerStateLock = serde_json::from_str(&json).unwrap();
+        assert_eq!(lock, back);
+    }
+
+    #[test]
+    fn worker_state_lock_ttl_matches_two_refresh_intervals() {
+        // Document the lock TTL rule: expires_at - acquired_at == 2 * refresh.
+        let refresh_secs: u64 = 60;
+        let acquired: u64 = 1_000_000;
+        let lock = WorkerStateLock {
+            device_id: "dev".into(),
+            worker_uuid: "uuid".into(),
+            host: "h".into(),
+            os_user: "u".into(),
+            acquired_at: acquired,
+            expires_at: acquired + refresh_secs * 2 * 1000,
+        };
+        assert_eq!(lock.expires_at - lock.acquired_at, refresh_secs * 2 * 1000);
     }
 
     #[test]

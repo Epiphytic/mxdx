@@ -13,9 +13,10 @@ use anyhow::Result;
 use mxdx_matrix::{MatrixClient, OwnedRoomId, OwnedUserId, RoomId};
 use mxdx_types::events::state_room::{
     StateRoomEntry, StateRoomPointer, StateRoomSession, StateRoomTopology, TrustedEntity,
-    WorkerStateConfig, WorkerStateIdentity, WORKER_STATE_CONFIG, WORKER_STATE_IDENTITY,
-    WORKER_STATE_ROOM, WORKER_STATE_ROOM_POINTER, WORKER_STATE_SESSION, WORKER_STATE_TOPOLOGY,
-    WORKER_STATE_TRUSTED_CLIENT, WORKER_STATE_TRUSTED_COORDINATOR,
+    WorkerStateConfig, WorkerStateIdentity, WorkerStateLock, WORKER_STATE_CONFIG,
+    WORKER_STATE_IDENTITY, WORKER_STATE_LOCK, WORKER_STATE_ROOM, WORKER_STATE_ROOM_POINTER,
+    WORKER_STATE_SESSION, WORKER_STATE_TOPOLOGY, WORKER_STATE_TRUSTED_CLIENT,
+    WORKER_STATE_TRUSTED_COORDINATOR,
 };
 use mxdx_types::identity::{state_room_key, KeychainBackend};
 use serde_json::Value;
@@ -66,6 +67,7 @@ impl WorkerStateRoom {
                         Ok(()) => {
                             tracing::info!(
                                 room_id = %room_id,
+                                matrix_account = %client.user_id(),
                                 "using cached state room from keychain"
                             );
                             return Ok(Self { room_id });
@@ -74,6 +76,7 @@ impl WorkerStateRoom {
                             // Step 3: Validation failed, fall through
                             tracing::warn!(
                                 room_id = %room_id,
+                                matrix_account = %client.user_id(),
                                 error = %e,
                                 "cached state room failed validation, trying alias lookup"
                             );
@@ -88,37 +91,95 @@ impl WorkerStateRoom {
             .find_worker_state_room(hostname, os_user, localpart)
             .await?
         {
-            // Step 5: Validate discovered room
-            match client
-                .validate_state_room(&room_id, user_id, trusted_coordinators)
-                .await
-            {
-                Ok(()) => {
-                    tracing::info!(
-                        room_id = %room_id,
-                        "found existing state room via alias"
-                    );
-                    // Cache in keychain
-                    if let Err(e) = keychain.set(&kc_key, room_id.as_str().as_bytes()) {
-                        tracing::warn!(error = %e, "failed to cache state room ID in keychain");
+            // Step 4b: Ensure we're joined. Alias resolution only returns an
+            // id; it does not imply the SDK knows about our membership. A
+            // fresh device has no local state, so the SDK doesn't see the
+            // room in joined_rooms(). Sync first to populate the room list,
+            // then check if we're already a member before calling join_room
+            // (which does a REST `/join` that some servers reject on
+            // invite-only rooms even for existing members).
+            client.sync_once().await?;
+            let already_joined = client
+                .inner()
+                .joined_rooms()
+                .iter()
+                .any(|r| r.room_id() == room_id);
+            let join_ok = if already_joined {
+                tracing::info!(
+                    room_id = %room_id,
+                    matrix_account = %client.user_id(),
+                    "already a member of state room after sync"
+                );
+                true
+            } else if let Err(e) = client.join_room(&room_id).await {
+                tracing::warn!(
+                    room_id = %room_id,
+                    matrix_account = %client.user_id(),
+                    error = %e,
+                    "failed to join resolved state room, will attempt creation"
+                );
+                false
+            } else {
+                true
+            };
+            if join_ok {
+                // Step 5: Validate discovered room
+                match client
+                    .validate_state_room(&room_id, user_id, trusted_coordinators)
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(
+                            room_id = %room_id,
+                            matrix_account = %client.user_id(),
+                            "found existing state room via alias"
+                        );
+                        // Cache in keychain
+                        if let Err(e) = keychain.set(&kc_key, room_id.as_str().as_bytes()) {
+                            tracing::warn!(error = %e, "failed to cache state room ID in keychain");
+                        }
+                        return Ok(Self { room_id });
                     }
-                    return Ok(Self { room_id });
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        room_id = %room_id,
-                        error = %e,
-                        "discovered state room failed validation, creating new"
-                    );
+                    Err(e) => {
+                        tracing::warn!(
+                            room_id = %room_id,
+                            error = %e,
+                            "discovered state room failed validation, creating new"
+                        );
+                    }
                 }
             }
         }
 
-        // Step 6: Create new state room
-        let room_id = client
+        // Step 6: Create new state room.
+        //
+        // If the alias is still bound to a room we couldn't join (e.g. a
+        // stale room from a previous device incarnation), creation returns
+        // `M_ROOM_IN_USE`. In that case, delete the stale alias and retry
+        // creation once.
+        let room_id = match client
             .create_worker_state_room(hostname, os_user, localpart)
-            .await?;
-        tracing::info!(room_id = %room_id, "created new worker state room");
+            .await
+        {
+            Ok(id) => id,
+            Err(e) if e.to_string().contains("M_ROOM_IN_USE") => {
+                let server_name = client.user_id().server_name().to_string();
+                let alias = format!(
+                    "#mxdx-state-{hostname}.{os_user}.{localpart}:{server_name}"
+                );
+                tracing::warn!(
+                    alias = %alias,
+                    matrix_account = %client.user_id(),
+                    "state room alias already bound to unjoinable room, deleting stale alias"
+                );
+                client.delete_room_alias(&alias).await?;
+                client
+                    .create_worker_state_room(hostname, os_user, localpart)
+                    .await?
+            }
+            Err(e) => return Err(e.into()),
+        };
+        tracing::info!(room_id = %room_id, matrix_account = %client.user_id(), "created new worker state room");
 
         // Cache in keychain
         if let Err(e) = keychain.set(&kc_key, room_id.as_str().as_bytes()) {
@@ -402,6 +463,102 @@ impl WorkerStateRoom {
             }
         }
 
+        Ok(())
+    }
+
+    // ── Single-writer lock ───────────────────────────────────────────────
+
+    /// Read the current lock state event, if any.
+    ///
+    /// Returns `Ok(None)` if the lock is absent (state event missing, empty
+    /// content indicating a graceful release, or a server-side M_NOT_FOUND).
+    pub async fn read_lock(
+        &self,
+        client: &MatrixClient,
+    ) -> Result<Option<WorkerStateLock>> {
+        let value = client
+            .get_room_state_event(&self.room_id, WORKER_STATE_LOCK, "")
+            .await?;
+        deserialize_if_present(&value)
+    }
+
+    /// Attempt to acquire the single-writer lock.
+    ///
+    /// Returns `Ok(true)` if the lock was taken (no prior holder, expired
+    /// prior holder, or prior holder was the same `device_id`). Returns
+    /// `Ok(false)` if a live holder with a different `device_id` owns it.
+    ///
+    /// The caller is responsible for supplying a fresh `lock` with an
+    /// `expires_at` set to `now_ms + ttl_ms`.
+    pub async fn try_acquire_lock(
+        &self,
+        client: &MatrixClient,
+        lock: &WorkerStateLock,
+        now_ms: u64,
+    ) -> Result<bool> {
+        if let Some(existing) = self.read_lock(client).await? {
+            // Same device reclaiming its own lock (e.g. after a crash): OK.
+            if existing.device_id == lock.device_id {
+                tracing::info!(
+                    device_id = %existing.device_id,
+                    "reclaiming our own lock"
+                );
+            } else if existing.expires_at > now_ms {
+                // Another device holds a non-expired lease. Refuse.
+                tracing::warn!(
+                    held_by_device = %existing.device_id,
+                    held_by_host = %existing.host,
+                    expires_at = existing.expires_at,
+                    now = now_ms,
+                    "state room lock is held by another live worker"
+                );
+                return Ok(false);
+            } else {
+                tracing::info!(
+                    held_by_device = %existing.device_id,
+                    expires_at = existing.expires_at,
+                    now = now_ms,
+                    "prior worker lock expired, taking over"
+                );
+            }
+        }
+
+        let content = serde_json::to_value(lock)?;
+        client
+            .send_state_event(&self.room_id, WORKER_STATE_LOCK, "", content)
+            .await?;
+        Ok(true)
+    }
+
+    /// Renew the lock. Unconditionally overwrites the state event; intended
+    /// to be called on every telemetry refresh tick while this worker is the
+    /// uncontested holder.
+    pub async fn renew_lock(
+        &self,
+        client: &MatrixClient,
+        lock: &WorkerStateLock,
+    ) -> Result<()> {
+        let content = serde_json::to_value(lock)?;
+        client
+            .send_state_event(&self.room_id, WORKER_STATE_LOCK, "", content)
+            .await?;
+        Ok(())
+    }
+
+    /// Release the lock by writing empty content. Matrix does not support
+    /// state event deletion, so an empty object is the convention used
+    /// throughout this module for "absent". Must be called on graceful
+    /// shutdown so a replacement worker can take over without waiting for
+    /// the TTL to elapse.
+    pub async fn release_lock(&self, client: &MatrixClient) -> Result<()> {
+        client
+            .send_state_event(
+                &self.room_id,
+                WORKER_STATE_LOCK,
+                "",
+                serde_json::json!({}),
+            )
+            .await?;
         Ok(())
     }
 

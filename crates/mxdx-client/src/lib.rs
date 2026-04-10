@@ -4,6 +4,7 @@ pub mod cancel;
 pub mod cli;
 pub mod config;
 pub mod daemon;
+pub mod diagnose;
 pub mod identity;
 pub mod liveness;
 pub mod logs;

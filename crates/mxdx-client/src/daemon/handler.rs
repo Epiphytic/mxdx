@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::Mutex;
 
-use crate::matrix::MatrixClientRoom;
+use crate::matrix::{MatrixClientRoom, IncomingClientEvent};
 use crate::protocol::{Request, Response, ErrorResponse, RequestId};
 use crate::protocol::error;
 use crate::protocol::methods::*;
@@ -21,6 +21,9 @@ pub struct Handler {
     pub last_activity_ms: AtomicU64,
     /// Shared Matrix connection — None until connected.
     pub matrix: Arc<Mutex<Option<MatrixClientRoom>>>,
+    /// Broadcast channel for Matrix events from centralized sync loop.
+    /// All tail_sessions subscribe here instead of syncing independently.
+    pub event_tx: tokio::sync::broadcast::Sender<Vec<IncomingClientEvent>>,
 }
 
 impl Handler {
@@ -29,6 +32,7 @@ impl Handler {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
+        let (event_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             sessions: Arc::new(Mutex::new(SessionTracker::new())),
             subscriptions: Arc::new(Mutex::new(SubscriptionRegistry::new())),
@@ -36,6 +40,7 @@ impl Handler {
             profile_name: profile_name.to_string(),
             last_activity_ms: AtomicU64::new(now_ms),
             matrix: Arc::new(Mutex::new(None)),
+            event_tx,
         }
     }
 
@@ -58,10 +63,71 @@ impl Handler {
         (now_ms.saturating_sub(last)) / 1000
     }
 
-    /// Store a live Matrix connection for use by session commands.
+    /// Store a live Matrix connection and start the centralized sync loop.
+    /// The sync loop broadcasts events to all tail_session subscribers,
+    /// eliminating lock contention and event consumption races.
     pub async fn set_matrix(&self, room: MatrixClientRoom) {
-        let mut mx = self.matrix.lock().await;
-        *mx = Some(room);
+        {
+            let mut mx = self.matrix.lock().await;
+            *mx = Some(room);
+        }
+        // Start centralized sync loop
+        let matrix = Arc::clone(&self.matrix);
+        let event_tx = self.event_tx.clone();
+        tokio::spawn(async move {
+            Self::sync_loop(matrix, event_tx).await;
+        });
+    }
+
+    /// Centralized sync loop: one task syncs Matrix and broadcasts events
+    /// to all tail_session subscribers. This eliminates:
+    /// - Lock contention (only this task syncs, holds lock briefly)
+    /// - Event consumption races (all listeners see all events)
+    async fn sync_loop(
+        matrix: Arc<Mutex<Option<MatrixClientRoom>>>,
+        event_tx: tokio::sync::broadcast::Sender<Vec<IncomingClientEvent>>,
+    ) {
+        tracing::info!("centralized sync loop started");
+        loop {
+            let events = {
+                let mut mx_guard = matrix.lock().await;
+                let mx_room = match mx_guard.as_mut() {
+                    Some(r) => r,
+                    None => {
+                        tracing::warn!("Matrix connection lost in sync loop");
+                        break;
+                    }
+                };
+                match mx_room.sync_events_mut().await {
+                    Ok(evts) => evts,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "sync failed in sync loop");
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        continue;
+                    }
+                }
+            };
+            // Lock released — broadcast events to all subscribers.
+            // Ignore send errors (no active subscribers is normal during idle).
+            if !events.is_empty() {
+                let _ = event_tx.send(events);
+            }
+        }
+    }
+
+    /// Wait for the Matrix connection to become available, up to `timeout`.
+    /// Returns true if connected, false if timed out.
+    pub async fn wait_for_matrix(&self, timeout: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if self.matrix.lock().await.is_some() {
+                return true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
     }
 
     pub async fn handle_request(&self, request: &Request, sink: &NotificationSink) -> String {
@@ -136,6 +202,19 @@ impl Handler {
             Err(e) => return e,
         };
 
+        // Wait for Matrix connection if it's still initializing (up to 30s)
+        if self.matrix.lock().await.is_none() {
+            tracing::info!("Matrix not yet connected, waiting...");
+            if !self.wait_for_matrix(std::time::Duration::from_secs(30)).await {
+                return serde_json::to_string(&ErrorResponse::new(
+                    id.clone(),
+                    error::MATRIX_UNAVAILABLE,
+                    "Matrix connection not available after 30s",
+                ))
+                .unwrap_or_default();
+            }
+        }
+
         let mut mx_guard = self.matrix.lock().await;
         let mx_room = match mx_guard.as_mut() {
             Some(r) => r,
@@ -143,11 +222,85 @@ impl Handler {
                 return serde_json::to_string(&ErrorResponse::new(
                     id.clone(),
                     error::MATRIX_UNAVAILABLE,
-                    "Matrix connection not yet available",
+                    "Matrix connection lost",
                 ))
                 .unwrap_or_default();
             }
         };
+
+        // Check worker liveness. Try SDK cache first (fast, no network).
+        // Only fall back to REST if SDK cache shows no live worker.
+        {
+            use mxdx_types::events::telemetry::WORKER_TELEMETRY;
+            let room_id = mx_room.room_id();
+            let mut telemetry_events: Vec<(String, serde_json::Value)> = mx_room
+                .client()
+                .get_state_events_cached(room_id, WORKER_TELEMETRY)
+                .await
+                .unwrap_or_default();
+
+            // If SDK cache shows a live worker, skip REST (fast path).
+            // If not, try REST fallback which uses origin_server_ts.
+            let sdk_summary = crate::liveness::summarize_worker_liveness(&telemetry_events);
+            if sdk_summary.online == 0 {
+                let rest_entries = mx_room
+                    .client()
+                    .get_telemetry_via_rest(room_id, WORKER_TELEMETRY)
+                    .await
+                    .unwrap_or_default();
+                if !rest_entries.is_empty() {
+                    // Merge: prefer REST entries (fresher origin_server_ts)
+                    let mut merged = std::collections::HashMap::new();
+                    for (key, val) in &telemetry_events {
+                        merged.insert(key.clone(), val.clone());
+                    }
+                    for (key, val) in &rest_entries {
+                        let rest_ts = val.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
+                        let should_replace = match merged.get(key) {
+                            None => true,
+                            Some(existing) => {
+                                let existing_ts = existing.get("timestamp").and_then(|t| t.as_str()).unwrap_or("");
+                                rest_ts > existing_ts
+                            }
+                        };
+                        if should_replace {
+                            merged.insert(key.clone(), val.clone());
+                        }
+                    }
+                    telemetry_events = merged.into_iter().collect();
+                }
+            }
+
+            if telemetry_events.is_empty()
+                || telemetry_events.iter().all(|(_, v)| {
+                    v.is_null() || v.as_object().map_or(true, |o| o.is_empty())
+                })
+            {
+                return serde_json::to_string(&ErrorResponse::new(
+                    id.clone(),
+                    error::INTERNAL_ERROR,
+                    "No worker telemetry found — has the worker started?",
+                ))
+                .unwrap_or_default();
+            }
+
+            let summary = crate::liveness::summarize_worker_liveness(&telemetry_events);
+            if summary.online == 0 {
+                let detail = if let Some(stale_dur) = summary.stale_details {
+                    format!("last seen {}s ago", stale_dur.as_secs())
+                } else if summary.offline > 0 {
+                    "worker is offline".into()
+                } else {
+                    "no live worker".into()
+                };
+                return serde_json::to_string(&ErrorResponse::new(
+                    id.clone(),
+                    error::INTERNAL_ERROR,
+                    format!("No live worker available: {detail}"),
+                ))
+                .unwrap_or_default();
+            }
+        }
 
         // Resolve worker room name (for session tracking)
         let worker_room_name = params.worker_room.clone()
@@ -195,7 +348,7 @@ impl Handler {
             }
         };
 
-        tracing::info!(uuid = %task_uuid, event_id = %event_id, "task submitted via daemon");
+        tracing::info!(uuid = %task_uuid, event_id = %event_id, sender_id = %sender_id, "task submitted via daemon");
 
         // Track session
         let _rx = {
@@ -208,13 +361,14 @@ impl Handler {
         if !detach {
             // Non-detach: spawn background task to tail session output and
             // forward it as JSON-RPC notifications through the sink.
-            let matrix_arc = Arc::clone(&self.matrix);
             let sessions_arc = Arc::clone(&self.sessions);
             let uuid_clone = task_uuid.clone();
             let sink_clone = sink.clone();
+            let event_rx = self.event_tx.subscribe();
 
+            tracing::info!(uuid = %uuid_clone, "spawning tail_session background task");
             tokio::spawn(async move {
-                Self::tail_session(matrix_arc, sessions_arc, &uuid_clone, &sink_clone).await;
+                Self::tail_session(event_rx, sessions_arc, &uuid_clone, &sink_clone).await;
             });
         }
 
@@ -229,94 +383,94 @@ impl Handler {
         .unwrap_or_default()
     }
 
-    /// Background task: sync for session output events and forward them as
-    /// JSON-RPC notifications through the client's notification sink.
+    /// Background task: subscribe to centralized sync loop events and forward
+    /// matching session output/result as JSON-RPC notifications to the client.
+    ///
+    /// Unlike the old approach (each tail_session synced independently, causing
+    /// lock contention and event consumption races), this subscribes to the
+    /// broadcast channel fed by [`sync_loop`].
     async fn tail_session(
-        matrix: Arc<Mutex<Option<MatrixClientRoom>>>,
+        mut event_rx: tokio::sync::broadcast::Receiver<Vec<IncomingClientEvent>>,
         sessions: Arc<Mutex<SessionTracker>>,
         uuid: &str,
         sink: &NotificationSink,
     ) {
-        use crate::matrix::IncomingClientEvent;
         use mxdx_types::events::session::{SessionOutput, SessionResult};
 
+        tracing::info!(uuid, "tail_session started (broadcast subscriber)");
+        let mut seen_event_ids = std::collections::HashSet::new();
+
         loop {
-            // Acquire matrix lock briefly to sync, then release
-            let events = {
-                let mut mx_guard = matrix.lock().await;
-                let mx_room = match mx_guard.as_mut() {
-                    Some(r) => r,
-                    None => {
-                        tracing::warn!("Matrix connection lost during session tail");
-                        break;
-                    }
-                };
-                match mx_room.sync_events_mut().await {
-                    Ok(evts) => evts,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "sync failed during session tail");
-                        continue;
+            match event_rx.recv().await {
+                Ok(events) => {
+                    for event in events {
+                        match event {
+                            IncomingClientEvent::SessionOutput {
+                                event_id,
+                                session_uuid,
+                                content,
+                            } => {
+                                if session_uuid != uuid || (!event_id.is_empty() && !seen_event_ids.insert(event_id.clone())) {
+                                    continue;
+                                }
+                                if let Ok(output) =
+                                    crate::matrix::deserialize_event::<SessionOutput>(&content)
+                                {
+                                    if let Ok(text) = crate::tail::format_output(&output) {
+                                        let notif = serde_json::json!({
+                                            "jsonrpc": "2.0",
+                                            "method": "session.output",
+                                            "params": {
+                                                "uuid": uuid,
+                                                "data": text,
+                                            }
+                                        });
+                                        let _ = sink.send(serde_json::to_string(&notif).unwrap_or_default());
+
+                                        let mut s = sessions.lock().await;
+                                        s.push_output(uuid, text);
+                                    }
+                                }
+                            }
+                            IncomingClientEvent::SessionResult {
+                                event_id,
+                                session_uuid,
+                                content,
+                            } => {
+                                if session_uuid != uuid || (!event_id.is_empty() && !seen_event_ids.insert(event_id.clone())) {
+                                    continue;
+                                }
+                                if let Ok(result) =
+                                    crate::matrix::deserialize_event::<SessionResult>(&content)
+                                {
+                                    let notif = serde_json::json!({
+                                        "jsonrpc": "2.0",
+                                        "method": "session.result",
+                                        "params": {
+                                            "uuid": uuid,
+                                            "exit_code": result.exit_code,
+                                            "status": crate::tail::format_result(&result),
+                                            "tail": result.tail,
+                                        }
+                                    });
+                                    let _ = sink.send(serde_json::to_string(&notif).unwrap_or_default());
+
+                                    let mut s = sessions.lock().await;
+                                    s.complete(uuid);
+                                }
+                                return; // Session complete, stop tailing
+                            }
+                            _ => {}
+                        }
                     }
                 }
-            };
-            // Lock released here — other handlers can use the Matrix connection
-
-            for event in events {
-                match event {
-                    IncomingClientEvent::SessionOutput {
-                        session_uuid,
-                        content,
-                    } => {
-                        if session_uuid != uuid {
-                            continue;
-                        }
-                        if let Ok(output) =
-                            crate::matrix::deserialize_event::<SessionOutput>(&content)
-                        {
-                            if let Ok(text) = crate::tail::format_output(&output) {
-                                let notif = serde_json::json!({
-                                    "jsonrpc": "2.0",
-                                    "method": "session.output",
-                                    "params": {
-                                        "uuid": uuid,
-                                        "data": text,
-                                    }
-                                });
-                                let _ = sink.send(serde_json::to_string(&notif).unwrap_or_default());
-
-                                // Also buffer in session tracker
-                                let mut s = sessions.lock().await;
-                                s.push_output(uuid, text);
-                            }
-                        }
-                    }
-                    IncomingClientEvent::SessionResult {
-                        session_uuid,
-                        content,
-                    } => {
-                        if session_uuid != uuid {
-                            continue;
-                        }
-                        if let Ok(result) =
-                            crate::matrix::deserialize_event::<SessionResult>(&content)
-                        {
-                            let notif = serde_json::json!({
-                                "jsonrpc": "2.0",
-                                "method": "session.result",
-                                "params": {
-                                    "uuid": uuid,
-                                    "exit_code": result.exit_code,
-                                    "status": crate::tail::format_result(&result),
-                                }
-                            });
-                            let _ = sink.send(serde_json::to_string(&notif).unwrap_or_default());
-
-                            let mut s = sessions.lock().await;
-                            s.complete(uuid);
-                        }
-                        return; // Session complete, stop tailing
-                    }
-                    _ => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(uuid, skipped = n, "tail_session lagged behind sync loop");
+                    // Continue — we might miss some output lines but will still catch the result
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::warn!(uuid, "sync loop channel closed, stopping tail");
+                    break;
                 }
             }
         }
@@ -332,6 +486,17 @@ impl Handler {
             Err(e) => return e,
         };
 
+        if self.matrix.lock().await.is_none() {
+            if !self.wait_for_matrix(std::time::Duration::from_secs(10)).await {
+                return serde_json::to_string(&ErrorResponse::new(
+                    id.clone(),
+                    error::MATRIX_UNAVAILABLE,
+                    "Matrix connection not available",
+                ))
+                .unwrap_or_default();
+            }
+        }
+
         let mut mx_guard = self.matrix.lock().await;
         let mx_room = match mx_guard.as_mut() {
             Some(r) => r,
@@ -339,7 +504,7 @@ impl Handler {
                 return serde_json::to_string(&ErrorResponse::new(
                     id.clone(),
                     error::MATRIX_UNAVAILABLE,
-                    "Matrix connection not yet available",
+                    "Matrix connection lost",
                 ))
                 .unwrap_or_default();
             }

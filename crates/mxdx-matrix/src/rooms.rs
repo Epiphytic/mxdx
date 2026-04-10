@@ -12,9 +12,51 @@ use matrix_sdk::ruma::{
         },
         EmptyStateKey, InitialStateEvent,
     },
-    room::RoomType,
+    serde::Raw,
     OwnedRoomId, OwnedUserId, RoomId, UserId,
 };
+
+/// Custom field key inside `m.room.create` content identifying the launcher
+/// this room belongs to. `m.room.create` is NEVER encrypted per Matrix spec
+/// (it's the foundational state event that establishes the room), so this
+/// field is the one place we can put discovery metadata that survives
+/// MSC4362 encrypted state events.
+pub const MXDX_LAUNCHER_ID_KEY: &str = "org.mxdx.launcher_id";
+
+/// Custom field key inside `m.room.create` content identifying the role of
+/// this room within the launcher topology (`space`, `exec`, or `logs`).
+pub const MXDX_ROLE_KEY: &str = "org.mxdx.role";
+
+/// Build a `Raw<CreationContent>` with mxdx discovery fields embedded in the
+/// room's foundational `m.room.create` event. Because `m.room.create` is
+/// never wrapped by MSC4362 encryption, these fields can be read via plain
+/// REST (`/rooms/{id}/state/m.room.create/`) and are unaffected by key
+/// exchange or crypto-store state.
+fn mxdx_creation_content_raw(
+    launcher_id: &str,
+    role: &str,
+    is_space: bool,
+) -> Raw<CreationContent> {
+    let mut obj = serde_json::Map::new();
+    if is_space {
+        obj.insert(
+            "type".to_string(),
+            Value::String("m.space".to_string()),
+        );
+    }
+    obj.insert(
+        MXDX_LAUNCHER_ID_KEY.to_string(),
+        Value::String(launcher_id.to_string()),
+    );
+    obj.insert(
+        MXDX_ROLE_KEY.to_string(),
+        Value::String(role.to_string()),
+    );
+    let json_string = serde_json::to_string(&Value::Object(obj))
+        .expect("mxdx creation content serializes");
+    Raw::from_json_string(json_string)
+        .expect("mxdx creation content is valid JSON")
+}
 
 /// Room IDs for a launcher space and its child rooms.
 /// Topology: space (container) + exec (encrypted, all client interaction) + logs (worker operational logs).
@@ -34,25 +76,21 @@ impl MatrixClient {
     pub async fn create_launcher_space(&self, launcher_id: &str) -> Result<LauncherTopology> {
         let server_name = self.user_id().server_name().to_string();
 
-        // Create the space room
-        let mut creation_content = CreationContent::new();
-        creation_content.room_type = Some(RoomType::Space);
-
+        // Space room. The launcher_id + role marker go in `m.room.create`
+        // (never encrypted). Everything else (topic, name, child links) stays
+        // encrypted via MSC4362.
         let space_topic = InitialStateEvent::new(
             EmptyStateKey,
             RoomTopicEventContent::new(format!("org.mxdx.launcher.space:{launcher_id}")),
-        );
-
-        let mut space_request = CreateRoomRequest::new();
-        space_request.name = Some(format!("mxdx: {launcher_id}"));
-        space_request.creation_content = Some(
-            matrix_sdk::ruma::serde::Raw::new(&creation_content)
-                .expect("serialize creation_content"),
         );
         let space_encryption = InitialStateEvent::new(
             EmptyStateKey,
             RoomEncryptionEventContent::with_recommended_defaults().with_encrypted_state(),
         );
+        let mut space_request = CreateRoomRequest::new();
+        space_request.name = Some(format!("mxdx: {launcher_id}"));
+        space_request.creation_content =
+            Some(mxdx_creation_content_raw(launcher_id, "space", true));
         space_request.initial_state = vec![space_topic.to_raw_any(), space_encryption.to_raw_any()];
 
         let space_response = self.create_room_with_timeout(space_request).await?;
@@ -62,20 +100,24 @@ impl MatrixClient {
         let delay = self.room_creation_delay();
 
         let exec_room_id = self
-            .create_named_encrypted_room(
+            .create_mxdx_encrypted_room(
                 &format!("mxdx: {launcher_id} — exec"),
                 &format!("org.mxdx.launcher.exec:{launcher_id}"),
                 &[],
+                launcher_id,
+                "exec",
             )
             .await?;
         if let Some(d) = delay {
             tokio::time::sleep(d).await;
         }
         let logs_room_id = self
-            .create_named_encrypted_room(
+            .create_mxdx_encrypted_room(
                 &format!("mxdx: {launcher_id} — logs"),
                 &format!("org.mxdx.launcher.logs:{launcher_id}"),
                 &[],
+                launcher_id,
+                "logs",
             )
             .await?;
 
@@ -93,111 +135,44 @@ impl MatrixClient {
         })
     }
 
-    /// Find an existing launcher space by scanning rooms for a matching topic.
-    /// Auto-accepts invitations to mxdx launcher rooms before scanning.
-    /// Returns None if no space is found for this launcher_id.
+    /// Find an existing launcher space for the given launcher_id.
     ///
-    /// The exec room is the minimum requirement — if found, the topology is valid.
-    /// The space and logs rooms are optional (they're worker-side concerns).
+    /// This used to scan `room.topic()` over the SDK's cached state, but
+    /// MSC4362 encrypts `m.room.topic`, and a freshly-joined client may
+    /// not yet have the megolm key needed to decrypt it (keys arrive via
+    /// to-device messages on the next encrypted send, not on join). So the
+    /// SDK-cached topic can legitimately be `None` for every candidate
+    /// room, breaking discovery.
+    ///
+    /// Instead, dispatch to the REST-based discovery path which keys on
+    /// `m.room.create.content.org.mxdx.launcher_id`. `m.room.create` is
+    /// never encrypted per Matrix spec, so the fields are always readable
+    /// regardless of crypto state. Both the worker and the client use the
+    /// same discovery mechanism now.
     pub async fn find_launcher_space(&self, launcher_id: &str) -> Result<Option<LauncherTopology>> {
-        let topic_prefix = "org.mxdx.launcher.";
-        let expected_space_topic = format!("org.mxdx.launcher.space:{launcher_id}");
-        let expected_exec_topic = format!("org.mxdx.launcher.exec:{launcher_id}");
-        let expected_logs_topic = format!("org.mxdx.launcher.logs:{launcher_id}");
+        // NOTE: No sync_once here — callers (connect_multi, connect_with_keychain)
+        // already sync during connection setup. The REST-based discovery below
+        // queries the server directly and handles invites via REST.
 
-        // Sync to see current room state + pending invitations
-        self.sync_once().await?;
-
-        // Auto-join any invited rooms with mxdx launcher topics
-        let mut accepted_any = false;
-        for room in self.inner().rooms() {
-            if room.state() == matrix_sdk::RoomState::Invited {
-                let topic = room.topic().unwrap_or_default();
-                if topic.starts_with(topic_prefix) {
-                    let rid = room.room_id().to_owned();
-                    tracing::info!(room_id = %rid, topic = %topic, "accepting launcher room invitation");
-                    if let Err(e) = self.join_room(&rid).await {
-                        tracing::warn!(room_id = %rid, error = %e, "failed to accept invitation");
-                    } else {
-                        accepted_any = true;
-                    }
-                }
-            }
-        }
-
-        // Only sync again if we actually accepted new invitations
-        if accepted_any {
-            self.sync_once().await?;
-        }
-
-        // Collect all candidates per room type, with member count for disambiguation.
-        // When multiple rooms match the same topic (e.g. from previous test runs),
-        // the active room will have more members (worker + client joined).
-        let mut space_candidates: Vec<(OwnedRoomId, u64)> = Vec::new();
-        let mut exec_candidates: Vec<(OwnedRoomId, u64)> = Vec::new();
-        let mut logs_candidates: Vec<(OwnedRoomId, u64)> = Vec::new();
-
-        for room in self.inner().joined_rooms() {
-            let topic = room.topic().unwrap_or_default();
-            let rid = room.room_id().to_owned();
-            let member_count = room.active_members_count();
-
-            if topic == expected_space_topic {
-                space_candidates.push((rid, member_count));
-            } else if topic == expected_exec_topic {
-                exec_candidates.push((rid, member_count));
-            } else if topic == expected_logs_topic {
-                logs_candidates.push((rid, member_count));
-            }
-        }
-
-        // Pick the room with the most active members (active room has worker + client)
-        let pick_best = |candidates: Vec<(OwnedRoomId, u64)>| -> Option<OwnedRoomId> {
-            candidates
-                .into_iter()
-                .max_by_key(|(_, count)| *count)
-                .map(|(rid, _)| rid)
-        };
-
-        // Log disambiguation when multiple candidates found
-        for (label, candidates) in [
-            ("space", &space_candidates),
-            ("exec", &exec_candidates),
-            ("logs", &logs_candidates),
-        ] {
-            if candidates.len() > 1 {
-                tracing::warn!(
-                    launcher_id = %launcher_id,
-                    room_type = %label,
-                    candidate_count = candidates.len(),
-                    candidates = ?candidates,
-                    "multiple rooms match launcher topic, selecting by highest member count"
-                );
-            }
-        }
-
-        let exec_room_id = pick_best(exec_candidates);
-
-        // The exec room is the minimum requirement for a valid topology
-        match exec_room_id {
-            Some(e) => {
-                let space_id = pick_best(space_candidates)
-                    .unwrap_or_else(|| e.clone()); // fallback: use exec as space placeholder
-                let logs_room_id = pick_best(logs_candidates)
-                    .unwrap_or_else(|| e.clone()); // fallback: use exec as logs placeholder
-                Ok(Some(LauncherTopology {
-                    space_id,
-                    exec_room_id: e,
-                    logs_room_id,
-                }))
-            }
-            None => Ok(None),
-        }
+        let homeserver = self.inner().homeserver().to_string();
+        let access_token = self
+            .access_token()
+            .ok_or_else(|| MatrixClientError::Other(anyhow::anyhow!(
+                "find_launcher_space: client has no access token (not logged in)"
+            )))?;
+        self.find_launcher_space_via_rest(launcher_id, &homeserver, &access_token)
+            .await
     }
 
     /// Find the launcher topology by querying the Matrix REST API directly,
-    /// bypassing the SDK's local cache. Follows m.room.tombstone chains to
-    /// the latest replacement room.
+    /// bypassing the SDK's local cache. Matches rooms by the custom fields
+    /// (`org.mxdx.launcher_id`, `org.mxdx.role`) embedded in each room's
+    /// `m.room.create` content. That event is never encrypted per Matrix
+    /// spec, so this works regardless of MSC4362 encrypted-state status and
+    /// regardless of whether the caller has any room keys.
+    ///
+    /// Follows `m.room.tombstone` chains to the latest replacement before
+    /// matching, so self-healed topologies resolve to their current rooms.
     pub async fn find_launcher_space_via_rest(
         &self,
         launcher_id: &str,
@@ -207,11 +182,8 @@ impl MatrixClient {
         use crate::rest::RestClient;
         let rest = RestClient::new(homeserver, access_token);
 
-        let expected_space_topic = format!("org.mxdx.launcher.space:{launcher_id}");
-        let expected_exec_topic = format!("org.mxdx.launcher.exec:{launcher_id}");
-        let expected_logs_topic = format!("org.mxdx.launcher.logs:{launcher_id}");
-
-        // Auto-accept any pending invites first (worker may have been re-invited).
+        // Auto-accept any pending invites first (worker may have been re-invited
+        // after a previous set of rooms got self-healed/tombstoned).
         for invited in rest.list_invited_rooms().await.unwrap_or_default() {
             if let Err(e) = self.join_room(&invited).await {
                 tracing::debug!(room_id=%invited, error=%e, "could not auto-join invited room");
@@ -224,6 +196,7 @@ impl MatrixClient {
         let mut logs: Option<OwnedRoomId> = None;
 
         for rid in joined {
+            // Follow tombstone chain to the live replacement room.
             let mut current = rid.clone();
             for _ in 0..10 {
                 match rest.get_room_tombstone(&current).await {
@@ -234,16 +207,24 @@ impl MatrixClient {
                     _ => break,
                 }
             }
-            let topic = match rest.get_room_topic(&current).await {
-                Ok(Some(t)) => t,
+
+            // Read discovery metadata from m.room.create (never encrypted).
+            let create = match rest.get_room_create(&current).await {
+                Ok(Some(v)) => v,
                 _ => continue,
             };
-            if topic == expected_space_topic && space.is_none() {
-                space = Some(current);
-            } else if topic == expected_exec_topic && exec.is_none() {
-                exec = Some(current);
-            } else if topic == expected_logs_topic && logs.is_none() {
-                logs = Some(current);
+            let lid = create
+                .get(MXDX_LAUNCHER_ID_KEY)
+                .and_then(|v| v.as_str());
+            if lid != Some(launcher_id) {
+                continue;
+            }
+            let role = create.get(MXDX_ROLE_KEY).and_then(|v| v.as_str());
+            match role {
+                Some("space") if space.is_none() => space = Some(current),
+                Some("exec") if exec.is_none() => exec = Some(current),
+                Some("logs") if logs.is_none() => logs = Some(current),
+                _ => {}
             }
         }
 
@@ -408,6 +389,37 @@ impl MatrixClient {
         request.name = Some(name.to_string());
         request.invite = invite.to_vec();
         request.initial_state = vec![encryption_event.to_raw_any(), topic_event.to_raw_any()];
+
+        let response = self.create_room_with_timeout(request).await?;
+        Ok(response.room_id().to_owned())
+    }
+
+    /// Create a named encrypted room that also carries the mxdx launcher_id
+    /// and role in its `m.room.create` content. These fields remain readable
+    /// via plain REST even when every other state event is encrypted via
+    /// MSC4362, making them the reliable discovery mechanism for launcher
+    /// topologies. `role` must be one of `"exec"`, `"logs"`, or `"space"`.
+    pub async fn create_mxdx_encrypted_room(
+        &self,
+        name: &str,
+        topic: &str,
+        invite: &[matrix_sdk::ruma::OwnedUserId],
+        launcher_id: &str,
+        role: &str,
+    ) -> Result<OwnedRoomId> {
+        let encryption_event = InitialStateEvent::new(
+            EmptyStateKey,
+            RoomEncryptionEventContent::with_recommended_defaults().with_encrypted_state(),
+        );
+        let topic_event =
+            InitialStateEvent::new(EmptyStateKey, RoomTopicEventContent::new(topic.to_string()));
+
+        let mut request = CreateRoomRequest::new();
+        request.name = Some(name.to_string());
+        request.invite = invite.to_vec();
+        request.initial_state = vec![encryption_event.to_raw_any(), topic_event.to_raw_any()];
+        request.creation_content =
+            Some(mxdx_creation_content_raw(launcher_id, role, false));
 
         let response = self.create_room_with_timeout(request).await?;
         Ok(response.room_id().to_owned())
@@ -610,6 +622,43 @@ impl MatrixClient {
             Ok(Some(room_id))
         } else {
             Ok(None)
+        }
+    }
+
+    /// Delete a room alias via the REST API.
+    ///
+    /// Used to reclaim an alias bound to a room we can no longer join (e.g.
+    /// after the account was removed from a private room). Returns `Ok(())` on
+    /// success or 404 (alias already gone). Propagates other errors.
+    pub async fn delete_room_alias(&self, alias: &str) -> Result<()> {
+        let homeserver = self.inner().homeserver();
+        let access_token = self
+            .inner()
+            .access_token()
+            .expect("Client is not logged in — no access_token");
+
+        let encoded_alias = percent_encode_path_segment(alias);
+        let url = format!(
+            "{}_matrix/client/v3/directory/room/{}",
+            homeserver, encoded_alias,
+        );
+
+        let http_client = reqwest::Client::new();
+        let resp = http_client
+            .delete(&url)
+            .bearer_auth(&access_token)
+            .send()
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+
+        if resp.status() == reqwest::StatusCode::NOT_FOUND || resp.status().is_success() {
+            Ok(())
+        } else {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Err(MatrixClientError::Other(anyhow::anyhow!(
+                "Room alias deletion failed (HTTP {status}): {body}"
+            )))
         }
     }
 

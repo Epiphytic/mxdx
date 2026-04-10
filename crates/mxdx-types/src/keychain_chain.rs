@@ -26,6 +26,26 @@ impl ChainedKeychain {
     /// If the OS keychain is unavailable at runtime (e.g., headless server without
     /// Secret Service), operations will transparently fall back to the file backend.
     pub fn default_chain() -> Result<Self> {
+        // Test isolation: when MXDX_KEYCHAIN_DIR is set, use the file
+        // keychain EXCLUSIVELY. Without this, the OS keychain
+        // (gnome-keyring / Keychain Access) leaks device credentials
+        // across test runs even when each test uses a fresh tempdir —
+        // session restore then picks up a device_id whose signing key no
+        // longer matches the server, and the SDK rejects the resulting
+        // device update, cascading into key-exchange failures on every
+        // new client. Tests that want isolation MUST set this env var.
+        if std::env::var("MXDX_KEYCHAIN_DIR").is_ok() {
+            let file = Box::new(FileKeychain::new()?);
+            // Use the same instance for both ends of the chain so reads
+            // and writes go to the file backend only. The primary slot
+            // still needs a value; we give it a disabled os-keychain-like
+            // backend that always returns None/ok.
+            let file2 = Box::new(FileKeychain::new()?);
+            return Ok(Self {
+                primary: file,
+                fallback: file2,
+            });
+        }
         let primary = Box::new(OsKeychain::new());
         let fallback = Box::new(FileKeychain::new()?);
         Ok(Self { primary, fallback })
@@ -104,7 +124,10 @@ mod tests {
             Ok(self.store.lock().unwrap().get(key).cloned())
         }
         fn set(&self, key: &str, value: &[u8]) -> Result<()> {
-            self.store.lock().unwrap().insert(key.to_owned(), value.to_vec());
+            self.store
+                .lock()
+                .unwrap()
+                .insert(key.to_owned(), value.to_vec());
             Ok(())
         }
         fn delete(&self, key: &str) -> Result<()> {

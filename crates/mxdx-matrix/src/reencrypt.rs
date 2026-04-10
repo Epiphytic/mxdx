@@ -90,23 +90,29 @@ async fn ensure_encrypted(
         "room not properly encrypted, creating encrypted replacement"
     );
 
-    let (name, topic) = match role {
+    let (name, topic, role_key) = match role {
         RoomRole::Space => (
             format!("mxdx: {launcher_id}"),
             format!("org.mxdx.launcher.space:{launcher_id}"),
+            "space",
         ),
         RoomRole::Exec => (
             format!("mxdx: {launcher_id} \u{2014} exec"),
             format!("org.mxdx.launcher.exec:{launcher_id}"),
+            "exec",
         ),
         RoomRole::Logs => (
             format!("mxdx: {launcher_id} \u{2014} logs"),
             format!("org.mxdx.launcher.logs:{launcher_id}"),
+            "logs",
         ),
     };
 
+    // Use the mxdx variant so the replacement room carries launcher_id + role
+    // in its `m.room.create` content — the next startup must be able to
+    // rediscover it via plain REST.
     let new_id = matrix
-        .create_named_encrypted_room(&name, &topic, authorized_users)
+        .create_mxdx_encrypted_room(&name, &topic, authorized_users, launcher_id, role_key)
         .await?;
     matrix.tombstone_room(room, &new_id).await?;
     if let Err(e) = matrix.leave_and_forget_room(room).await {

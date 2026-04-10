@@ -34,11 +34,34 @@ pub async fn connect_or_spawn(profile: &str) -> anyhow::Result<UnixStream> {
         }
     }
 
-    // Spawn daemon
+    // Spawn daemon — redirect stdout/stderr to a log file so the daemon
+    // doesn't inherit the parent's pipes (which would block wait_with_output
+    // in callers like `timeout 40 mxdx-client ...`).
+    //
+    // Log location: MXDX_CLIENT_LOG_FILE env override, or ~/.mxdx/logs/{profile}.log
     info!(profile, "spawning daemon");
     let exe = std::env::current_exe()?;
+    let log_path = std::env::var("MXDX_CLIENT_LOG_FILE").unwrap_or_else(|_| {
+        let base = dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join(".mxdx")
+            .join("logs");
+        let _ = std::fs::create_dir_all(&base);
+        base.join(format!("{profile}.log"))
+            .to_string_lossy()
+            .to_string()
+    });
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .map_err(|e| anyhow::anyhow!("failed to open daemon log {}: {}", log_path, e))?;
+    let f2 = f.try_clone()?;
+    info!(log_path = %log_path, "daemon log file");
     Command::new(&exe)
         .args(["_daemon", "--profile", profile, "--detach"])
+        .stdout(std::process::Stdio::from(f))
+        .stderr(std::process::Stdio::from(f2))
         .spawn()?;
 
     // Poll for socket readiness

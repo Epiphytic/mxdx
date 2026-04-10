@@ -24,6 +24,7 @@ path = "src/lib.rs"
 [dependencies]
 mxdx-types = { path = "../mxdx-types", version = "1.1.0" }
 mxdx-matrix = { path = "../mxdx-matrix", version = "1.1.0" }
+mxdx-client = { path = "../mxdx-client", version = "1.1.0" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -45,11 +46,13 @@ tokio = { workspace = true }
 mxdx-types = { path = "../mxdx-types", version = "1.1.0" }
 mxdx-matrix = { path = "../mxdx-matrix", version = "1.1.0" }
 mxdx-test-helpers = { path = "../../tests/helpers" }
+anyhow = { workspace = true }
 base64 = { workspace = true }
 chrono = "0.4"
 toml = { workspace = true }
 reqwest = { workspace = true }
 serde_json = { workspace = true }
+uuid = { workspace = true }
 libc = "0.2"
 dirs = "6"
 tempfile = { workspace = true }

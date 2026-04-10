@@ -246,7 +246,7 @@ async fn run_direct(cli: &Cli) -> Result<()> {
             timeout,
             cwd,
             worker_room,
-            skip_liveness_check,
+            skip_liveness_check: _,
         }
         | Commands::Exec {
             command,
@@ -257,7 +257,7 @@ async fn run_direct(cli: &Cli) -> Result<()> {
             timeout,
             cwd,
             worker_room,
-            skip_liveness_check,
+            skip_liveness_check: _,
         } => {
             let client_args = ClientArgs {
                 worker_room: worker_room.clone(),
@@ -289,11 +289,11 @@ async fn run_direct(cli: &Cli) -> Result<()> {
             )
             .await?;
 
-            // Check worker liveness and capability before submitting a task
-            if !skip_liveness_check {
-                // Sync once to populate room state before reading state events
-                mx_room.client().sync_once().await?;
-
+            // Check worker liveness and capability before submitting a task.
+            // Uses SDK-cached state (populated during connection syncs) — no
+            // extra network call. The cache freshness is governed by the
+            // worker's heartbeat_interval_ms + staleness threshold.
+            {
                 let telemetry_events = mx_room
                     .read_state_events(
                         mx_room.room_id().as_str(),
@@ -301,6 +301,23 @@ async fn run_direct(cli: &Cli) -> Result<()> {
                     )
                     .await
                     .unwrap_or_default();
+
+                tracing::debug!(
+                    count = telemetry_events.len(),
+                    "liveness: telemetry events from cache"
+                );
+                for (key, val) in &telemetry_events {
+                    let ts = val.get("timestamp").and_then(|v| v.as_str()).unwrap_or("none");
+                    let status = val.get("status").and_then(|v| v.as_str()).unwrap_or("none");
+                    let algo = val.get("algorithm").and_then(|v| v.as_str());
+                    tracing::debug!(
+                        state_key = %key,
+                        timestamp = %ts,
+                        status = %status,
+                        encrypted = algo.is_some(),
+                        "liveness: telemetry entry"
+                    );
+                }
 
                 // If no telemetry events at all, treat as no worker
                 if telemetry_events.is_empty()

@@ -204,6 +204,21 @@ async fn build_report(binary: DiagnoseBinary, input: DiagnoseInput) -> Value {
         serde_json::to_value(&backup_section).unwrap_or(json!({"error": "serialization failed"})),
     );
 
+    // -------- state_room (discovery metadata) --------
+    //
+    // Surfaces whether the worker's expected state-room alias resolves, and
+    // whether the current account is a joined member of the target room.
+    // Lock content itself is encrypted (MSC4362) and requires --decrypt.
+    if let Some(hs) = resolved_homeserver.as_deref() {
+        let base = {
+            let b = hs.trim_end_matches('/');
+            if b.starts_with("http") { b.to_string() } else { format!("https://{}", b) }
+        };
+        let state_room_section =
+            collect_state_room(&http, &base, user_id.as_deref(), &joined_room_ids).await;
+        report.insert("state_room".into(), state_room_section);
+    }
+
     // engagement is partly populated inside collect_matrix already; keep a top-level summary
     report.insert(
         "engagement".into(),
@@ -443,8 +458,11 @@ async fn decrypt_with_temp_client(
     }
 
     // Known state event types we attempt to surface. Keep small — this is
-    // diagnostic, not exhaustive.
-    let known_types: &[StateEventType] = &[
+    // diagnostic, not exhaustive. The `org.mxdx.worker.*` entries let the
+    // decrypt pass surface the contents of the worker state room — most
+    // importantly the `WORKER_STATE_LOCK` event so a user running diagnose
+    // can see who currently holds the single-writer lease.
+    let known_types: Vec<StateEventType> = vec![
         StateEventType::RoomEncryption,
         StateEventType::RoomName,
         StateEventType::RoomTopic,
@@ -452,6 +470,11 @@ async fn decrypt_with_temp_client(
         StateEventType::RoomPowerLevels,
         StateEventType::RoomJoinRules,
         StateEventType::RoomHistoryVisibility,
+        StateEventType::from("org.mxdx.worker.lock"),
+        StateEventType::from("org.mxdx.worker.config"),
+        StateEventType::from("org.mxdx.worker.topology"),
+        StateEventType::from("org.mxdx.worker.identity"),
+        StateEventType::from("org.mxdx.worker.session"),
     ];
 
     let mut decrypted: std::collections::HashMap<String, serde_json::Value> =
@@ -464,7 +487,7 @@ async fn decrypt_with_temp_client(
         let Some(room) = client.get_room(&rid) else {
             continue;
         };
-        for ev_type in known_types {
+        for ev_type in &known_types {
             match room.get_state_events(ev_type.clone()).await {
                 Ok(raws) => {
                     for raw in raws {
@@ -488,7 +511,7 @@ async fn decrypt_with_temp_client(
                             .get("state_key")
                             .and_then(|v| v.as_str())
                             .unwrap_or("");
-                        let ev_type_str = serde_json::to_value(ev_type)
+                        let ev_type_str = serde_json::to_value(ev_type.clone())
                             .ok()
                             .and_then(|v| v.as_str().map(|s| s.to_string()))
                             .unwrap_or_else(|| format!("{:?}", ev_type));
@@ -1206,6 +1229,102 @@ async fn fetch_state(
         return None;
     }
     resp.json::<Value>().await.ok()
+}
+
+/// Resolve a Matrix room alias to a room_id via the unauthenticated directory
+/// endpoint. Returns `Ok(Some(room_id))` on success, `Ok(None)` on 404.
+async fn resolve_alias(
+    http: &reqwest::Client,
+    base: &str,
+    alias: &str,
+) -> Option<String> {
+    let url = format!(
+        "{}/_matrix/client/v3/directory/room/{}",
+        base,
+        urlencoding::encode(alias)
+    );
+    let resp = http.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: Value = resp.json().await.ok()?;
+    v.get("room_id").and_then(|r| r.as_str()).map(String::from)
+}
+
+/// Build the state-room diagnostics section.
+///
+/// Answers three questions:
+///
+/// 1. What alias does THIS host's worker expect for its state room?
+/// 2. Does that alias resolve on the homeserver (i.e., does a state room
+///    exist), and if so, to which room id?
+/// 3. Is that resolved room present in our `joined_rooms` list? (If yes, we
+///    can read its state; if no, we'd hit `M_FORBIDDEN` — the exact symptom
+///    we saw before the state-room discovery fix.)
+///
+/// The contents of the lock / config / sessions state events are encrypted
+/// under MSC4362. Reading them requires `--decrypt`; this section only
+/// exposes discovery metadata, which is unencrypted (m.room.create is never
+/// encrypted and the `directory/room` endpoint is unauthenticated).
+async fn collect_state_room(
+    http: &reqwest::Client,
+    base: &str,
+    user_id: Option<&str>,
+    joined_room_ids: &[String],
+) -> Value {
+    let host = hostname::get()
+        .map(|h| h.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let os_user = std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "unknown".into());
+    let (localpart, server_name) = match user_id {
+        Some(u) => {
+            let trimmed = u.trim_start_matches('@');
+            match trimmed.split_once(':') {
+                Some((l, s)) => (l.to_string(), s.to_string()),
+                None => (trimmed.to_string(), String::new()),
+            }
+        }
+        None => (String::new(), String::new()),
+    };
+
+    if localpart.is_empty() || server_name.is_empty() {
+        return json!({
+            "expected_alias": null,
+            "note": "cannot compute expected alias without matrix user_id",
+            "host": host,
+            "os_user": os_user,
+        });
+    }
+
+    let alias = format!(
+        "#mxdx-state-{host}.{os_user}.{localpart}:{server_name}"
+    );
+    let resolved = resolve_alias(http, base, &alias).await;
+    let joined_set: std::collections::HashSet<&str> =
+        joined_room_ids.iter().map(|s| s.as_str()).collect();
+    let is_member = resolved
+        .as_deref()
+        .map(|r| joined_set.contains(r))
+        .unwrap_or(false);
+
+    json!({
+        "expected_alias": alias,
+        "alias_resolves": resolved.is_some(),
+        "resolved_room_id": resolved,
+        "is_joined_member": is_member,
+        "host": host,
+        "os_user": os_user,
+        "localpart": localpart,
+        "note": if resolved.is_some() && !is_member {
+            "resolved to a room but not a joined member — state reads will return 403"
+        } else if resolved.is_none() {
+            "alias not bound — worker will create on next start"
+        } else {
+            "state room is reachable"
+        }
+    })
 }
 
 fn derive_type_hint(topic: Option<&str>, name: Option<&str>) -> &'static str {

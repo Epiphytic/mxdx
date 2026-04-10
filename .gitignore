@@ -19,3 +19,6 @@ packages/web-console/dist/
 
 # Git worktrees
 .worktrees/
+
+# E2E test perf output (default path; override with TEST_PERF_OUTPUT)
+e2e-results.jsonl

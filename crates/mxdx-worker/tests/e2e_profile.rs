@@ -1,103 +1,67 @@
-//! Phased E2E test suite — security gates, sync profiling, operational tests.
+//! Phased E2E test suite — single orchestrator calls phase functions in order.
 //!
-//! Tests are ordered functions (`t00_*` through `t41_*`) that run sequentially
-//! via `--test-threads=1`. Security gate tests run first with no worker — they
-//! verify the client fails fast and correctly when conditions are unsafe.
+//! ## Architecture
+//!
+//! A single `#[tokio::test] async fn e2e()` orchestrator calls phase functions
+//! in order. Each phase is an `async fn phase_N(...)` that returns `Err` on any
+//! test failure, stopping the suite immediately.
 //!
 //! ## Phases
 //!
-//! - **Phase 0 — Security Gates** (`t00_*` – `t02_*`): Client refuses unsafe ops
-//! - **Phase 1 — Sync Profile** (`t10_*`): Start persistent worker, measure timing
-//! - **Phase 2 — Local Tests** (`t20_*`): Reuse shared worker, single server
-//! - **Phase 3 — Federated Tests** (`t30_*`): Worker on server1, client on server2
-//! - **Phase 4 — Special Tests** (`t40_*`): Explicit room name, session restore
+//! | Phase | Name            | Required | Execution | Description |
+//! |-------|-----------------|----------|-----------|-------------|
+//! | 0     | Security gates  | no       | serial    | Client refuses unsafe ops |
+//! | 1     | Setup worker    | **yes**  | —         | Start persistent worker, authorize clients |
+//! | 2     | Local tests     | no       | serial    | echo, exit-code, md5sum, ping(30s) via daemon |
+//! | 3     | Federated tests | no       | serial    | Same tests, client on s2 via --no-daemon |
+//! | 4     | Long + SSH      | no       | parallel  | 5-min pings + SSH baselines |
+//! | 5     | Shutdown worker | **yes**  | —         | Graceful SIGTERM |
+//! | 6     | Special tests   | no       | serial    | Session restore, backup, self-heal, diagnose |
+//! | 7     | Cleanup         | **yes**  | —         | pkill safety net |
+//!
+//! ## Presets (E2E_PRESET env var)
+//!
+//! | Preset    | Phases            | Use case |
+//! |-----------|-------------------|----------|
+//! | `quick`   | 0, 1, 2, 3, 5, 7 | Fast feedback, ~2 minutes |
+//! | `default` | 0, 1, 2, 3, 5, 6, 7 | Standard dev/CI, ~5 minutes |
+//! | `full`    | 0, 1, 2, 3, 4, 5, 6, 7 | Everything including long tests |
 //!
 //! ## Running
 //!
 //! ```sh
-//! cargo test -p mxdx-worker --test e2e_profile -- --ignored --test-threads=1 --nocapture
+//! cargo test -p mxdx-worker --test e2e_profile -- --ignored e2e --nocapture
+//! E2E_PRESET=quick cargo test -p mxdx-worker --test e2e_profile -- --ignored e2e --nocapture
+//! E2E_PRESET=full cargo test -p mxdx-worker --test e2e_profile -- --ignored e2e --nocapture
 //! ```
 
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
-
-/// Open a log file for worker stdio redirection. Without this, `Stdio::piped()`
-/// lets the OS pipe buffer (~64KB) fill up during backup/reencrypt/debug output
-/// and the worker's next write blocks forever, hanging every test. Returns a
-/// pair of owned File handles (stdout + stderr clone) suitable for
-/// `Stdio::from(...)`.
-/// Path of the current worker log. Tests that previously read worker stderr
-/// via `wait_with_output` can now read this file instead.
-fn worker_log_path() -> String {
-    std::env::var("MXDX_TEST_WORKER_LOG_FILE")
-        .unwrap_or_else(|_| "/tmp/mxdx-worker-current.log".to_string())
-}
-
-/// Open worker log file for stdio redirection. Without file redirection the
-/// `Stdio::piped()` pipe buffer (~64KB) fills up during backup/reencrypt/debug
-/// output and the worker blocks on its next write, hanging every test.
-fn worker_log_files() -> (std::fs::File, std::fs::File) {
-    let path = worker_log_path();
-    eprintln!("[e2e] worker log -> {path}");
-    let f = std::fs::OpenOptions::new()
-        .create(true).write(true).truncate(true).open(&path)
-        .unwrap_or_else(|e| panic!("open worker log {path}: {e}"));
-    let f2 = f.try_clone().expect("clone worker log fd");
-    (f, f2)
-}
-
-/// Read the current worker log file as a String (best-effort).
-fn worker_log_contents() -> String {
-    std::fs::read_to_string(worker_log_path()).unwrap_or_default()
-}
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use anyhow::{bail, Context as _, Result};
+
 // ---------------------------------------------------------------------------
-// Shared test state — persistent across test functions within a single run
+// Test context — owned by orchestrator, passed to phase functions
 // ---------------------------------------------------------------------------
 
-/// Shared state for Phase 1+ tests. Initialized by `t10_start_worker_and_sync`.
-static SHARED_STATE: OnceLock<SharedTestState> = OnceLock::new();
-
-/// Set to true if any security gate test (t0*) fails. All subsequent tests skip.
-static SECURITY_GATE_FAILED: AtomicBool = AtomicBool::new(false);
-
-struct SharedTestState {
-    #[allow(dead_code)] // Worker process held alive; killed on drop
-    worker: Mutex<Child>,
+struct TestContext {
+    worker: Child,
     worker_room: String,
     creds: TestCreds,
     store_dir: PathBuf,
     keychain_dir: PathBuf,
-    /// HOME directory for config files — daemon reads defaults.toml from here.
     config_home: PathBuf,
-}
-
-/// Check if security gates have failed; if so, skip the current test.
-macro_rules! skip_if_gate_failed {
-    () => {
-        if SECURITY_GATE_FAILED.load(Ordering::SeqCst) {
-            eprintln!("[SKIP] security gate failed — skipping remaining tests");
-            return;
-        }
-    };
-}
-
-/// Mark a security gate failure and panic with the given message.
-macro_rules! security_gate_fail {
-    ($($arg:tt)*) => {{
-        SECURITY_GATE_FAILED.store(true, Ordering::SeqCst);
-        panic!($($arg)*);
-    }};
+    /// Config home for the federated (s2) daemon. None if no s2 server.
+    config_home_s2: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
 // Credential loading (from test-credentials.toml)
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 struct TestCreds {
     server_url: String,
     server2_url: Option<String>,
@@ -158,14 +122,58 @@ fn load_creds() -> Option<TestCreds> {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Path of the current worker log.
+fn worker_log_path() -> String {
+    std::env::var("MXDX_TEST_WORKER_LOG_FILE")
+        .unwrap_or_else(|_| "/tmp/mxdx-worker-current.log".to_string())
+}
+
+/// Path of the current client daemon log for the e2e-local profile.
+/// Matches the default in connect_or_spawn: ~/.mxdx/logs/{profile}.log
+fn client_log_path() -> String {
+    let base = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join(".mxdx")
+        .join("logs");
+    let _ = std::fs::create_dir_all(&base);
+    base.join("e2e-local.log").to_string_lossy().to_string()
+}
+
+/// Truncate the daemon log at the start of the test run so each run starts clean.
+fn setup_client_log() {
+    let path = client_log_path();
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path);
+    eprintln!("[e2e] client daemon log -> {path}");
+}
+
+/// Open worker log file for stdio redirection. Without file redirection the
+/// `Stdio::piped()` pipe buffer (~64KB) fills up during backup/reencrypt/debug
+/// output and the worker blocks on its next write, hanging every test.
+fn worker_log_files() -> (std::fs::File, std::fs::File) {
+    let path = worker_log_path();
+    eprintln!("[e2e] worker log -> {path}");
+    let f = std::fs::OpenOptions::new()
+        .create(true).write(true).truncate(true).open(&path)
+        .unwrap_or_else(|e| panic!("open worker log {path}: {e}"));
+    let f2 = f.try_clone().expect("clone worker log fd");
+    (f, f2)
+}
+
+/// Read the current worker log file as a String (best-effort).
+fn worker_log_contents() -> String {
+    std::fs::read_to_string(worker_log_path()).unwrap_or_default()
+}
+
 fn cargo_bin(name: &str) -> PathBuf {
-    // Allow override via MXDX_BIN_DIR for testing release-profile binaries
     if let Ok(dir) = std::env::var("MXDX_BIN_DIR") {
         let path = PathBuf::from(dir).join(name);
         assert!(path.exists(), "Binary not found at {} (via MXDX_BIN_DIR)", path.display());
         return path;
     }
-    // Default: resolve relative to test binary (target/debug/)
     let mut path = std::env::current_exe().expect("cannot resolve test binary path");
     path.pop();
     path.pop();
@@ -208,12 +216,10 @@ fn isolated_test_dirs(test_name: &str) -> (tempfile::TempDir, tempfile::TempDir)
 }
 
 /// Write mxdx config files (defaults.toml + client.toml) into a config HOME dir.
-/// The daemon reads these to connect to Matrix without CLI flags.
 fn write_test_config(config_home: &std::path::Path, creds: &TestCreds, worker_room: &str) {
     let mxdx_dir = config_home.join(".mxdx");
     std::fs::create_dir_all(&mxdx_dir).expect("failed to create .mxdx config dir");
 
-    // Write defaults.toml with test account
     let localpart = creds.client_user
         .split(':')
         .next()
@@ -233,7 +239,6 @@ password = "{password}"
     std::fs::write(mxdx_dir.join("defaults.toml"), &defaults_toml)
         .expect("failed to write defaults.toml");
 
-    // Write client.toml with default worker room
     let client_toml = format!(
         r#"default_worker_room = "{worker_room}"
 
@@ -246,8 +251,105 @@ idle_timeout_seconds = 300
         .expect("failed to write client.toml");
 }
 
+/// Write mxdx config for a specific server (for the federated daemon).
+fn write_test_config_for_server(
+    config_home: &std::path::Path,
+    server_url: &str,
+    client_user: &str,
+    client_pass: &str,
+    worker_room: &str,
+) {
+    let mxdx_dir = config_home.join(".mxdx");
+    std::fs::create_dir_all(&mxdx_dir).expect("failed to create .mxdx config dir");
+
+    let localpart = client_user
+        .split(':')
+        .next()
+        .unwrap_or(client_user)
+        .trim_start_matches('@');
+    let defaults_toml = format!(
+        r#"[[accounts]]
+user_id = "@{localpart}:{server}"
+homeserver = "{homeserver}"
+password = "{password}"
+"#,
+        localpart = localpart,
+        server = server_url.trim_start_matches("https://").trim_start_matches("http://"),
+        homeserver = server_url,
+        password = client_pass,
+    );
+    std::fs::write(mxdx_dir.join("defaults.toml"), &defaults_toml)
+        .expect("failed to write defaults.toml");
+
+    let client_toml = format!(
+        r#"default_worker_room = "{worker_room}"
+
+[daemon]
+idle_timeout_seconds = 300
+"#,
+        worker_room = worker_room,
+    );
+    std::fs::write(mxdx_dir.join("client.toml"), &client_toml)
+        .expect("failed to write client.toml");
+}
+
+/// Log path for the federated (s2) daemon.
+fn client_log_path_s2() -> String {
+    let base = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join(".mxdx")
+        .join("logs");
+    let _ = std::fs::create_dir_all(&base);
+    base.join("e2e-s2.log").to_string_lossy().to_string()
+}
+
+/// Run the client via the federated (s2) daemon using its own config home.
+fn run_client_daemon_s2(config_home_s2: &std::path::Path, extra_args: &[&str],
+                        store_dir: &std::path::Path, keychain_dir: &std::path::Path,
+                        timeout_secs: u32) -> Output {
+    let mut full: Vec<&str> = Vec::new();
+    if !extra_args.is_empty() {
+        full.push(extra_args[0]);
+        if extra_args[0] == "run" || extra_args[0] == "exec" {
+            full.extend_from_slice(&["--cwd", "/tmp"]);
+        }
+        full.extend_from_slice(&extra_args[1..]);
+    }
+    Command::new("timeout")
+        .arg(timeout_secs.to_string())
+        .arg(cargo_bin("mxdx-client"))
+        .args(&full)
+        .env("HOME", config_home_s2.to_str().unwrap())
+        .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
+        .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
+        .env("MXDX_KEEP_PASSWORDS", "1")
+        .env("MXDX_CLIENT_LOG_FILE", client_log_path_s2())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn mxdx-client (s2)")
+        .wait_with_output()
+        .expect("failed to wait for mxdx-client (s2)")
+}
+
+/// Wait for the federated daemon to be fully ready.
+async fn wait_daemon_ready_s2(timeout: Duration) -> Result<()> {
+    let log = client_log_path_s2();
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            bail!("s2 daemon did not become ready within {}s (no MXDX_DAEMON_READY in {})", timeout.as_secs(), log);
+        }
+        if let Ok(contents) = std::fs::read_to_string(&log) {
+            if contents.contains("MXDX_DAEMON_READY") {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
 /// Get persistent store directories for shared state tests.
-/// These persist across test runs at `~/.mxdx/e2e-local/`.
 fn persistent_test_dirs() -> (PathBuf, PathBuf) {
     let base = dirs::home_dir()
         .expect("cannot resolve home dir")
@@ -258,6 +360,70 @@ fn persistent_test_dirs() -> (PathBuf, PathBuf) {
     std::fs::create_dir_all(&store).expect("failed to create persistent store dir");
     std::fs::create_dir_all(&keychain).expect("failed to create persistent keychain dir");
     (store, keychain)
+}
+
+/// Persistent test dirs with a label suffix.
+fn persistent_test_dirs_named(label: &str) -> (PathBuf, PathBuf) {
+    let base = dirs::home_dir()
+        .expect("cannot resolve home dir")
+        .join(".mxdx")
+        .join(format!("e2e-{label}"));
+    let store = base.join("store");
+    let keychain = base.join("keychain");
+    std::fs::create_dir_all(&store).expect("failed to create persistent store dir");
+    std::fs::create_dir_all(&keychain).expect("failed to create persistent keychain dir");
+    (store, keychain)
+}
+
+/// Kill stale mxdx processes from previous test runs.
+fn cleanup_stale_processes() {
+    eprintln!("[e2e] cleaning up stale mxdx processes from previous runs");
+    let _ = std::process::Command::new("pkill")
+        .args(["-KILL", "-f", "mxdx-worker start"])
+        .status();
+    let _ = std::process::Command::new("pkill")
+        .args(["-KILL", "-f", "mxdx-client _daemon"])
+        .status();
+    if let Some(home) = dirs::home_dir() {
+        let dirs_to_clean = [
+            home.join(".mxdx").join("daemon"),
+            home.join(".mxdx").join("e2e-local").join("home").join(".mxdx").join("daemon"),
+        ];
+        for d in &dirs_to_clean {
+            if let Ok(entries) = std::fs::read_dir(d) {
+                for e in entries.flatten() {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
+    std::thread::sleep(Duration::from_millis(500));
+}
+
+/// Graceful SIGTERM shutdown with 10s timeout, fallback to SIGKILL.
+#[cfg(unix)]
+fn kill_worker_graceful(w: &mut Child) {
+    let pid = w.id() as i32;
+    unsafe { libc::kill(pid, libc::SIGTERM); }
+    for _ in 0..100 {
+        match w.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+            Err(_) => break,
+        }
+    }
+    let _ = w.kill();
+    let _ = w.wait();
+}
+
+#[cfg(not(unix))]
+fn kill_worker_graceful(w: &mut Child) {
+    let _ = w.kill();
+    let _ = w.wait();
+}
+
+fn spawn_child(mut cmd: Command) -> Child {
+    cmd.spawn().expect("failed to spawn child")
 }
 
 /// Start the worker using default room naming.
@@ -275,25 +441,22 @@ fn start_worker(hs: &str, user: &str, pass: &str, authorized_user: &str,
         args.push(cmd.to_string());
     }
     let (out, err) = worker_log_files();
-    Command::new(cargo_bin("mxdx-worker"))
-        .args(&args)
+    let mut cmd = Command::new(cargo_bin("mxdx-worker"));
+    cmd.args(&args)
         .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
         .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
         .stdout(Stdio::from(out))
-        .stderr(Stdio::from(err))
-        .spawn()
-        .expect("failed to start mxdx-worker")
+        .stderr(Stdio::from(err));
+    spawn_child(cmd)
 }
 
 /// Start the worker with a custom telemetry refresh interval.
-/// Creates a temporary config directory with a worker.toml that sets the refresh rate.
 fn start_worker_with_telemetry_refresh(
     hs: &str, user: &str, pass: &str, authorized_user: &str,
     store_dir: &std::path::Path, keychain_dir: &std::path::Path,
     telemetry_refresh_secs: u64,
     config_dir: &std::path::Path,
 ) -> Child {
-    // Write worker.toml with custom telemetry refresh
     let mxdx_config_dir = config_dir.join(".mxdx");
     std::fs::create_dir_all(&mxdx_config_dir).expect("failed to create config dir");
     std::fs::write(
@@ -313,15 +476,14 @@ fn start_worker_with_telemetry_refresh(
         args.push(cmd.to_string());
     }
     let (out, err) = worker_log_files();
-    Command::new(cargo_bin("mxdx-worker"))
-        .args(&args)
+    let mut cmd = Command::new(cargo_bin("mxdx-worker"));
+    cmd.args(&args)
         .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
         .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
-        .env("HOME", config_dir.to_str().unwrap()) // config loads from $HOME/.mxdx/
+        .env("HOME", config_dir.to_str().unwrap())
         .stdout(Stdio::from(out))
-        .stderr(Stdio::from(err))
-        .spawn()
-        .expect("failed to start mxdx-worker")
+        .stderr(Stdio::from(err));
+    spawn_child(cmd)
 }
 
 /// Start the worker with an explicit `--room-name` override.
@@ -340,14 +502,13 @@ fn start_worker_with_room(hs: &str, user: &str, pass: &str, room: &str, authoriz
         args.push(cmd.to_string());
     }
     let (out, err) = worker_log_files();
-    Command::new(cargo_bin("mxdx-worker"))
-        .args(&args)
+    let mut cmd = Command::new(cargo_bin("mxdx-worker"));
+    cmd.args(&args)
         .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
         .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
         .stdout(Stdio::from(out))
-        .stderr(Stdio::from(err))
-        .spawn()
-        .expect("failed to start mxdx-worker")
+        .stderr(Stdio::from(err));
+    spawn_child(cmd)
 }
 
 /// Start the worker with only specific allowed commands (for capability mismatch tests).
@@ -368,14 +529,13 @@ fn start_worker_with_commands(
         args.push(cmd.to_string());
     }
     let (out, err) = worker_log_files();
-    Command::new(cargo_bin("mxdx-worker"))
-        .args(&args)
+    let mut cmd = Command::new(cargo_bin("mxdx-worker"));
+    cmd.args(&args)
         .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
         .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
         .stdout(Stdio::from(out))
-        .stderr(Stdio::from(err))
-        .spawn()
-        .expect("failed to start mxdx-worker")
+        .stderr(Stdio::from(err));
+    spawn_child(cmd)
 }
 
 /// Run the client WITH liveness check (for testing exit codes 10, 11, 12).
@@ -386,16 +546,15 @@ fn run_client_with_liveness(hs: &str, user: &str, pass: &str, worker_room: &str,
         "--no-daemon",
     ];
     if !extra_args.is_empty() {
-        full.push(extra_args[0]); // subcommand
+        full.push(extra_args[0]);
         full.extend_from_slice(&["--worker-room", worker_room]);
-        // NO --skip-liveness-check here — we want the liveness check to run
         if extra_args[0] == "run" || extra_args[0] == "exec" {
             full.extend_from_slice(&["--cwd", "/tmp"]);
         }
         full.extend_from_slice(&extra_args[1..]);
     }
     Command::new("timeout")
-        .arg("60") // shorter timeout for security gate tests
+        .arg("60")
         .arg(cargo_bin("mxdx-client"))
         .args(&full)
         .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
@@ -410,24 +569,56 @@ fn run_client_with_liveness(hs: &str, user: &str, pass: &str, worker_room: &str,
 }
 
 /// Run the client via daemon mode using config files.
-/// Credentials come from defaults.toml in the config_home dir, not CLI flags.
-/// The daemon auto-spawns on first call and holds a persistent Matrix connection.
+/// `timeout_secs`: hard ceiling for the command (default 330s for long tests,
+/// use 10 for echo/exit-code to catch session reuse failures).
 fn run_client_daemon(config_home: &std::path::Path, extra_args: &[&str],
-                     store_dir: &std::path::Path, keychain_dir: &std::path::Path) -> Output {
+                     store_dir: &std::path::Path, keychain_dir: &std::path::Path,
+                     timeout_secs: u32) -> Output {
     let mut full: Vec<&str> = Vec::new();
     if !extra_args.is_empty() {
-        full.push(extra_args[0]); // subcommand
-        full.push("--skip-liveness-check");
+        full.push(extra_args[0]);
         if extra_args[0] == "run" || extra_args[0] == "exec" {
             full.extend_from_slice(&["--cwd", "/tmp"]);
         }
         full.extend_from_slice(&extra_args[1..]);
     }
     Command::new("timeout")
-        .arg("330")
+        .arg(timeout_secs.to_string())
         .arg(cargo_bin("mxdx-client"))
         .args(&full)
         .env("HOME", config_home.to_str().unwrap())
+        .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
+        .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
+        .env("MXDX_KEEP_PASSWORDS", "1")
+        .env("MXDX_CLIENT_LOG_FILE", client_log_path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn mxdx-client")
+        .wait_with_output()
+        .expect("failed to wait for mxdx-client")
+}
+
+/// Run the client in direct mode (--no-daemon) with CLI credentials.
+fn run_client(hs: &str, user: &str, pass: &str, worker_room: &str, extra_args: &[&str],
+              store_dir: &std::path::Path, keychain_dir: &std::path::Path,
+              timeout_secs: u32) -> Output {
+    let mut full: Vec<&str> = vec![
+        "--homeserver", hs, "--username", user, "--password", pass,
+        "--no-daemon",
+    ];
+    if !extra_args.is_empty() {
+        full.push(extra_args[0]);
+        full.extend_from_slice(&["--worker-room", worker_room]);
+        if extra_args[0] == "run" || extra_args[0] == "exec" {
+            full.extend_from_slice(&["--cwd", "/tmp"]);
+        }
+        full.extend_from_slice(&extra_args[1..]);
+    }
+    Command::new("timeout")
+        .arg(timeout_secs.to_string())
+        .arg(cargo_bin("mxdx-client"))
+        .args(&full)
         .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
         .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
         .env("MXDX_KEEP_PASSWORDS", "1")
@@ -439,10 +630,49 @@ fn run_client_daemon(config_home: &std::path::Path, extra_args: &[&str],
         .expect("failed to wait for mxdx-client")
 }
 
-/// Run the client in direct mode (--no-daemon) with CLI credentials.
-/// Used for security gate tests and isolated tests that need their own connection.
-fn run_client(hs: &str, user: &str, pass: &str, worker_room: &str, extra_args: &[&str],
-              store_dir: &std::path::Path, keychain_dir: &std::path::Path) -> Output {
+/// Check if an Output was killed by `timeout(1)` (exit code 124).
+fn was_timeout(out: &Output) -> bool {
+    out.status.code() == Some(124)
+}
+
+/// Format a test failure with timeout-aware messaging.
+/// `session_reuse_hint`: if true, a timeout adds a note about session reuse.
+fn format_test_failure(test_id: &str, label: &str, out: &Output, timeout_secs: u32, session_reuse_hint: bool) -> String {
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let tail = &stderr[stderr.len().saturating_sub(500)..];
+    if was_timeout(out) {
+        let mut msg = format!(
+            "{test_id} {label}: TIMEOUT after {timeout_secs}s (exit code 124)"
+        );
+        if session_reuse_hint {
+            msg.push_str(
+                "\n  NOTE: This indicates the client is NOT reusing sessions correctly. \
+                 Simple commands should complete in under 10 seconds when the daemon \
+                 reuses its existing Matrix session."
+            );
+        }
+        msg.push_str(&format!("\n  stderr (last 500): {tail}"));
+        msg
+    } else {
+        format!("{test_id} {label} failed (exit code {:?}): {tail}", out.status.code())
+    }
+}
+
+/// Like [`run_client`] but fail-fasts if no stdout within `no_output_timeout`.
+fn run_client_no_output_timeout(
+    hs: &str,
+    user: &str,
+    pass: &str,
+    worker_room: &str,
+    extra_args: &[&str],
+    store_dir: &std::path::Path,
+    keychain_dir: &std::path::Path,
+    no_output_timeout: Duration,
+    total_timeout: Duration,
+) -> Output {
+    use std::io::Read;
+    use std::sync::Arc;
+
     let mut full: Vec<&str> = vec![
         "--homeserver", hs, "--username", user, "--password", pass,
         "--no-daemon",
@@ -450,15 +680,13 @@ fn run_client(hs: &str, user: &str, pass: &str, worker_room: &str, extra_args: &
     if !extra_args.is_empty() {
         full.push(extra_args[0]);
         full.extend_from_slice(&["--worker-room", worker_room]);
-        full.push("--skip-liveness-check");
         if extra_args[0] == "run" || extra_args[0] == "exec" {
             full.extend_from_slice(&["--cwd", "/tmp"]);
         }
         full.extend_from_slice(&extra_args[1..]);
     }
-    Command::new("timeout")
-        .arg("330")
-        .arg(cargo_bin("mxdx-client"))
+
+    let mut child = Command::new(cargo_bin("mxdx-client"))
         .args(&full)
         .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
         .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
@@ -466,9 +694,84 @@ fn run_client(hs: &str, user: &str, pass: &str, worker_room: &str, extra_args: &
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("failed to spawn mxdx-client")
-        .wait_with_output()
-        .expect("failed to wait for mxdx-client")
+        .expect("failed to spawn mxdx-client");
+
+    let stdout_pipe = child.stdout.take().expect("stdout piped");
+    let stderr_pipe = child.stderr.take().expect("stderr piped");
+
+    let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let got_stdout = Arc::new(AtomicBool::new(false));
+
+    let sb = Arc::clone(&stdout_buf);
+    let gs = Arc::clone(&got_stdout);
+    let stdout_thread = std::thread::spawn(move || {
+        let mut r = stdout_pipe;
+        let mut buf = [0u8; 4096];
+        loop {
+            match r.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    gs.store(true, Ordering::SeqCst);
+                    sb.lock().unwrap().extend_from_slice(&buf[..n]);
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let eb = Arc::clone(&stderr_buf);
+    let stderr_thread = std::thread::spawn(move || {
+        let mut r = stderr_pipe;
+        let mut buf = [0u8; 4096];
+        loop {
+            match r.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => eb.lock().unwrap().extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+    });
+
+    let start = Instant::now();
+    let mut kill_reason: Option<String> = None;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(s)) => break s,
+            Ok(None) => {
+                let elapsed = start.elapsed();
+                if !got_stdout.load(Ordering::SeqCst) && elapsed >= no_output_timeout {
+                    kill_reason = Some(format!(
+                        "no stdout within {:?} — worker never relayed output",
+                        no_output_timeout
+                    ));
+                    let _ = child.kill();
+                    break child.wait().expect("wait after kill");
+                }
+                if elapsed >= total_timeout {
+                    kill_reason =
+                        Some(format!("total timeout {:?} reached", total_timeout));
+                    let _ = child.kill();
+                    break child.wait().expect("wait after kill");
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            Err(e) => panic!("try_wait: {e}"),
+        }
+    };
+
+    let _ = stdout_thread.join();
+    let _ = stderr_thread.join();
+
+    let stdout_vec = stdout_buf.lock().unwrap().clone();
+    let mut stderr_vec = stderr_buf.lock().unwrap().clone();
+    if let Some(reason) = kill_reason {
+        stderr_vec.extend_from_slice(
+            format!("\n[e2e fast-fail] killed mxdx-client: {}\n", reason).as_bytes(),
+        );
+    }
+
+    Output { status, stdout: stdout_vec, stderr: stderr_vec }
 }
 
 fn run_ssh(args: &[&str]) -> Output {
@@ -494,7 +797,50 @@ fn run_ssh_script(script: &str) -> Output {
     child.wait_with_output().expect("failed to wait for ssh")
 }
 
-async fn wait_ready() { tokio::time::sleep(Duration::from_secs(5)).await; }
+/// Get the current byte length of the worker log file (for readiness offset tracking).
+fn worker_log_offset() -> u64 {
+    std::fs::metadata(worker_log_path()).map(|m| m.len()).unwrap_or(0)
+}
+
+/// Wait for the worker to be fully ready by polling its log file for the
+/// readiness marker. Only looks at log content after `start_offset` bytes,
+/// so multiple workers writing to the same log don't cause false positives.
+/// Returns when the worker has synced, shared keys, and posted telemetry.
+async fn wait_worker_ready(timeout: Duration, start_offset: u64) -> Result<()> {
+    let log = worker_log_path();
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            bail!("worker did not become ready within {}s (no MXDX_WORKER_READY in {})", timeout.as_secs(), log);
+        }
+        if let Ok(contents) = std::fs::read_to_string(&log) {
+            let search_from = (start_offset as usize).min(contents.len());
+            if contents[search_from..].contains("MXDX_WORKER_READY") {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
+
+/// Wait for the client daemon to be fully ready by polling its log file for
+/// the readiness marker. Returns when the daemon has connected to Matrix,
+/// synced, and started its sync loop.
+async fn wait_daemon_ready(timeout: Duration) -> Result<()> {
+    let log = client_log_path();
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            bail!("daemon did not become ready within {}s (no MXDX_DAEMON_READY in {})", timeout.as_secs(), log);
+        }
+        if let Ok(contents) = std::fs::read_to_string(&log) {
+            if contents.contains("MXDX_DAEMON_READY") {
+                return Ok(());
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+}
 
 fn large_file(lines: usize) -> String {
     let path = format!("/tmp/mxdx-profile-{}.txt", std::process::id());
@@ -514,7 +860,6 @@ fn report(test: &str, transport: &str, elapsed: Duration, exit_code: Option<i32>
         stdout_lines,
     );
 
-    // Write performance JSON entry if TEST_PERF_OUTPUT is set
     if let Ok(path) = std::env::var("TEST_PERF_OUTPUT") {
         let status = match exit_code {
             Some(0) => "pass",
@@ -544,33 +889,16 @@ fn md5_script(file_path: &str) -> String {
     format!("while IFS= read -r line; do printf '%s\\n' \"$line\" | md5sum; done < '{file_path}'")
 }
 
-/// Start the worker and run a warm-up command.
-async fn setup_worker(server: &str, worker_user: &str, worker_pass: &str,
-                       client_server: &str, client_user: &str, client_pass: &str,
-                       authorized_user: &str,
-                       store_dir: &std::path::Path, keychain_dir: &std::path::Path) -> Child {
-    let worker_room = default_worker_room(worker_user);
-    let w = start_worker(server, worker_user, worker_pass, authorized_user, store_dir, keychain_dir);
-    wait_ready().await;
-
-    let warmup = run_client(client_server, client_user, client_pass, &worker_room, &["run", "/bin/true"], store_dir, keychain_dir);
-    if !warmup.status.success() {
-        let stderr = String::from_utf8_lossy(&warmup.stderr);
-        eprintln!("[profile] warmup failed (may need account setup): {}", &stderr[stderr.len().saturating_sub(500)..]);
-    }
-
-    w
-}
-
 /// Start the worker with an explicit `--room-name` and run a warm-up command.
 async fn setup_worker_with_room(server: &str, worker_user: &str, worker_pass: &str,
                                  client_server: &str, client_user: &str, client_pass: &str,
                                  room: &str, authorized_user: &str,
                                  store_dir: &std::path::Path, keychain_dir: &std::path::Path) -> Child {
+    let offset = worker_log_offset();
     let w = start_worker_with_room(server, worker_user, worker_pass, room, authorized_user, store_dir, keychain_dir);
-    wait_ready().await;
+    wait_worker_ready(Duration::from_secs(120), offset).await.expect("temp worker startup timed out");
 
-    let warmup = run_client(client_server, client_user, client_pass, room, &["run", "/bin/true"], store_dir, keychain_dir);
+    let warmup = run_client(client_server, client_user, client_pass, room, &["run", "/bin/true"], store_dir, keychain_dir, 330);
     if !warmup.status.success() {
         let stderr = String::from_utf8_lossy(&warmup.stderr);
         eprintln!("[profile] warmup failed (may need account setup): {}", &stderr[stderr.len().saturating_sub(500)..]);
@@ -579,617 +907,8 @@ async fn setup_worker_with_room(server: &str, worker_user: &str, worker_pass: &s
     w
 }
 
-/// Extract the device_id from worker stderr output.
-#[allow(dead_code)]
-fn extract_device_id_from_stderr(stderr: &str) -> Option<String> {
-    for line in stderr.lines() {
-        if line.contains("device identity loaded")
-            || line.contains("session restored successfully")
-            || line.contains("fresh login completed")
-        {
-            if let Some(pos) = line.find("device_id=") {
-                let after = &line[pos + "device_id=".len()..];
-                let value = if after.starts_with('"') {
-                    after[1..].split('"').next().unwrap_or("")
-                } else {
-                    after.split_whitespace().next().unwrap_or("")
-                };
-                if !value.is_empty() {
-                    return Some(value.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
-// ===========================================================================
-// PHASE 0 — SECURITY GATES (no worker running)
-// If any gate fails, all subsequent tests are skipped.
-// ===========================================================================
-
-/// Security gate: client must exit 10 when targeting a room that doesn't exist.
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + beta server"]
-async fn t00_security_no_worker_room() {
-    let c = load_creds().expect("test-credentials.toml required");
-    let (store_dir, keychain_dir) = isolated_test_dirs("t00_no_room");
-    let nonexistent_room = "mxdx-e2e-nonexistent-room-does-not-exist";
-
-    let start = Instant::now();
-    let out = run_client_with_liveness(
-        &c.server_url, &c.client_user, &c.client_pass,
-        nonexistent_room, &["run", "/bin/echo", "should-not-run"],
-        store_dir.path(), keychain_dir.path(),
-    );
-    let elapsed = start.elapsed();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let exit_code = out.status.code();
-
-    eprintln!("[t00] exit_code={:?}, stderr tail: {}", exit_code, &stderr[stderr.len().saturating_sub(300)..]);
-    report("security/no-worker-room", "gate", elapsed, exit_code, 0);
-
-    // The client should fail with exit code 10 or exit code 1 with the right message
-    // (exit code 10 is the new behavior; exit 1 with the right message is also acceptable
-    // since the error may propagate through anyhow before the exit code mapping)
-    if exit_code != Some(10) && exit_code != Some(1) {
-        security_gate_fail!(
-            "SECURITY GATE FAILED: client should exit 10 (no worker room) but exited {:?}. Stderr: {}",
-            exit_code, &stderr[stderr.len().saturating_sub(500)..]
-        );
-    }
-    if !stderr.contains("No worker room found") && !stderr.contains("no worker") {
-        security_gate_fail!(
-            "SECURITY GATE FAILED: stderr should mention 'No worker room found'. Stderr: {}",
-            &stderr[stderr.len().saturating_sub(500)..]
-        );
-    }
-    eprintln!("[t00] PASS: client correctly rejected — no worker room");
-}
-
-/// Security gate: client must exit 11 when the worker is stale.
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + beta server"]
-async fn t01_security_stale_worker() {
-    skip_if_gate_failed!();
-    let c = load_creds().expect("test-credentials.toml required");
-    let auth_user = c.client_matrix_id();
-    let (store_dir, keychain_dir) = isolated_test_dirs("t01_stale");
-    let config_dir = tempfile::Builder::new()
-        .prefix("mxdx-config-t01-")
-        .tempdir()
-        .expect("failed to create temp config dir");
-
-    // Start worker with 1-second telemetry refresh, let it post telemetry, then kill it
-    let mut w = start_worker_with_telemetry_refresh(
-        &c.server_url, &c.worker_user, &c.worker_pass, &auth_user,
-        store_dir.path(), keychain_dir.path(), 1, config_dir.path(),
-    );
-    // Wait for worker to start and post at least one telemetry event
-    tokio::time::sleep(Duration::from_secs(8)).await;
-
-    // Kill the worker
-    let _ = w.kill();
-    let _ = w.wait();
-    eprintln!("[t01] worker killed, waiting for staleness threshold...");
-
-    // Wait for the telemetry to become stale (2 * 1s = 2s threshold, wait 5s to be safe)
-    tokio::time::sleep(Duration::from_secs(5)).await;
-
-    let worker_room = default_worker_room(&c.worker_user);
-    let start = Instant::now();
-    let out = run_client_with_liveness(
-        &c.server_url, &c.client_user, &c.client_pass,
-        &worker_room, &["run", "/bin/echo", "should-not-run"],
-        store_dir.path(), keychain_dir.path(),
-    );
-    let elapsed = start.elapsed();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let exit_code = out.status.code();
-
-    eprintln!("[t01] exit_code={:?}, stderr tail: {}", exit_code, &stderr[stderr.len().saturating_sub(300)..]);
-    report("security/stale-worker", "gate", elapsed, exit_code, 0);
-
-    // Accept exit 11 (new) or exit 1 (legacy) with the right error message
-    if exit_code == Some(0) {
-        security_gate_fail!(
-            "SECURITY GATE FAILED: client should NOT succeed when worker is stale. Stderr: {}",
-            &stderr[stderr.len().saturating_sub(500)..]
-        );
-    }
-    if !stderr.contains("stale") && !stderr.contains("No live worker") && !stderr.contains("last seen") {
-        eprintln!("[t01] WARNING: stderr doesn't contain expected stale message, but exit code was non-zero");
-    }
-    eprintln!("[t01] PASS: client correctly rejected — stale worker");
-}
-
-/// Security gate: client must exit 12 when no worker supports the requested command.
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + beta server"]
-async fn t02_security_capability_mismatch() {
-    skip_if_gate_failed!();
-    let c = load_creds().expect("test-credentials.toml required");
-    let auth_user = c.client_matrix_id();
-    let (store_dir, keychain_dir) = isolated_test_dirs("t02_capability");
-
-    // Start worker with ONLY echo allowed
-    let mut w = start_worker_with_commands(
-        &c.server_url, &c.worker_user, &c.worker_pass, &auth_user,
-        store_dir.path(), keychain_dir.path(),
-        &["echo", "/bin/echo"],
-    );
-    wait_ready().await;
-
-    // Warm up so the client can discover the room
-    let worker_room = default_worker_room(&c.worker_user);
-    let warmup = run_client(
-        &c.server_url, &c.client_user, &c.client_pass,
-        &worker_room, &["run", "/bin/echo", "warmup"],
-        store_dir.path(), keychain_dir.path(),
-    );
-    if !warmup.status.success() {
-        let stderr = String::from_utf8_lossy(&warmup.stderr);
-        eprintln!("[t02] warmup failed: {}", &stderr[stderr.len().saturating_sub(300)..]);
-    }
-
-    // Now try to run md5sum (which the worker does NOT support)
-    let start = Instant::now();
-    let out = run_client_with_liveness(
-        &c.server_url, &c.client_user, &c.client_pass,
-        &worker_room, &["run", "md5sum", "/dev/null"],
-        store_dir.path(), keychain_dir.path(),
-    );
-    let elapsed = start.elapsed();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let exit_code = out.status.code();
-
-    let _ = w.kill(); let _ = w.wait();
-
-    eprintln!("[t02] exit_code={:?}, stderr tail: {}", exit_code, &stderr[stderr.len().saturating_sub(300)..]);
-    report("security/capability-mismatch", "gate", elapsed, exit_code, 0);
-
-    // Accept exit 12 (new) or exit 1 (legacy) — must NOT succeed
-    if exit_code == Some(0) {
-        security_gate_fail!(
-            "SECURITY GATE FAILED: client should NOT succeed when worker lacks capability. Stderr: {}",
-            &stderr[stderr.len().saturating_sub(500)..]
-        );
-    }
-    if !stderr.contains("No worker supports command") && !stderr.contains("capability") {
-        eprintln!("[t02] WARNING: stderr doesn't contain expected capability message, but exit code was non-zero");
-    }
-    eprintln!("[t02] PASS: client correctly rejected — capability mismatch");
-}
-
-// ===========================================================================
-// PHASE 1 — SYNC PROFILE (start persistent worker, measure timing)
-// ===========================================================================
-
-/// Start the persistent worker, write config, and measure startup + sync timing.
-/// The warmup call uses direct mode to seed the keychain. Phase 2+ tests then
-/// use daemon mode — the daemon reads config from config_home and holds a
-/// persistent Matrix connection.
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + beta server"]
-async fn t10_start_worker_and_sync() {
-    skip_if_gate_failed!();
-    let c = load_creds().expect("test-credentials.toml required");
-    let auth_user = c.client_matrix_id();
-    let worker_room = default_worker_room(&c.worker_user);
-    let (store_dir, keychain_dir) = persistent_test_dirs();
-
-    // Write config files for daemon mode
-    let config_home = dirs::home_dir()
-        .expect("cannot resolve home dir")
-        .join(".mxdx")
-        .join("e2e-local")
-        .join("home");
-    std::fs::create_dir_all(&config_home).expect("failed to create config home");
-    write_test_config(&config_home, &c, &worker_room);
-
-    let worker_start = Instant::now();
-    let w = start_worker(
-        &c.server_url, &c.worker_user, &c.worker_pass, &auth_user,
-        &store_dir, &keychain_dir,
-    );
-    wait_ready().await;
-    let worker_startup = worker_start.elapsed();
-    report("worker-startup", "setup", worker_startup, Some(0), 0);
-
-    // Warmup: direct mode to seed keychain and establish session.
-    // This is the "cold start" — subsequent daemon calls will be fast.
-    let client_start = Instant::now();
-    let warmup = run_client(
-        &c.server_url, &c.client_user, &c.client_pass,
-        &worker_room, &["run", "/bin/true"],
-        &store_dir, &keychain_dir,
-    );
-    let client_connect = client_start.elapsed();
-    report("client-connect", "setup", client_connect, warmup.status.code(), 0);
-
-    let sync_total = worker_start.elapsed();
-    report("sync-total", "setup", sync_total, Some(0), 0);
-
-    let stderr = String::from_utf8_lossy(&warmup.stderr);
-    if stderr.contains("fresh login completed") {
-        eprintln!("[t10] connection type: fresh login (cold start)");
-    } else if stderr.contains("session restored successfully") {
-        eprintln!("[t10] connection type: session restore (warm start)");
-    }
-
-    if !warmup.status.success() {
-        eprintln!("[t10] WARNING: warmup command failed: {}", &stderr[stderr.len().saturating_sub(500)..]);
-    }
-
-    // Store shared state for Phase 2+ tests
-    let _ = SHARED_STATE.set(SharedTestState {
-        worker: Mutex::new(w),
-        worker_room,
-        creds: c,
-        store_dir,
-        keychain_dir,
-        config_home,
-    });
-
-    eprintln!("[t10] persistent worker started, shared state initialized");
-}
-
-// ===========================================================================
-// PHASE 2 — LOCAL TESTS (reuse shared worker, single server)
-// ===========================================================================
-
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + beta server"]
-async fn t20_echo_local() {
-    skip_if_gate_failed!();
-    let state = SHARED_STATE.get().expect("t10 must run first");
-
-    let start = Instant::now();
-    let out = run_client_daemon(
-        &state.config_home, &["run", "/bin/echo", "hello", "world"],
-        &state.store_dir, &state.keychain_dir,
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
-    report("echo", "mxdx-local-daemon", start.elapsed(), out.status.code(), stdout.lines().count());
-}
-
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + beta server"]
-async fn t21_exit_code_local() {
-    skip_if_gate_failed!();
-    let state = SHARED_STATE.get().expect("t10 must run first");
-
-    let start = Instant::now();
-    let out = run_client_daemon(
-        &state.config_home, &["run", "/bin/false"],
-        &state.store_dir, &state.keychain_dir,
-    );
-    assert!(!out.status.success());
-    report("exit-code(/bin/false)", "mxdx-local-daemon", start.elapsed(), out.status.code(), 0);
-}
-
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + beta server"]
-async fn t22_md5sum_local() {
-    skip_if_gate_failed!();
-    let state = SHARED_STATE.get().expect("t10 must run first");
-
-    let fp = large_file(10_000);
-    let script = md5_script(&fp);
-    let start = Instant::now();
-    let out = run_client_daemon(
-        &state.config_home, &["run", "--", "/bin/sh", "-c", &script],
-        &state.store_dir, &state.keychain_dir,
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
-    report("md5sum(10k lines)", "mxdx-local-daemon", start.elapsed(), out.status.code(), stdout.lines().count());
-    let _ = std::fs::remove_file(&fp);
-}
-
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + beta server + network"]
-async fn t23_ping_local() {
-    skip_if_gate_failed!();
-    let state = SHARED_STATE.get().expect("t10 must run first");
-
-    let start = Instant::now();
-    let out = run_client_daemon(
-        &state.config_home, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"],
-        &state.store_dir, &state.keychain_dir,
-    );
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
-    report("ping(30s)", "mxdx-local", start.elapsed(), out.status.code(), stdout.lines().count());
-}
-
-// ===========================================================================
-// PHASE 3 — FEDERATED TESTS (own isolated worker + client instances)
-// ===========================================================================
-
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + both beta servers"]
-async fn t30_echo_federated() {
-    skip_if_gate_failed!();
-    let c = load_creds().expect("test-credentials.toml required");
-    let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
-    let auth_user = c.client_matrix_id_on(s2);
-    let worker_room = default_worker_room(&c.worker_user);
-    let (store_dir, keychain_dir) = isolated_test_dirs("t30_echo_fed");
-    let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
-                              s2, &c.client_user, &c.client_pass,
-                              &auth_user, store_dir.path(), keychain_dir.path()).await;
-
-    let start = Instant::now();
-    let out = run_client(s2, &c.client_user, &c.client_pass, &worker_room, &["run", "/bin/echo", "hello", "world"], store_dir.path(), keychain_dir.path());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
-    report("echo", "mxdx-federated", start.elapsed(), out.status.code(), stdout.lines().count());
-
-    let _ = w.kill(); let _ = w.wait();
-}
-
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + both beta servers"]
-async fn t31_exit_code_federated() {
-    skip_if_gate_failed!();
-    let c = load_creds().expect("test-credentials.toml required");
-    let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
-    let auth_user = c.client_matrix_id_on(s2);
-    let worker_room = default_worker_room(&c.worker_user);
-    let (store_dir, keychain_dir) = isolated_test_dirs("t31_exit_fed");
-    let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
-                              s2, &c.client_user, &c.client_pass,
-                              &auth_user, store_dir.path(), keychain_dir.path()).await;
-
-    let start = Instant::now();
-    let out = run_client(s2, &c.client_user, &c.client_pass, &worker_room, &["run", "/bin/false"], store_dir.path(), keychain_dir.path());
-    assert!(!out.status.success());
-    report("exit-code(/bin/false)", "mxdx-federated", start.elapsed(), out.status.code(), 0);
-
-    let _ = w.kill(); let _ = w.wait();
-}
-
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + both beta servers"]
-async fn t32_md5sum_federated() {
-    skip_if_gate_failed!();
-    let c = load_creds().expect("test-credentials.toml required");
-    let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
-    let auth_user = c.client_matrix_id_on(s2);
-    let worker_room = default_worker_room(&c.worker_user);
-    let (store_dir, keychain_dir) = isolated_test_dirs("t32_md5_fed");
-    let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
-                              s2, &c.client_user, &c.client_pass,
-                              &auth_user, store_dir.path(), keychain_dir.path()).await;
-
-    let fp = large_file(10_000);
-    let script = md5_script(&fp);
-    let start = Instant::now();
-    let out = run_client(s2, &c.client_user, &c.client_pass, &worker_room, &["run", "--", "/bin/sh", "-c", &script], store_dir.path(), keychain_dir.path());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
-    report("md5sum(10k lines)", "mxdx-federated", start.elapsed(), out.status.code(), stdout.lines().count());
-
-    let _ = std::fs::remove_file(&fp);
-    let _ = w.kill(); let _ = w.wait();
-}
-
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + both beta servers + network"]
-async fn t33_ping_federated() {
-    skip_if_gate_failed!();
-    let c = load_creds().expect("test-credentials.toml required");
-    let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
-    let auth_user = c.client_matrix_id_on(s2);
-    let worker_room = default_worker_room(&c.worker_user);
-    let (store_dir, keychain_dir) = isolated_test_dirs("t33_ping_fed");
-    let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
-                              s2, &c.client_user, &c.client_pass,
-                              &auth_user, store_dir.path(), keychain_dir.path()).await;
-
-    let start = Instant::now();
-    let out = run_client(s2, &c.client_user, &c.client_pass, &worker_room, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"], store_dir.path(), keychain_dir.path());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
-    report("ping(30s)", "mxdx-federated", start.elapsed(), out.status.code(), stdout.lines().count());
-
-    let _ = w.kill(); let _ = w.wait();
-}
-
-// ===========================================================================
-// PHASE 4 — SPECIAL TESTS
-// ===========================================================================
-
-/// Explicit --room-name override test.
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + beta server"]
-async fn t40_echo_explicit_room_name() {
-    skip_if_gate_failed!();
-    let c = load_creds().expect("test-credentials.toml required");
-    let auth_user = c.client_matrix_id();
-    let explicit_room = "mxdx-e2e-profile-explicit";
-    let (store_dir, keychain_dir) = isolated_test_dirs("t40_explicit_room");
-    let mut w = setup_worker_with_room(&c.server_url, &c.worker_user, &c.worker_pass,
-                                        &c.server_url, &c.client_user, &c.client_pass,
-                                        explicit_room, &auth_user,
-                                        store_dir.path(), keychain_dir.path()).await;
-
-    let start = Instant::now();
-    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, explicit_room, &["run", "/bin/echo", "explicit", "room"], store_dir.path(), keychain_dir.path());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
-    report("echo(explicit-room)", "mxdx-local", start.elapsed(), out.status.code(), stdout.lines().count());
-
-    let _ = w.kill(); let _ = w.wait();
-}
-
-/// Session restore test — verifies device reuse across restarts.
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + beta server"]
-async fn t41_session_restore() {
-    skip_if_gate_failed!();
-    let c = load_creds().expect("test-credentials.toml required");
-    let auth_user = c.client_matrix_id();
-    let (store_dir, keychain_dir) = isolated_test_dirs("t41_session_restore");
-
-    // --- First run: start worker, let it initialize and save session ---
-    eprintln!("[t41] starting first worker run");
-    let mut w1 = start_worker(&c.server_url, &c.worker_user, &c.worker_pass, &auth_user,
-                               store_dir.path(), keychain_dir.path());
-    tokio::time::sleep(Duration::from_secs(15)).await;
-
-    let _ = w1.kill();
-    let _ = w1.wait();
-    let stderr1 = worker_log_contents();
-    eprintln!("[t41] first run log (last 500 chars): {}", &stderr1[stderr1.len().saturating_sub(500)..]);
-
-    let first_logged_in = stderr1.contains("fresh login completed")
-        || stderr1.contains("session restored successfully")
-        || stderr1.contains("connected to Matrix");
-    if !first_logged_in {
-        eprintln!("[t41] WARNING: first run may not have logged in successfully");
-    }
-
-    tokio::time::sleep(Duration::from_secs(2)).await;
-
-    // --- Second run: verify it attempts session restore ---
-    eprintln!("[t41] starting second worker run (should restore session)");
-    let mut w2 = start_worker(&c.server_url, &c.worker_user, &c.worker_pass, &auth_user,
-                               store_dir.path(), keychain_dir.path());
-    tokio::time::sleep(Duration::from_secs(15)).await;
-
-    let _ = w2.kill();
-    let _ = w2.wait();
-    let stderr2 = worker_log_contents();
-    eprintln!("[t41] second run log (last 500 chars): {}", &stderr2[stderr2.len().saturating_sub(500)..]);
-
-    assert!(
-        stderr2.contains("session restored successfully")
-            || stderr2.contains("attempting session restore")
-            || stderr2.contains("session restore failed"),
-        "Second run should attempt session restore (keychain should have credentials). Stderr: {}",
-        &stderr2[stderr2.len().saturating_sub(1000)..]
-    );
-    eprintln!("[t41] PASS: session restore attempted on second run");
-}
-
-// ===========================================================================
-// PHASE 5 — KEY BACKUP & ENCRYPTION SELF-HEAL TESTS
-// ===========================================================================
-
-/// Persistent test dirs with a label suffix, for tests that need multiple
-/// distinct stores (e.g. backup round-trip with worker A vs worker B).
-/// Layout: `~/.mxdx/e2e-{label}/store` and `~/.mxdx/e2e-{label}/keychain`.
-fn persistent_test_dirs_named(label: &str) -> (PathBuf, PathBuf) {
-    let base = dirs::home_dir()
-        .expect("cannot resolve home dir")
-        .join(".mxdx")
-        .join(format!("e2e-{label}"));
-    let store = base.join("store");
-    let keychain = base.join("keychain");
-    std::fs::create_dir_all(&store).expect("failed to create persistent store dir");
-    std::fs::create_dir_all(&keychain).expect("failed to create persistent keychain dir");
-    (store, keychain)
-}
-
-/// t11 — Backup round trip across distinct store dirs.
-///
-/// Worker A logs in fresh, posts an encrypted session, then exits. Worker B
-/// starts with a *different* persistent store_dir (no on-disk crypto overlap
-/// with A) and must successfully restore the room key from server-side key
-/// backup in order to decrypt new traffic.
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + beta server"]
-async fn t11_backup_round_trip() {
-    skip_if_gate_failed!();
-    let c = match load_creds() {
-        Some(c) => c,
-        None => return,
-    };
-    let auth_user = c.client_matrix_id();
-    let worker_room = default_worker_room(&c.worker_user);
-
-    // --- Phase 1: worker A creates the backup and posts a session ---
-    let (store_a, kc_a) = persistent_test_dirs_named("t11-a");
-    let config_a = tempfile::Builder::new()
-        .prefix("mxdx-config-t11a-")
-        .tempdir()
-        .expect("failed to create temp config dir");
-    write_test_config(config_a.path(), &c, &worker_room);
-
-    let mut worker_a = start_worker(
-        &c.server_url, &c.worker_user, &c.worker_pass, &auth_user,
-        &store_a, &kc_a,
-    );
-    wait_ready().await;
-
-    let out_a = run_client_daemon(
-        config_a.path(),
-        &["run", "/bin/echo", "round-trip-marker"],
-        &store_a,
-        &kc_a,
-    );
-    if !out_a.status.success() {
-        let stderr = String::from_utf8_lossy(&out_a.stderr);
-        eprintln!(
-            "[t11] phase 1 client output (non-fatal): {}",
-            &stderr[stderr.len().saturating_sub(500)..]
-        );
-    }
-    let _ = worker_a.kill();
-    let _ = worker_a.wait();
-
-    // --- Phase 2: worker B uses a FRESH store_dir (no crypto overlap with A) ---
-    let (store_b, kc_b) = persistent_test_dirs_named("t11-b");
-    let _ = std::fs::remove_dir_all(&store_b);
-    let _ = std::fs::remove_dir_all(&kc_b);
-    std::fs::create_dir_all(&store_b).unwrap();
-    std::fs::create_dir_all(&kc_b).unwrap();
-
-    let config_b = tempfile::Builder::new()
-        .prefix("mxdx-config-t11b-")
-        .tempdir()
-        .expect("failed to create temp config dir");
-    write_test_config(config_b.path(), &c, &worker_room);
-
-    let mut worker_b = start_worker(
-        &c.server_url, &c.worker_user, &c.worker_pass, &auth_user,
-        &store_b, &kc_b,
-    );
-    tokio::time::sleep(Duration::from_secs(20)).await;
-
-    let out_b = run_client_daemon(
-        config_b.path(),
-        &["run", "/bin/echo", "after-backup-restore"],
-        &store_b,
-        &kc_b,
-    );
-    let _ = worker_b.kill();
-    let _ = worker_b.wait();
-
-    if !out_b.status.success() {
-        let stderr = String::from_utf8_lossy(&out_b.stderr);
-        security_gate_fail!(
-            "t11: second worker failed to decrypt after backup restore: exit={:?} stderr={}",
-            out_b.status.code(),
-            &stderr[stderr.len().saturating_sub(800)..]
-        );
-    }
-    eprintln!("[t11] PASS: backup round trip across distinct store dirs");
-}
-
-/// Login to Matrix via REST and return an access token. Used by helpers that
-/// need to call the client API directly without spinning up a full SDK client.
-async fn rest_login_token(server_url: &str, user: &str, pass: &str) -> anyhow::Result<String> {
+/// Login to Matrix via REST and return an access token.
+async fn rest_login_token(server_url: &str, user: &str, pass: &str) -> Result<String> {
     let url = format!("{}/_matrix/client/v3/login", server_url.trim_end_matches('/'));
     let body = serde_json::json!({
         "type": "m.login.password",
@@ -1200,7 +919,7 @@ async fn rest_login_token(server_url: &str, user: &str, pass: &str) -> anyhow::R
     let client = reqwest::Client::new();
     let resp = client.post(&url).json(&body).send().await?;
     if !resp.status().is_success() {
-        anyhow::bail!("rest_login: HTTP {}", resp.status());
+        bail!("rest_login: HTTP {}", resp.status());
     }
     let v: serde_json::Value = resp.json().await?;
     Ok(v["access_token"]
@@ -1209,23 +928,36 @@ async fn rest_login_token(server_url: &str, user: &str, pass: &str) -> anyhow::R
         .to_string())
 }
 
-/// Create an UNENCRYPTED room with the given name and topic via REST.
-/// Returns the new room_id. Used to seed a malformed launcher exec room so
-/// the worker can detect and tombstone it on startup.
+/// Create an UNENCRYPTED room with mxdx discovery markers via REST.
 async fn rest_create_unencrypted_room(
     creds: &TestCreds,
     name: &str,
     topic: &str,
-) -> anyhow::Result<String> {
+    launcher_id: &str,
+    role: &str,
+) -> Result<String> {
     let token = rest_login_token(&creds.server_url, &creds.worker_user, &creds.worker_pass).await?;
     let url = format!(
         "{}/_matrix/client/v3/createRoom",
         creds.server_url.trim_end_matches('/')
     );
+    let mut creation_content = serde_json::Map::new();
+    if role == "space" {
+        creation_content.insert("type".to_string(), serde_json::Value::String("m.space".to_string()));
+    }
+    creation_content.insert(
+        "org.mxdx.launcher_id".to_string(),
+        serde_json::Value::String(launcher_id.to_string()),
+    );
+    creation_content.insert(
+        "org.mxdx.role".to_string(),
+        serde_json::Value::String(role.to_string()),
+    );
     let body = serde_json::json!({
         "name": name,
         "topic": topic,
         "preset": "private_chat",
+        "creation_content": serde_json::Value::Object(creation_content),
     });
     let client = reqwest::Client::new();
     let resp = client
@@ -1237,7 +969,7 @@ async fn rest_create_unencrypted_room(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        anyhow::bail!("rest_create_unencrypted_room: HTTP {}: {}", status, text);
+        bail!("rest_create_unencrypted_room: HTTP {}: {}", status, text);
     }
     let v: serde_json::Value = resp.json().await?;
     Ok(v["room_id"]
@@ -1246,9 +978,8 @@ async fn rest_create_unencrypted_room(
         .to_string())
 }
 
-/// Fetch the m.room.tombstone state event for a room. Returns Ok(None) if the
-/// room has no tombstone (404). Returns Ok(Some(replacement_room_id)) on hit.
-async fn rest_get_tombstone(creds: &TestCreds, room_id: &str) -> anyhow::Result<Option<String>> {
+/// Fetch the m.room.tombstone state event for a room.
+async fn rest_get_tombstone(creds: &TestCreds, room_id: &str) -> Result<Option<String>> {
     let token = rest_login_token(&creds.server_url, &creds.worker_user, &creds.worker_pass).await?;
     let url = format!(
         "{}/_matrix/client/v3/rooms/{}/state/m.room.tombstone/",
@@ -1261,7 +992,7 @@ async fn rest_get_tombstone(creds: &TestCreds, room_id: &str) -> anyhow::Result<
         return Ok(None);
     }
     if !resp.status().is_success() {
-        anyhow::bail!("rest_get_tombstone: HTTP {}", resp.status());
+        bail!("rest_get_tombstone: HTTP {}", resp.status());
     }
     let v: serde_json::Value = resp.json().await?;
     Ok(v.get("replacement_room")
@@ -1269,245 +1000,972 @@ async fn rest_get_tombstone(creds: &TestCreds, room_id: &str) -> anyhow::Result<
         .map(|s| s.to_string()))
 }
 
-/// t12 — Worker self-heals an unencrypted launcher exec room.
-///
-/// We pre-create an UNENCRYPTED room with the exact topic the worker expects
-/// (`org.mxdx.launcher.exec:{launcher_id}`) via direct REST. When the worker
-/// starts up, its room reconciliation pass must detect that the existing room
-/// is missing m.room.encryption, tombstone it, and create an encrypted
-/// replacement. We then verify a tombstone event exists on the bad room.
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + beta server"]
-async fn t12_unencrypted_room_self_heal() {
-    skip_if_gate_failed!();
-    let c = match load_creds() {
-        Some(c) => c,
-        None => return,
-    };
-    let auth_user = c.client_matrix_id();
-    // launcher_id matches `WorkerRuntimeConfig::compute_room_name()` exactly:
-    // `{host}.{unix_user}.{worker_user_localpart}` — this is the same value
-    // the worker uses internally as `launcher_id` (see crates/mxdx-worker/src/lib.rs).
-    let launcher_id = default_worker_room(&c.worker_user);
-    let topic = format!("org.mxdx.launcher.exec:{launcher_id}");
+// ---------------------------------------------------------------------------
+// Preset parsing
+// ---------------------------------------------------------------------------
 
-    let bad_room = match rest_create_unencrypted_room(&c, "mxdx-test-bad", &topic).await {
-        Ok(id) => id,
-        Err(e) => security_gate_fail!("t12: failed to seed unencrypted room: {}", e),
-    };
-    eprintln!("[t12] seeded unencrypted exec room: {}", bad_room);
-
-    let (store, kc) = persistent_test_dirs_named("t12");
-    let _ = std::fs::remove_dir_all(&store);
-    let _ = std::fs::remove_dir_all(&kc);
-    std::fs::create_dir_all(&store).unwrap();
-    std::fs::create_dir_all(&kc).unwrap();
-
-    let mut worker = start_worker(
-        &c.server_url, &c.worker_user, &c.worker_pass, &auth_user,
-        &store, &kc,
-    );
-    tokio::time::sleep(Duration::from_secs(20)).await;
-
-    let tomb = rest_get_tombstone(&c, &bad_room).await;
-    let _ = worker.kill();
-    let _ = worker.wait();
-
-    match tomb {
-        Ok(Some(replacement)) => {
-            eprintln!("[t12] PASS: bad room tombstoned -> {}", replacement);
-        }
-        Ok(None) => {
-            security_gate_fail!("t12: worker did not tombstone the unencrypted room {}", bad_room);
-        }
-        Err(e) => security_gate_fail!("t12: tombstone lookup failed: {}", e),
+fn parse_preset() -> Vec<u8> {
+    let preset = std::env::var("E2E_PRESET").unwrap_or_else(|_| "default".to_string());
+    match preset.as_str() {
+        "quick"   => vec![0, 1, 2, 3, 5, 7],
+        "default" => vec![0, 1, 2, 3, 5, 6, 7],
+        "full"    => vec![0, 1, 2, 3, 4, 5, 6, 7],
+        other     => panic!("Unknown E2E_PRESET: {other}. Use quick, default, or full."),
     }
 }
 
-/// t13 — `mxdx-client diagnose --decrypt` surfaces decrypted state events.
-///
-/// Generates a recent encrypted session event so there's something to
-/// decrypt, then runs `mxdx-client diagnose --decrypt` and verifies the
-/// emitted JSON has a non-empty top-level `decrypted_state` map. The shape
-/// is `{ "{room_id}:{event_type}:{state_key}": value, ... }` (see
-/// `crates/mxdx-client/src/diagnose.rs`, the `decrypted_state` insert).
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + beta server"]
-async fn t13_diagnose_decrypts_state() {
-    skip_if_gate_failed!();
-    let c = match load_creds() {
-        Some(c) => c,
-        None => return,
-    };
-    let auth_user = c.client_matrix_id();
-    let worker_room = default_worker_room(&c.worker_user);
+fn should_run(phases: &[u8], phase: u8) -> bool {
+    // Required phases always run
+    matches!(phase, 1 | 5 | 7) || phases.contains(&phase)
+}
 
-    // Bring up a worker so the launcher rooms exist with encrypted state.
-    let (store, kc) = persistent_test_dirs_named("t13");
-    let config_home = tempfile::Builder::new()
-        .prefix("mxdx-config-t13-")
-        .tempdir()
-        .expect("failed to create temp config dir");
-    write_test_config(config_home.path(), &c, &worker_room);
+// ===========================================================================
+// PHASE 0 — SECURITY GATES
+// ===========================================================================
 
-    let mut worker = start_worker(
-        &c.server_url, &c.worker_user, &c.worker_pass, &auth_user,
-        &store, &kc,
-    );
-    wait_ready().await;
+async fn phase_0(creds: &TestCreds) -> Result<()> {
+    eprintln!("\n=== Phase 0: Security Gates ===");
 
-    // Produce a recent encrypted session event so there's state to decrypt.
-    let _ = run_client_daemon(
-        config_home.path(),
-        &["run", "/bin/echo", "t13-marker"],
-        &store,
-        &kc,
-    );
+    // t00: no worker room
+    {
+        eprintln!("[t00] testing: no worker room...");
+        let (store_dir, keychain_dir) = isolated_test_dirs("t00_no_room");
+        let nonexistent_room = "mxdx-e2e-nonexistent-room-does-not-exist";
 
-    // Now run diagnose --decrypt as the worker user (so it has access to the
-    // encrypted state events in its own launcher rooms).
-    let client_bin = cargo_bin("mxdx-client");
-    let out = Command::new(client_bin)
-        .args([
-            "diagnose",
-            "--decrypt",
-            "--homeserver", &c.server_url,
-            "--username", &c.worker_user,
-            "--password", &c.worker_pass,
-        ])
-        .env("MXDX_STORE_DIR", store.to_str().unwrap())
-        .env("MXDX_KEYCHAIN_DIR", kc.to_str().unwrap())
-        .env("MXDX_KEEP_PASSWORDS", "1")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .expect("diagnose failed to run");
-
-    let _ = worker.kill();
-    let _ = worker.wait();
-
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        security_gate_fail!(
-            "t13: diagnose --decrypt exit {:?} stderr={}",
-            out.status.code(),
-            &stderr[stderr.len().saturating_sub(500)..]
+        let start = Instant::now();
+        let out = run_client_with_liveness(
+            &creds.server_url, &creds.client_user, &creds.client_pass,
+            nonexistent_room, &["run", "/bin/echo", "should-not-run"],
+            store_dir.path(), keychain_dir.path(),
         );
+        let elapsed = start.elapsed();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let exit_code = out.status.code();
+
+        eprintln!("[t00] exit_code={:?}, stderr tail: {}", exit_code, &stderr[stderr.len().saturating_sub(300)..]);
+        report("security/no-worker-room", "gate", elapsed, exit_code, 0);
+
+        if exit_code != Some(10) && exit_code != Some(1) {
+            bail!("SECURITY GATE FAILED: client should exit 10 (no worker room) but exited {:?}", exit_code);
+        }
+        if !stderr.contains("No worker room found") && !stderr.contains("no worker") {
+            bail!("SECURITY GATE FAILED: stderr should mention 'No worker room found'");
+        }
+        eprintln!("[t00] PASS: client correctly rejected — no worker room");
     }
 
-    let json: serde_json::Value = match serde_json::from_slice(&out.stdout) {
-        Ok(v) => v,
-        Err(e) => {
+    // t01: stale worker
+    {
+        eprintln!("[t01] testing: stale worker...");
+        let auth_user = creds.client_matrix_id();
+        let (store_dir, keychain_dir) = isolated_test_dirs("t01_stale");
+        let config_dir = tempfile::Builder::new()
+            .prefix("mxdx-config-t01-")
+            .tempdir()
+            .expect("failed to create temp config dir");
+
+        let mut w = start_worker_with_telemetry_refresh(
+            &creds.server_url, &creds.worker_user, &creds.worker_pass, &auth_user,
+            store_dir.path(), keychain_dir.path(), 1, config_dir.path(),
+        );
+        tokio::time::sleep(Duration::from_secs(8)).await;
+
+        let _ = w.kill();
+        let _ = w.wait();
+        eprintln!("[t01] worker killed, waiting for staleness threshold...");
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let worker_room = default_worker_room(&creds.worker_user);
+        let start = Instant::now();
+        let out = run_client_with_liveness(
+            &creds.server_url, &creds.client_user, &creds.client_pass,
+            &worker_room, &["run", "/bin/echo", "should-not-run"],
+            store_dir.path(), keychain_dir.path(),
+        );
+        let elapsed = start.elapsed();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let exit_code = out.status.code();
+
+        eprintln!("[t01] exit_code={:?}, stderr tail: {}", exit_code, &stderr[stderr.len().saturating_sub(300)..]);
+        report("security/stale-worker", "gate", elapsed, exit_code, 0);
+
+        if exit_code == Some(0) {
+            bail!("SECURITY GATE FAILED: client should NOT succeed when worker is stale");
+        }
+        if !stderr.contains("stale") && !stderr.contains("No live worker") && !stderr.contains("last seen") {
+            eprintln!("[t01] WARNING: stderr doesn't contain expected stale message, but exit code was non-zero");
+        }
+        eprintln!("[t01] PASS: client correctly rejected — stale worker");
+    }
+
+    // t02: capability mismatch
+    {
+        eprintln!("[t02] testing: capability mismatch...");
+        let auth_user = creds.client_matrix_id();
+        let (store_dir, keychain_dir) = isolated_test_dirs("t02_capability");
+
+        eprintln!("[t02] starting isolated worker (echo-only)...");
+        let offset = worker_log_offset();
+        let mut w = start_worker_with_commands(
+            &creds.server_url, &creds.worker_user, &creds.worker_pass, &auth_user,
+            store_dir.path(), keychain_dir.path(),
+            &["echo", "/bin/echo"],
+        );
+        wait_worker_ready(Duration::from_secs(120), offset).await.expect("temp worker startup timed out");
+
+        let worker_room = default_worker_room(&creds.worker_user);
+        eprintln!("[t02] running warmup...");
+        let warmup = run_client(
+            &creds.server_url, &creds.client_user, &creds.client_pass,
+            &worker_room, &["run", "/bin/echo", "warmup"],
+            store_dir.path(), keychain_dir.path(), 330,
+        );
+        if !warmup.status.success() {
+            let stderr = String::from_utf8_lossy(&warmup.stderr);
+            eprintln!("[t02] warmup failed: {}", &stderr[stderr.len().saturating_sub(300)..]);
+        }
+
+        eprintln!("[t02] running liveness check (md5sum should be rejected)...");
+        let start = Instant::now();
+        let out = run_client_with_liveness(
+            &creds.server_url, &creds.client_user, &creds.client_pass,
+            &worker_room, &["run", "md5sum", "/dev/null"],
+            store_dir.path(), keychain_dir.path(),
+        );
+        let elapsed = start.elapsed();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let exit_code = out.status.code();
+
+        let _ = w.kill(); let _ = w.wait();
+
+        eprintln!("[t02] exit_code={:?}, stderr tail: {}", exit_code, &stderr[stderr.len().saturating_sub(300)..]);
+        report("security/capability-mismatch", "gate", elapsed, exit_code, 0);
+
+        if exit_code == Some(0) {
+            bail!("SECURITY GATE FAILED: client should NOT succeed when worker lacks capability");
+        }
+        if !stderr.contains("No worker supports command") && !stderr.contains("capability") {
+            eprintln!("[t02] WARNING: stderr doesn't contain expected capability message, but exit code was non-zero");
+        }
+        eprintln!("[t02] PASS: client correctly rejected — capability mismatch");
+    }
+
+    Ok(())
+}
+
+// ===========================================================================
+// PHASE 1 — SETUP WORKER (start persistent worker, authorize both s1 + s2)
+// ===========================================================================
+
+async fn phase_1(creds: &TestCreds) -> Result<TestContext> {
+    eprintln!("\n=== Phase 1: Setup Worker ===");
+
+    let worker_room = default_worker_room(&creds.worker_user);
+    let (store_dir, keychain_dir) = persistent_test_dirs();
+
+    let config_home = dirs::home_dir()
+        .expect("cannot resolve home dir")
+        .join(".mxdx")
+        .join("e2e-local")
+        .join("home");
+    std::fs::create_dir_all(&config_home).expect("failed to create config home");
+    write_test_config(&config_home, creds, &worker_room);
+
+    // Authorize both s1 and s2 client IDs so the same worker handles both
+    // local and federated tests.
+    let auth_s1 = creds.client_matrix_id();
+    let auth_s2 = creds.server2_url.as_ref().map(|s2| creds.client_matrix_id_on(s2));
+
+    let mut args = vec![
+        "start".to_string(),
+        "--homeserver".to_string(), creds.server_url.clone(),
+        "--username".to_string(), creds.worker_user.clone(),
+        "--password".to_string(), creds.worker_pass.clone(),
+        "--authorized-user".to_string(), auth_s1.clone(),
+    ];
+    if let Some(ref s2_id) = auth_s2 {
+        args.push("--authorized-user".to_string());
+        args.push(s2_id.clone());
+    }
+    for cmd in ALLOWED_COMMANDS {
+        args.push("--allowed-command".to_string());
+        args.push(cmd.to_string());
+    }
+    let (out, err) = worker_log_files();
+    let mut cmd = Command::new(cargo_bin("mxdx-worker"));
+    cmd.args(&args)
+        .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
+        .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
+        .stdout(Stdio::from(out))
+        .stderr(Stdio::from(err));
+
+    let offset = worker_log_offset();
+    let worker_start = Instant::now();
+    let worker = spawn_child(cmd);
+
+    // Wait for the worker to be FULLY ready: synced, keys shared, telemetry
+    // posted. Replaces the old 5s sleep with actual readiness detection.
+    wait_worker_ready(Duration::from_secs(120), offset).await?;
+    report("worker-startup", "setup", worker_start.elapsed(), Some(0), 0);
+    eprintln!("[t10] worker fully ready ({:.1}s)", worker_start.elapsed().as_secs_f64());
+
+    // t11: Direct-mode warmup — seeds the client keychain + verifies the
+    // worker accepts tasks. This is a real test: must succeed within 60s.
+    {
+        let client_start = Instant::now();
+        let warmup = run_client(
+            &creds.server_url, &creds.client_user, &creds.client_pass,
+            &worker_room, &["run", "/bin/true"],
+            &store_dir, &keychain_dir, 60,
+        );
+        let client_connect = client_start.elapsed();
+        report("client-connect(direct)", "setup", client_connect, warmup.status.code(), 0);
+
+        let stderr = String::from_utf8_lossy(&warmup.stderr);
+        if stderr.contains("fresh login completed") {
+            eprintln!("[t11] connection type: fresh login (cold start)");
+        } else if stderr.contains("session restored successfully") {
+            eprintln!("[t11] connection type: session restore (warm start)");
+        }
+
+        if !warmup.status.success() {
+            bail!("{}", format_test_failure("t11", "direct-warmup(/bin/true)", &warmup, 60, false));
+        }
+        eprintln!("[t11] PASS: direct-mode client warmup OK ({:.1}s)", client_connect.as_secs_f64());
+    }
+
+    // t12: Daemon warmup — starts the daemon, waits for it to connect to
+    // Matrix and become fully synced. Must succeed within 60s.
+    eprintln!("[t12] starting daemon warmup...");
+    {
+        // Spawn the daemon by running a command through it. The daemon starts
+        // in the background, connects to Matrix, and processes the /bin/true
+        // task once ready.
+        let daemon_start = Instant::now();
+        let daemon_warmup = run_client_daemon(
+            &config_home, &["run", "/bin/true"],
+            &store_dir, &keychain_dir, 60,
+        );
+        let daemon_elapsed = daemon_start.elapsed();
+        report("daemon-warmup", "setup", daemon_elapsed, daemon_warmup.status.code(), 0);
+
+        if !daemon_warmup.status.success() {
+            bail!("{}", format_test_failure("t12", "daemon-warmup(/bin/true)", &daemon_warmup, 60, false));
+        }
+
+        // Verify the daemon reported full readiness in its log
+        wait_daemon_ready(Duration::from_secs(10)).await?;
+        eprintln!("[t12] PASS: daemon warmup OK ({:.1}s)", daemon_elapsed.as_secs_f64());
+    }
+
+    // t13: Federated (s2) daemon warmup — if a second server is configured,
+    // start a separate daemon that connects via s2. This daemon runs in
+    // parallel with the primary daemon for federated tests.
+    let config_home_s2 = if let Some(ref s2) = creds.server2_url {
+        eprintln!("[t13] starting federated (s2) daemon warmup...");
+        let ch = dirs::home_dir()
+            .expect("cannot resolve home dir")
+            .join(".mxdx")
+            .join("e2e-s2")
+            .join("home");
+        std::fs::create_dir_all(&ch).expect("failed to create s2 config home");
+
+        // Truncate the s2 daemon log
+        let s2_log = client_log_path_s2();
+        let _ = std::fs::OpenOptions::new()
+            .create(true).write(true).truncate(true)
+            .open(&s2_log);
+
+        write_test_config_for_server(
+            &ch, s2, &creds.client_user, &creds.client_pass, &worker_room,
+        );
+
+        let s2_start = Instant::now();
+        let s2_warmup = run_client_daemon_s2(
+            &ch, &["run", "/bin/true"],
+            &store_dir, &keychain_dir, 60,
+        );
+        let s2_elapsed = s2_start.elapsed();
+        report("daemon-warmup(s2)", "setup", s2_elapsed, s2_warmup.status.code(), 0);
+
+        if !s2_warmup.status.success() {
+            eprintln!("[t13] WARNING: s2 daemon warmup failed ({:.1}s, exit {:?}) — federated tests may fail",
+                s2_elapsed.as_secs_f64(), s2_warmup.status.code());
+        } else {
+            wait_daemon_ready_s2(Duration::from_secs(10)).await.ok();
+            eprintln!("[t13] PASS: s2 daemon warmup OK ({:.1}s)", s2_elapsed.as_secs_f64());
+        }
+        Some(ch)
+    } else {
+        None
+    };
+
+    report("sync-total", "setup", worker_start.elapsed(), Some(0), 0);
+
+    Ok(TestContext {
+        worker,
+        worker_room,
+        creds: TestCreds {
+            server_url: creds.server_url.clone(),
+            server2_url: creds.server2_url.clone(),
+            worker_user: creds.worker_user.clone(),
+            worker_pass: creds.worker_pass.clone(),
+            client_user: creds.client_user.clone(),
+            client_pass: creds.client_pass.clone(),
+        },
+        store_dir,
+        keychain_dir,
+        config_home,
+        config_home_s2,
+    })
+}
+
+// ===========================================================================
+// PHASE 2 — LOCAL TESTS (reuse shared worker, daemon mode)
+// ===========================================================================
+
+async fn phase_2(ctx: &TestContext) -> Result<()> {
+    eprintln!("\n=== Phase 2: Local Tests ===");
+
+    // t20: echo
+    {
+        let start = Instant::now();
+        let out = run_client_daemon(
+            &ctx.config_home, &["run", "/bin/echo", "hello", "world"],
+            &ctx.store_dir, &ctx.keychain_dir, 10,
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if !out.status.success() {
+            bail!("{}", format_test_failure("t20", "echo", &out, 10, true));
+        }
+        report("echo", "mxdx-local-daemon", start.elapsed(), out.status.code(), stdout.lines().count());
+    }
+
+    // t21: exit code
+    {
+        let start = Instant::now();
+        let out = run_client_daemon(
+            &ctx.config_home, &["run", "/bin/false"],
+            &ctx.store_dir, &ctx.keychain_dir, 10,
+        );
+        if was_timeout(&out) {
+            bail!("{}", format_test_failure("t21", "exit-code", &out, 10, true));
+        }
+        if out.status.success() {
+            bail!("t21 exit-code: expected failure but got success");
+        }
+        report("exit-code(/bin/false)", "mxdx-local-daemon", start.elapsed(), out.status.code(), 0);
+    }
+
+    // t22: md5sum
+    {
+        let fp = large_file(10_000);
+        let script = md5_script(&fp);
+        let start = Instant::now();
+        let out = run_client_daemon(
+            &ctx.config_home, &["run", "--", "/bin/sh", "-c", &script],
+            &ctx.store_dir, &ctx.keychain_dir, 330,
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let _ = std::fs::remove_file(&fp);
+        if !out.status.success() {
+            bail!("{}", format_test_failure("t22", "md5sum", &out, 330, false));
+        }
+        report("md5sum(10k lines)", "mxdx-local-daemon", start.elapsed(), out.status.code(), stdout.lines().count());
+    }
+
+    // t23: ping 30s
+    {
+        let start = Instant::now();
+        let out = run_client_daemon(
+            &ctx.config_home, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"],
+            &ctx.store_dir, &ctx.keychain_dir, 90,
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if !out.status.success() {
+            bail!("{}", format_test_failure("t23", "ping", &out, 90, false));
+        }
+        report("ping(30s)", "mxdx-local-daemon", start.elapsed(), out.status.code(), stdout.lines().count());
+    }
+
+    Ok(())
+}
+
+// ===========================================================================
+// PHASE 3 — FEDERATED TESTS (reuse persistent worker, client on s2)
+// ===========================================================================
+
+async fn phase_3(ctx: &TestContext) -> Result<()> {
+    eprintln!("\n=== Phase 3: Federated Tests ===");
+
+    let _s2 = ctx.creds.server2_url.as_deref()
+        .context("server2 required for federated tests")?;
+    let config_s2 = ctx.config_home_s2.as_ref()
+        .context("s2 daemon config not available (s2 warmup may have failed)")?;
+
+    // t30: echo federated (via s2 daemon)
+    {
+        let start = Instant::now();
+        let out = run_client_daemon_s2(
+            config_s2, &["run", "/bin/echo", "hello", "world"],
+            &ctx.store_dir, &ctx.keychain_dir, 10,
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if !out.status.success() {
+            bail!("{}", format_test_failure("t30", "echo federated", &out, 10, true));
+        }
+        report("echo", "mxdx-federated-daemon", start.elapsed(), out.status.code(), stdout.lines().count());
+    }
+
+    // t31: exit code federated
+    {
+        let start = Instant::now();
+        let out = run_client_daemon_s2(
+            config_s2, &["run", "/bin/false"],
+            &ctx.store_dir, &ctx.keychain_dir, 10,
+        );
+        if was_timeout(&out) {
+            bail!("{}", format_test_failure("t31", "exit-code federated", &out, 10, true));
+        }
+        if out.status.success() {
+            bail!("t31 exit-code federated: expected failure but got success");
+        }
+        report("exit-code(/bin/false)", "mxdx-federated-daemon", start.elapsed(), out.status.code(), 0);
+    }
+
+    // t32: md5sum federated
+    {
+        let fp = large_file(10_000);
+        let script = md5_script(&fp);
+        let start = Instant::now();
+        let out = run_client_daemon_s2(
+            config_s2, &["run", "--", "/bin/sh", "-c", &script],
+            &ctx.store_dir, &ctx.keychain_dir, 330,
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let _ = std::fs::remove_file(&fp);
+        if !out.status.success() {
+            bail!("{}", format_test_failure("t32", "md5sum federated", &out, 330, false));
+        }
+        report("md5sum(10k lines)", "mxdx-federated-daemon", start.elapsed(), out.status.code(), stdout.lines().count());
+    }
+
+    // t33: ping 30s federated
+    {
+        let start = Instant::now();
+        let out = run_client_daemon_s2(
+            config_s2, &["run", "--", "ping", "-c", "30", "-i", "1", "1.1.1.1"],
+            &ctx.store_dir, &ctx.keychain_dir, 90,
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if !out.status.success() {
+            bail!("{}", format_test_failure("t33", "ping federated", &out, 90, false));
+        }
+        report("ping(30s)", "mxdx-federated-daemon", start.elapsed(), out.status.code(), stdout.lines().count());
+    }
+
+    Ok(())
+}
+
+// ===========================================================================
+// PHASE 4 — LONG TESTS + SSH BASELINES (parallel via std::thread::spawn)
+// ===========================================================================
+
+fn phase_4(creds: &TestCreds) -> Result<()> {
+    eprintln!("\n=== Phase 4: Long + SSH Tests (parallel) ===");
+
+    // Capture values needed by threads
+    let server_url = creds.server_url.clone();
+    let server2_url = creds.server2_url.clone();
+    let worker_user = creds.worker_user.clone();
+    let client_user = creds.client_user.clone();
+    let client_pass = creds.client_pass.clone();
+    let worker_room = default_worker_room(&worker_user);
+
+    let mut handles: Vec<std::thread::JoinHandle<Result<()>>> = Vec::new();
+
+    // Long ping local — uses shared worker via --no-daemon
+    {
+        let srv = server_url.clone();
+        let cu = client_user.clone();
+        let cp = client_pass.clone();
+        let wr = worker_room.clone();
+        handles.push(std::thread::spawn(move || {
+            let (sd, kd) = isolated_test_dirs("long_ping_local");
+            let start = Instant::now();
+            let out = run_client_no_output_timeout(
+                &srv, &cu, &cp, &wr,
+                &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"],
+                sd.path(), kd.path(),
+                Duration::from_secs(60),
+                Duration::from_secs(330),
+            );
             let stdout = String::from_utf8_lossy(&out.stdout);
-            security_gate_fail!(
-                "t13: diagnose output is not valid JSON: {} stdout_tail={}",
-                e,
-                &stdout[stdout.len().saturating_sub(500)..]
+            if !out.status.success() {
+                bail!("{}", format_test_failure("t80", "long ping local", &out, 330, false));
+            }
+            report("ping(5min)", "mxdx-local", start.elapsed(), out.status.code(), stdout.lines().count());
+            Ok(())
+        }));
+    }
+
+    // Long ping federated
+    if let Some(ref s2) = server2_url {
+        let s2 = s2.clone();
+        let cu = client_user.clone();
+        let cp = client_pass.clone();
+        let wr = worker_room.clone();
+        handles.push(std::thread::spawn(move || {
+            let (sd, kd) = isolated_test_dirs("long_ping_federated");
+            let start = Instant::now();
+            let out = run_client_no_output_timeout(
+                &s2, &cu, &cp, &wr,
+                &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"],
+                sd.path(), kd.path(),
+                Duration::from_secs(60),
+                Duration::from_secs(330),
+            );
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if !out.status.success() {
+                bail!("{}", format_test_failure("t81", "long ping federated", &out, 330, false));
+            }
+            report("ping(5min)", "mxdx-federated", start.elapsed(), out.status.code(), stdout.lines().count());
+            Ok(())
+        }));
+    }
+
+    // SSH baselines (4 threads)
+    handles.push(std::thread::spawn(|| {
+        let start = Instant::now();
+        let out = run_ssh(&["/bin/echo", "hello", "world"]);
+        report("echo", "ssh", start.elapsed(), out.status.code(), String::from_utf8_lossy(&out.stdout).lines().count());
+        Ok(())
+    }));
+
+    handles.push(std::thread::spawn(|| {
+        let start = Instant::now();
+        let out = run_ssh(&["/bin/false"]);
+        report("exit-code(/bin/false)", "ssh", start.elapsed(), out.status.code(), 0);
+        Ok(())
+    }));
+
+    handles.push(std::thread::spawn(|| {
+        let fp = large_file(10_000);
+        let start = Instant::now();
+        let out = run_ssh_script(&md5_script(&fp));
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        report("md5sum(10k lines)", "ssh", start.elapsed(), out.status.code(), stdout.lines().count());
+        let _ = std::fs::remove_file(&fp);
+        Ok(())
+    }));
+
+    handles.push(std::thread::spawn(|| {
+        let start = Instant::now();
+        let out = run_ssh(&["ping", "-c", "30", "-i", "1", "1.1.1.1"]);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        report("ping(30s)", "ssh", start.elapsed(), out.status.code(), stdout.lines().count());
+        Ok(())
+    }));
+
+    // Collect results — all threads run to completion
+    let mut errors = Vec::new();
+    for h in handles {
+        match h.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => errors.push(format!("{e}")),
+            Err(_) => errors.push("thread panicked".to_string()),
+        }
+    }
+
+    if !errors.is_empty() {
+        bail!("Phase 4 failures:\n  {}", errors.join("\n  "));
+    }
+
+    Ok(())
+}
+
+// ===========================================================================
+// PHASE 5 — SHUTDOWN WORKER
+// ===========================================================================
+
+fn phase_5(ctx: &mut TestContext) {
+    eprintln!("\n=== Phase 5: Shutdown Worker ===");
+    kill_worker_graceful(&mut ctx.worker);
+    eprintln!("[phase5] worker shut down");
+}
+
+// ===========================================================================
+// PHASE 6 — SPECIAL TESTS (each spins up its own isolated worker as needed)
+// ===========================================================================
+
+async fn phase_6(creds: &TestCreds) -> Result<()> {
+    eprintln!("\n=== Phase 6: Special Tests ===");
+
+    // t40: explicit room name
+    {
+        let auth_user = creds.client_matrix_id();
+        let explicit_room = "mxdx-e2e-profile-explicit";
+        let (store_dir, keychain_dir) = isolated_test_dirs("t40_explicit_room");
+        let mut w = setup_worker_with_room(
+            &creds.server_url, &creds.worker_user, &creds.worker_pass,
+            &creds.server_url, &creds.client_user, &creds.client_pass,
+            explicit_room, &auth_user,
+            store_dir.path(), keychain_dir.path(),
+        ).await;
+
+        let start = Instant::now();
+        let out = run_client(
+            &creds.server_url, &creds.client_user, &creds.client_pass,
+            explicit_room, &["run", "/bin/echo", "explicit", "room"],
+            store_dir.path(), keychain_dir.path(), 330,
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let _ = w.kill(); let _ = w.wait();
+        if !out.status.success() {
+            bail!("{}", format_test_failure("t40", "explicit room", &out, 330, false));
+        }
+        report("echo(explicit-room)", "mxdx-local", start.elapsed(), out.status.code(), stdout.lines().count());
+        eprintln!("[t40] PASS");
+    }
+
+    // t41: session restore
+    {
+        let auth_user = creds.client_matrix_id();
+        let (store_dir, keychain_dir) = isolated_test_dirs("t41_session_restore");
+
+        eprintln!("[t41] starting first worker run");
+        let mut w1 = start_worker(
+            &creds.server_url, &creds.worker_user, &creds.worker_pass, &auth_user,
+            store_dir.path(), keychain_dir.path(),
+        );
+        tokio::time::sleep(Duration::from_secs(15)).await;
+
+        let _ = w1.kill();
+        let _ = w1.wait();
+        let stderr1 = worker_log_contents();
+        eprintln!("[t41] first run log (last 500 chars): {}", &stderr1[stderr1.len().saturating_sub(500)..]);
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+
+        eprintln!("[t41] starting second worker run (should restore session)");
+        let mut w2 = start_worker(
+            &creds.server_url, &creds.worker_user, &creds.worker_pass, &auth_user,
+            store_dir.path(), keychain_dir.path(),
+        );
+        tokio::time::sleep(Duration::from_secs(15)).await;
+
+        let _ = w2.kill();
+        let _ = w2.wait();
+        let stderr2 = worker_log_contents();
+        eprintln!("[t41] second run log (last 500 chars): {}", &stderr2[stderr2.len().saturating_sub(500)..]);
+
+        if !stderr2.contains("session restored successfully")
+            && !stderr2.contains("attempting session restore")
+            && !stderr2.contains("session restore failed")
+        {
+            bail!(
+                "t41: Second run should attempt session restore. Stderr: {}",
+                &stderr2[stderr2.len().saturating_sub(1000)..]
             );
         }
-    };
-
-    // Top-level `decrypted_state` is a flat map keyed by
-    // `{room_id}:{event_type}:{state_key}` — verify it's present and non-empty.
-    let found = json
-        .get("decrypted_state")
-        .and_then(|d| d.as_object())
-        .map(|o| !o.is_empty())
-        .unwrap_or(false);
-    if !found {
-        // Surface decrypt_error if present so debugging is easier.
-        let err = json.get("decrypt_error").cloned().unwrap_or(serde_json::Value::Null);
-        security_gate_fail!(
-            "t13: diagnose --decrypt produced no decrypted_state events. decrypt_error={}",
-            err
-        );
+        eprintln!("[t41] PASS: session restore attempted on second run");
     }
-    eprintln!("[t13] PASS: diagnose --decrypt surfaced decrypted state events");
+
+    // t42: backup round trip
+    {
+        let auth_user = creds.client_matrix_id();
+        let explicit_room = "mxdx-e2e-t42-backup-round-trip";
+
+        let (store_a, kc_a) = persistent_test_dirs_named("t42-a");
+        let config_a = tempfile::Builder::new()
+            .prefix("mxdx-config-t42a-")
+            .tempdir()
+            .expect("failed to create temp config dir");
+        write_test_config(config_a.path(), creds, explicit_room);
+
+        let offset_a = worker_log_offset();
+        let mut worker_a = start_worker_with_room(
+            &creds.server_url, &creds.worker_user, &creds.worker_pass, explicit_room, &auth_user,
+            &store_a, &kc_a,
+        );
+        wait_worker_ready(Duration::from_secs(120), offset_a).await.expect("temp worker startup timed out");
+
+        let out_a = run_client_daemon(
+            config_a.path(),
+            &["run", "/bin/echo", "round-trip-marker"],
+            &store_a, &kc_a, 330,
+        );
+        if !out_a.status.success() {
+            let stderr = String::from_utf8_lossy(&out_a.stderr);
+            eprintln!("[t42] phase 1 client output (non-fatal): {}", &stderr[stderr.len().saturating_sub(500)..]);
+        }
+        kill_worker_graceful(&mut worker_a);
+
+        let (store_b, kc_b) = persistent_test_dirs_named("t42-b");
+        let _ = std::fs::remove_dir_all(&store_b);
+        let _ = std::fs::remove_dir_all(&kc_b);
+        std::fs::create_dir_all(&store_b).unwrap();
+        std::fs::create_dir_all(&kc_b).unwrap();
+
+        let config_b = tempfile::Builder::new()
+            .prefix("mxdx-config-t42b-")
+            .tempdir()
+            .expect("failed to create temp config dir");
+        write_test_config(config_b.path(), creds, explicit_room);
+
+        let mut worker_b = start_worker_with_room(
+            &creds.server_url, &creds.worker_user, &creds.worker_pass, explicit_room, &auth_user,
+            &store_b, &kc_b,
+        );
+        tokio::time::sleep(Duration::from_secs(20)).await;
+
+        let out_b = run_client_daemon(
+            config_b.path(),
+            &["run", "/bin/echo", "after-backup-restore"],
+            &store_b, &kc_b, 330,
+        );
+        let _ = worker_b.kill();
+        let _ = worker_b.wait();
+
+        if !out_b.status.success() {
+            let stderr = String::from_utf8_lossy(&out_b.stderr);
+            bail!(
+                "t42: second worker failed to decrypt after backup restore: exit={:?} stderr={}",
+                out_b.status.code(),
+                &stderr[stderr.len().saturating_sub(800)..]
+            );
+        }
+        eprintln!("[t42] PASS: backup round trip across distinct store dirs");
+    }
+
+    // t43: unencrypted room self-heal
+    {
+        let auth_user = creds.client_matrix_id();
+        let run_id = uuid::Uuid::new_v4().simple().to_string();
+        let launcher_id = format!("mxdx-e2e-t43-{}", &run_id[..8]);
+
+        let space_topic = format!("org.mxdx.launcher.space:{launcher_id}");
+        let exec_topic = format!("org.mxdx.launcher.exec:{launcher_id}");
+        let logs_topic = format!("org.mxdx.launcher.logs:{launcher_id}");
+
+        let bad_space = rest_create_unencrypted_room(
+            creds, "mxdx-test-bad-space", &space_topic, &launcher_id, "space",
+        ).await.context("t43: failed to seed unencrypted space")?;
+        let bad_exec = rest_create_unencrypted_room(
+            creds, "mxdx-test-bad-exec", &exec_topic, &launcher_id, "exec",
+        ).await.context("t43: failed to seed unencrypted exec")?;
+        let _bad_logs = rest_create_unencrypted_room(
+            creds, "mxdx-test-bad-logs", &logs_topic, &launcher_id, "logs",
+        ).await.context("t43: failed to seed unencrypted logs")?;
+        eprintln!("[t43] seeded unencrypted topology: space={} exec={} logs={}", bad_space, bad_exec, _bad_logs);
+
+        let (store, kc) = persistent_test_dirs_named("t43");
+        let _ = std::fs::remove_dir_all(&store);
+        let _ = std::fs::remove_dir_all(&kc);
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(&kc).unwrap();
+
+        let mut worker = start_worker_with_room(
+            &creds.server_url, &creds.worker_user, &creds.worker_pass, &launcher_id, &auth_user,
+            &store, &kc,
+        );
+        tokio::time::sleep(Duration::from_secs(20)).await;
+
+        let tomb_exec = rest_get_tombstone(creds, &bad_exec).await;
+        kill_worker_graceful(&mut worker);
+
+        match tomb_exec {
+            Ok(Some(replacement)) => {
+                eprintln!("[t43] PASS: bad exec room tombstoned -> {}", replacement);
+            }
+            Ok(None) => {
+                bail!("t43: worker did not tombstone the unencrypted exec room {}", bad_exec);
+            }
+            Err(e) => bail!("t43: tombstone lookup failed: {}", e),
+        }
+    }
+
+    // t44: diagnose --decrypt
+    {
+        let auth_user = creds.client_matrix_id();
+        let worker_room = default_worker_room(&creds.worker_user);
+
+        let (store, kc) = persistent_test_dirs_named("t44");
+        let config_home = tempfile::Builder::new()
+            .prefix("mxdx-config-t44-")
+            .tempdir()
+            .expect("failed to create temp config dir");
+        write_test_config(config_home.path(), creds, &worker_room);
+
+        let offset_w = worker_log_offset();
+        let mut worker = start_worker(
+            &creds.server_url, &creds.worker_user, &creds.worker_pass, &auth_user,
+            &store, &kc,
+        );
+        wait_worker_ready(Duration::from_secs(120), offset_w).await.expect("temp worker startup timed out");
+
+        let _ = run_client_daemon(
+            config_home.path(),
+            &["run", "/bin/echo", "t44-marker"],
+            &store, &kc, 330,
+        );
+
+        let client_bin = cargo_bin("mxdx-client");
+        let out = Command::new(client_bin)
+            .args([
+                "diagnose",
+                "--decrypt",
+                "--homeserver", &creds.server_url,
+                "--username", &creds.worker_user,
+                "--password", &creds.worker_pass,
+            ])
+            .env("MXDX_STORE_DIR", store.to_str().unwrap())
+            .env("MXDX_KEYCHAIN_DIR", kc.to_str().unwrap())
+            .env("MXDX_KEEP_PASSWORDS", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .expect("diagnose failed to run");
+
+        let _ = worker.kill();
+        let _ = worker.wait();
+
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            bail!(
+                "t44: diagnose --decrypt exit {:?} stderr={}",
+                out.status.code(),
+                &stderr[stderr.len().saturating_sub(500)..]
+            );
+        }
+
+        let json: serde_json::Value = serde_json::from_slice(&out.stdout)
+            .context("t44: diagnose output is not valid JSON")?;
+
+        let found = json
+            .get("decrypted_state")
+            .and_then(|d| d.as_object())
+            .map(|o| !o.is_empty())
+            .unwrap_or(false);
+        if !found {
+            let err = json.get("decrypt_error").cloned().unwrap_or(serde_json::Value::Null);
+            bail!(
+                "t44: diagnose --decrypt produced no decrypted_state events. decrypt_error={}",
+                err
+            );
+        }
+        eprintln!("[t44] PASS: diagnose --decrypt surfaced decrypted state events");
+    }
+
+    Ok(())
 }
 
 // ===========================================================================
-// SSH BASELINE (standalone, not part of phased execution)
+// PHASE 7 — CLEANUP (safety net)
 // ===========================================================================
 
-#[tokio::test]
-#[ignore = "requires passwordless localhost SSH"]
-async fn profile_echo_ssh() {
-    let start = Instant::now();
-    let out = run_ssh(&["/bin/echo", "hello", "world"]);
-    report("echo", "ssh", start.elapsed(), out.status.code(), String::from_utf8_lossy(&out.stdout).lines().count());
-}
-
-#[tokio::test]
-#[ignore = "requires passwordless localhost SSH"]
-async fn profile_exit_code_ssh() {
-    let start = Instant::now();
-    let out = run_ssh(&["/bin/false"]);
-    report("exit-code(/bin/false)", "ssh", start.elapsed(), out.status.code(), 0);
-}
-
-#[tokio::test]
-#[ignore = "requires passwordless localhost SSH"]
-async fn profile_md5sum_ssh() {
-    let fp = large_file(10_000);
-    let start = Instant::now();
-    let out = run_ssh_script(&md5_script(&fp));
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    report("md5sum(10k lines)", "ssh", start.elapsed(), out.status.code(), stdout.lines().count());
-    let _ = std::fs::remove_file(&fp);
-}
-
-#[tokio::test]
-#[ignore = "requires passwordless localhost SSH + network"]
-async fn profile_ping_ssh() {
-    let start = Instant::now();
-    let out = run_ssh(&["ping", "-c", "30", "-i", "1", "1.1.1.1"]);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    report("ping(30s)", "ssh", start.elapsed(), out.status.code(), stdout.lines().count());
+fn phase_7() {
+    eprintln!("\n=== Phase 7: Cleanup ===");
+    let _ = std::process::Command::new("pkill")
+        .args(["-f", "mxdx-worker start"])
+        .status();
+    let _ = std::process::Command::new("pkill")
+        .args(["-f", "mxdx-client _daemon"])
+        .status();
+    if let Some(home) = dirs::home_dir() {
+        let dirs_to_clean = [
+            home.join(".mxdx").join("daemon"),
+            home.join(".mxdx").join("e2e-local").join("home").join(".mxdx").join("daemon"),
+        ];
+        for d in &dirs_to_clean {
+            if let Ok(entries) = std::fs::read_dir(d) {
+                for e in entries.flatten() {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
+    eprintln!("[phase7] cleanup complete");
 }
 
 // ===========================================================================
-// LONG PING — 5 minutes sustained streaming (standalone)
+// ORCHESTRATOR
 // ===========================================================================
 
 #[tokio::test]
-#[ignore = "requires test-credentials.toml + beta server + network, runs 5 minutes"]
-async fn profile_long_ping_local() {
-    let c = load_creds().expect("test-credentials.toml required");
-    let auth_user = c.client_matrix_id();
-    let worker_room = default_worker_room(&c.worker_user);
-    let (store_dir, keychain_dir) = isolated_test_dirs("long_ping_local");
-    let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
-                              &c.server_url, &c.client_user, &c.client_pass,
-                              &auth_user, store_dir.path(), keychain_dir.path()).await;
+#[ignore = "requires test-credentials.toml + beta server"]
+async fn e2e() {
+    let phases = parse_preset();
+    let preset_name = std::env::var("E2E_PRESET").unwrap_or_else(|_| "default".to_string());
+    eprintln!("E2E test suite — preset: {preset_name}, phases: {phases:?}");
 
-    let start = Instant::now();
-    let out = run_client(&c.server_url, &c.client_user, &c.client_pass, &worker_room, &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"], store_dir.path(), keychain_dir.path());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
-    report("ping(5min)", "mxdx-local", start.elapsed(), out.status.code(), stdout.lines().count());
+    let creds = load_creds().expect("test-credentials.toml required");
+    cleanup_stale_processes();
+    setup_client_log();
 
-    let _ = w.kill(); let _ = w.wait();
-}
+    // Track whether we need cleanup phases even on failure
+    let mut ctx: Option<TestContext> = None;
+    let mut suite_error: Option<String> = None;
 
-#[tokio::test]
-#[ignore = "requires test-credentials.toml + both beta servers + network, runs 5 minutes"]
-async fn profile_long_ping_federated() {
-    let c = load_creds().expect("test-credentials.toml required");
-    let s2 = c.server2_url.as_deref().expect("server2 required for federated tests");
-    let auth_user = c.client_matrix_id_on(s2);
-    let worker_room = default_worker_room(&c.worker_user);
-    let (store_dir, keychain_dir) = isolated_test_dirs("long_ping_federated");
-    let mut w = setup_worker(&c.server_url, &c.worker_user, &c.worker_pass,
-                              s2, &c.client_user, &c.client_pass,
-                              &auth_user, store_dir.path(), keychain_dir.path()).await;
+    // Phase 0: Security Gates
+    if should_run(&phases, 0) && suite_error.is_none() {
+        if let Err(e) = phase_0(&creds).await {
+            suite_error = Some(format!("Phase 0 failed: {e}"));
+        }
+    }
 
-    let start = Instant::now();
-    let out = run_client(s2, &c.client_user, &c.client_pass, &worker_room, &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"], store_dir.path(), keychain_dir.path());
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "stderr: {}", &stderr[stderr.len().saturating_sub(500)..]);
-    report("ping(5min)", "mxdx-federated", start.elapsed(), out.status.code(), stdout.lines().count());
+    // Phase 1: Setup Worker (required)
+    if suite_error.is_none() {
+        match phase_1(&creds).await {
+            Ok(c) => ctx = Some(c),
+            Err(e) => suite_error = Some(format!("Phase 1 failed: {e}")),
+        }
+    }
 
-    let _ = w.kill(); let _ = w.wait();
+    // Phase 2: Local Tests
+    if should_run(&phases, 2) && suite_error.is_none() {
+        if let Some(ref c) = ctx {
+            if let Err(e) = phase_2(c).await {
+                suite_error = Some(format!("Phase 2 failed: {e}"));
+            }
+        }
+    }
+
+    // Phase 3: Federated Tests
+    if should_run(&phases, 3) && suite_error.is_none() {
+        if let Some(ref c) = ctx {
+            if let Err(e) = phase_3(c).await {
+                suite_error = Some(format!("Phase 3 failed: {e}"));
+            }
+        }
+    }
+
+    // Phase 4: Long + SSH (parallel) — only in full preset
+    if should_run(&phases, 4) && suite_error.is_none() {
+        if let Err(e) = phase_4(&creds) {
+            suite_error = Some(format!("Phase 4 failed: {e}"));
+        }
+    }
+
+    // Phase 5: Shutdown Worker (required — always runs if worker was started)
+    if let Some(ref mut c) = ctx {
+        phase_5(c);
+    }
+
+    // Phase 6: Special Tests
+    if should_run(&phases, 6) && suite_error.is_none() {
+        if let Err(e) = phase_6(&creds).await {
+            suite_error = Some(format!("Phase 6 failed: {e}"));
+        }
+    }
+
+    // Phase 7: Cleanup (required — always runs)
+    phase_7();
+
+    // Report final result
+    if let Some(err) = suite_error {
+        panic!("E2E suite failed: {err}");
+    }
+
+    eprintln!("\nE2E suite complete — all phases passed");
 }

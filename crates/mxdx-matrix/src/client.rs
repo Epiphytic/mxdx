@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -121,7 +122,7 @@ impl MatrixClient {
         // Initial sync to upload device keys — required before creating encrypted rooms.
         // Without this, room creation hangs on rate-limited servers (e.g., matrix.org).
         client
-            .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
+            .sync_once(SyncSettings::default().timeout(Duration::from_secs(1)))
             .await?;
 
         Ok(MatrixClient {
@@ -186,7 +187,7 @@ impl MatrixClient {
             .await?;
 
         client
-            .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
+            .sync_once(SyncSettings::default().timeout(Duration::from_secs(1)))
             .await?;
 
         Ok(MatrixClient {
@@ -249,7 +250,7 @@ impl MatrixClient {
             .map_err(|e| MatrixClientError::Other(e.into()))?;
 
         client
-            .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
+            .sync_once(SyncSettings::default().timeout(Duration::from_secs(1)))
             .await?;
 
         Ok(MatrixClient {
@@ -317,7 +318,7 @@ impl MatrixClient {
             .map_err(|e| MatrixClientError::Other(e.into()))?;
 
         client
-            .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
+            .sync_once(SyncSettings::default().timeout(Duration::from_secs(1)))
             .await?;
 
         Ok(MatrixClient {
@@ -386,7 +387,7 @@ impl MatrixClient {
 
         // Initial sync to upload device keys.
         client
-            .sync_once(SyncSettings::default().timeout(Duration::from_secs(5)))
+            .sync_once(SyncSettings::default().timeout(Duration::from_secs(1)))
             .await?;
 
         Ok(MatrixClient {
@@ -537,6 +538,258 @@ impl MatrixClient {
         Ok(())
     }
 
+    /// Perform a sync with `full_state: true`.
+    ///
+    /// Forces the server to re-send all room state, even for rooms the client
+    /// already knows about. This is needed after receiving new E2EE keys so
+    /// the SDK can re-decrypt MSC4362 encrypted state events that failed to
+    /// decrypt during earlier incremental syncs.
+    pub async fn sync_full_state(&self) -> Result<()> {
+        self.client
+            .sync_once(
+                SyncSettings::default()
+                    .timeout(Duration::from_secs(2))
+                    .full_state(true),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Read all state events of a given type from the SDK's local cache.
+    ///
+    /// Unlike [`get_room_state`] (HTTP call), this reads from the SDK's
+    /// local store populated by `sync_once`.
+    ///
+    /// For MSC4362-encrypted state events the SDK stores them under
+    /// `m.room.encrypted` in the state store, NOT under the inner type.
+    /// This method handles that: if no events are found under the requested
+    /// type, it queries `m.room.encrypted` events and decrypts them,
+    /// filtering for those whose inner type matches `event_type`.
+    ///
+    /// Returns `(state_key, content)` pairs.
+    pub async fn get_state_events_cached(
+        &self,
+        room_id: &RoomId,
+        event_type: &str,
+    ) -> Result<Vec<(String, Value)>> {
+        use matrix_sdk::deserialized_responses::RawAnySyncOrStrippedState;
+        use matrix_sdk::ruma::events::StateEventType;
+
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| MatrixClientError::RoomNotFound(room_id.to_string()))?;
+
+        // First, try the requested type directly (works for unencrypted rooms
+        // or if the SDK ever starts storing decrypted MSC4362 under the inner type).
+        let ev_type = StateEventType::from(event_type);
+        let raws = room
+            .get_state_events(ev_type)
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+
+        if !raws.is_empty() {
+            let mut results = Vec::new();
+            for raw in raws {
+                let raw_json = match &raw {
+                    RawAnySyncOrStrippedState::Sync(r) => r.json().get(),
+                    RawAnySyncOrStrippedState::Stripped(r) => r.json().get(),
+                };
+                let value: Value = match serde_json::from_str(raw_json) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let state_key = value
+                    .get("state_key")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let content = value.get("content").cloned().unwrap_or_default();
+                results.push((state_key, content));
+            }
+            if !results.is_empty() {
+                return Ok(results);
+            }
+        }
+
+        // MSC4362 fallback: the SDK stores encrypted state events under
+        // m.room.encrypted. Read those and decrypt, filtering for the
+        // requested inner event type.
+        let encrypted_type = StateEventType::from("m.room.encrypted");
+        let encrypted_raws = room
+            .get_state_events(encrypted_type)
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+
+        let mut results = Vec::new();
+        for raw in encrypted_raws {
+            let raw_json_str = match &raw {
+                RawAnySyncOrStrippedState::Sync(r) => r.json().get().to_owned(),
+                RawAnySyncOrStrippedState::Stripped(r) => r.json().get().to_owned(),
+            };
+
+            // Try to decrypt via the room's decrypt_event method.
+            // Cast the raw state event to the type expected by decrypt_event.
+            if let RawAnySyncOrStrippedState::Sync(sync_raw) = &raw {
+                use matrix_sdk::ruma::events::room::encrypted::OriginalSyncRoomEncryptedEvent;
+                let cast_raw: &matrix_sdk::ruma::serde::Raw<OriginalSyncRoomEncryptedEvent> =
+                    sync_raw.cast_ref_unchecked();
+                match room.decrypt_event(cast_raw, None).await {
+                    Ok(timeline_event) => {
+                        let decrypted_json_str = timeline_event.raw().json().get();
+                        let decrypted: Value = match serde_json::from_str(decrypted_json_str) {
+                            Ok(v) => v,
+                            Err(_) => continue,
+                        };
+                        // Check if the decrypted event's type matches our target
+                        let inner_type = decrypted
+                            .get("type")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
+                        if inner_type != event_type {
+                            continue;
+                        }
+                        let state_key = decrypted
+                            .get("state_key")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let content = decrypted.get("content").cloned().unwrap_or_default();
+                        results.push((state_key, content));
+                    }
+                    Err(e) => {
+                        tracing::trace!(
+                            error = %e,
+                            "get_state_events_cached: failed to decrypt m.room.encrypted state event"
+                        );
+                        continue;
+                    }
+                }
+            } else {
+                // Stripped events (invited rooms) — try to parse directly
+                let value: Value = match serde_json::from_str(&raw_json_str) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let inner_type = value
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                if inner_type == event_type {
+                    let state_key = value
+                        .get("state_key")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let content = value.get("content").cloned().unwrap_or_default();
+                    results.push((state_key, content));
+                }
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Check worker liveness via REST API, without requiring E2EE decryption.
+    ///
+    /// For MSC4362 rooms, the SDK may not be able to decrypt telemetry state
+    /// events (missing megolm keys). This method reads the full room state via
+    /// the REST API and looks for telemetry events by checking their
+    /// `origin_server_ts` (server-set, always visible even for encrypted events).
+    ///
+    /// Returns `(state_key, content)` pairs. For encrypted events where
+    /// decryption isn't possible, returns a synthetic content with just the
+    /// `origin_server_ts` converted to an ISO timestamp and `status: "online"`.
+    pub async fn get_telemetry_via_rest(
+        &self,
+        room_id: &RoomId,
+        event_type: &str,
+    ) -> Result<Vec<(String, Value)>> {
+        let homeserver = self.inner().homeserver().to_string();
+        let access_token = self
+            .access_token()
+            .ok_or_else(|| MatrixClientError::Other(anyhow::anyhow!("not logged in")))?;
+
+        let rest = crate::rest::RestClient::new(&homeserver, &access_token);
+        let all_state = rest
+            .get_room_full_state(room_id)
+            .await
+            .map_err(|e| MatrixClientError::Other(e))?;
+
+        let mut results = Vec::new();
+        for event in all_state {
+            let ev_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let state_key = event
+                .get("state_key")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            // Direct match (unencrypted rooms or server that exposes inner type)
+            if ev_type == event_type {
+                let content = event.get("content").cloned().unwrap_or_default();
+                results.push((state_key, content));
+                continue;
+            }
+
+            // MSC4362: encrypted state events appear as m.room.encrypted.
+            // The state_key is "{inner_type}:{original_state_key}", e.g.
+            // "org.mxdx.host_telemetry:worker/belthanior.liamhelmer.e2etest-test1".
+            // We can't decrypt them here, but we CAN read origin_server_ts
+            // to determine freshness.
+            let msc4362_prefix = format!("{}:", event_type);
+            if ev_type == "m.room.encrypted" && state_key.starts_with(&msc4362_prefix) {
+                // Extract the original state_key from the compound key
+                let state_key = state_key[msc4362_prefix.len()..].to_string();
+                let origin_ts = event
+                    .get("origin_server_ts")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                if origin_ts == 0 {
+                    continue;
+                }
+
+                // Convert origin_server_ts (millis since epoch) to ISO 8601
+                let secs = origin_ts / 1000;
+                let millis = origin_ts % 1000;
+                let day_secs = secs % 86400;
+                let hour = day_secs / 3600;
+                let minute = (day_secs % 3600) / 60;
+                let second = day_secs % 60;
+                let days = secs / 86400;
+                // Civil date from days since epoch
+                let z = days as i64 + 719468;
+                let era = if z >= 0 { z } else { z - 146096 } / 146097;
+                let doe = (z - era * 146097) as u64;
+                let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+                let y = yoe as i64 + era * 400;
+                let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+                let mp = (5 * doy + 2) / 153;
+                let d = doy - (153 * mp + 2) / 5 + 1;
+                let m = if mp < 10 { mp + 3 } else { mp - 9 };
+                let y = if m <= 2 { y + 1 } else { y };
+                let ts = format!(
+                    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+                    y, m, d, hour, minute, second, millis
+                );
+
+                // Synthetic telemetry content using server timestamp.
+                // Capabilities are unknown (encrypted), so empty = allow all.
+                let synthetic = serde_json::json!({
+                    "timestamp": ts,
+                    "heartbeat_interval_ms": 60000,
+                    "status": "online",
+                    "capabilities": [],
+                    "_encrypted": true,
+                });
+                results.push((state_key, synthetic));
+            }
+        }
+
+        Ok(results)
+    }
+
     /// Sync and collect decrypted timeline events for a specific room.
     ///
     /// Performs a single sync with the given timeout (server long-poll duration),
@@ -549,6 +802,20 @@ impl MatrixClient {
     ///
     /// The caller should poll this in a loop with a short timeout (e.g., 2s) to
     /// receive events promptly.
+    ///
+    /// # Historical bug
+    ///
+    /// Earlier, the `room.messages()` fallback was gated on
+    /// `saw_encrypted && collected.is_empty()`. That guard is wrong: when a
+    /// single sync batch contains both a decryptable event (e.g. a telemetry
+    /// state update) *and* an undecryptable `m.room.encrypted` event (e.g. a
+    /// session output whose megolm key has not yet arrived via to-device),
+    /// `collected` would be non-empty so the fallback was skipped. The
+    /// encrypted event was silently dropped and the next sync advanced past
+    /// it — the client would then wait forever for a result that was already
+    /// posted. The fix always runs the fallback whenever any encrypted event
+    /// was observed, and deduplicates by `event_id` against events we already
+    /// captured from the inline sync pass.
     pub async fn sync_and_collect_events(
         &self,
         room_id: &RoomId,
@@ -559,31 +826,58 @@ impl MatrixClient {
             .await?;
 
         let mut collected: Vec<Value> = Vec::new();
+        let mut seen_ids: HashSet<String> = HashSet::new();
         let mut saw_encrypted = false;
 
         if let Some(joined) = response.rooms.joined.get(&room_id.to_owned()) {
+            let timeline_count = joined.timeline.events.len();
             for timeline_event in &joined.timeline.events {
                 let json_str = timeline_event.raw().json().get();
                 if let Ok(json) = serde_json::from_str::<Value>(json_str) {
                     let event_type = json.get("type").and_then(|t| t.as_str());
                     match event_type {
                         Some("m.room.encrypted") => {
-                            saw_encrypted = true;
+                            // Only flag as undecryptable for non-state events
+                            // (messages, session events). MSC4362 encrypted state
+                            // events have a state_key and are handled by the SDK's
+                            // state processor — seeing them here doesn't mean we're
+                            // missing keys for timeline events.
+                            let is_state = json.get("state_key").is_some();
+                            if !is_state {
+                                saw_encrypted = true;
+                            }
                         }
                         Some("m.room.encryption") | Some("m.room.member") | Some("m.room.power_levels") => {}
                         _ => {
+                            if let Some(eid) = json.get("event_id").and_then(|e| e.as_str()) {
+                                seen_ids.insert(eid.to_string());
+                            }
                             collected.push(json);
                         }
                     }
                 }
             }
+            if timeline_count > 0 {
+                tracing::info!(
+                    timeline_events = timeline_count,
+                    collected = collected.len(),
+                    saw_encrypted,
+                    room_id = %room_id,
+                    "sync_and_collect_events: processed timeline"
+                );
+            }
         }
 
-        // If we saw encrypted events we couldn't decrypt, the megolm key may
-        // arrive in the next sync via to-device. Do one more sync to receive it,
-        // then fall back to room.messages() which re-decrypts from the server.
-        if saw_encrypted && collected.is_empty() {
-            tracing::debug!("saw undecryptable events, doing extra sync for key exchange");
+        // If we saw any undecryptable events, the megolm key may be arriving
+        // in the next sync via to-device. Do one more sync to receive it, then
+        // read via room.messages() which reflects retroactive decryption.
+        //
+        // Do NOT gate this on `collected.is_empty()` — if the same sync batch
+        // contained a decryptable event alongside the encrypted one, the old
+        // guard would skip the fallback and the encrypted event (e.g. a
+        // session result) would be silently dropped.
+        if saw_encrypted {
+            tracing::info!("saw undecryptable events, doing extra sync for key exchange");
             let _ = self.client
                 .sync_once(SyncSettings::default().timeout(Duration::from_secs(2)))
                 .await;
@@ -592,23 +886,57 @@ impl MatrixClient {
             let room = self.client.get_room(room_id);
             if let Some(room) = room {
                 if let Ok(messages) = room.messages(MessagesOptions::backward()).await {
+                    let msg_count = messages.chunk.len();
+                    let mut still_encrypted = 0u32;
+                    let mut decrypted_types = Vec::new();
                     for event in &messages.chunk {
                         let json_str = event.raw().json().get();
                         if let Ok(json) = serde_json::from_str::<Value>(json_str) {
                             let event_type = json.get("type").and_then(|t| t.as_str());
                             match event_type {
-                                Some("m.room.encrypted") | Some("m.room.encryption")
+                                Some("m.room.encrypted") => {
+                                    still_encrypted += 1;
+                                }
+                                Some("m.room.encryption")
                                 | Some("m.room.member") | Some("m.room.power_levels") => {}
                                 _ => {
+                                    if let Some(t) = event_type {
+                                        decrypted_types.push(t.to_string());
+                                    }
+                                    // Dedupe against the inline sync pass so
+                                    // we don't return the same event twice
+                                    // within a single call.
+                                    if let Some(eid) = json
+                                        .get("event_id")
+                                        .and_then(|e| e.as_str())
+                                    {
+                                        if !seen_ids.insert(eid.to_string()) {
+                                            continue;
+                                        }
+                                    }
                                     collected.push(json);
                                 }
                             }
                         }
                     }
+                    tracing::info!(
+                        msg_count,
+                        still_encrypted,
+                        decrypted = decrypted_types.len(),
+                        types = ?decrypted_types,
+                        "messages() fallback results"
+                    );
                 }
             }
         }
 
+        if !collected.is_empty() {
+            tracing::info!(
+                total = collected.len(),
+                room_id = %room_id,
+                "sync_and_collect_events: returning events"
+            );
+        }
         Ok(collected)
     }
 

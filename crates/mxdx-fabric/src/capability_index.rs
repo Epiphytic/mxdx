@@ -45,7 +45,7 @@ impl CapabilityIndex {
 
         let room_id = self
             .matrix_client
-            .create_named_unencrypted_room(&room_name, &topic)
+            .create_named_encrypted_room(&room_name, &topic, &[])
             .await?;
 
         debug!(room_name = %room_name, room_id = %room_id, "capability room created");

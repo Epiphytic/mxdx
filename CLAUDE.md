@@ -7,6 +7,15 @@ This is a security service for communication with  servers. All communications m
 
 ** NEVER BYPASS END TO END ENCRYPTION IN ANY CHANGES UNDER ANY CIRCUMSTANCES **
 
+** EVERY MATRIX EVENT MUST BE END-TO-END ENCRYPTED — NO EXCEPTIONS **
+This includes timeline messages, **state events**, and to-device messages. Unencrypted
+events of ANY type are out of spec for this project and constitute a security violation.
+Encrypted state events use MSC4362 (`experimental-encrypted-state-events`) which is
+already enabled in this project. If you find yourself calling `send_state_event`,
+`send_raw`, or any Matrix send API and you are not 100% sure the event will be
+encrypted on the wire, STOP and audit the call path. Any code review that lets an
+unencrypted Matrix send through has failed.
+
 This project uses Rust for backend services, Rust WASM's for the client and launcher inner workings, and nodejs/typescript for the frontend.
 
 ** All sensitive info should be stored encrypted at rest **
@@ -29,3 +38,7 @@ This project uses Rust for backend services, Rust WASM's for the client and laun
 ** Performance profiling is only meaningful on the actual compiled binaries that users would run — not on library-level integration tests **
 ** If an E2E test fails, fix the binary — never change the test to work around a broken binary **
 ** All E2E and integration tests must be runnable by any user who has the binaries and a test-credentials.toml configured **
+
+## Agent Execution Rules
+
+** ALWAYS run tests or any long-running processes using subagents — never block the main conversation context **

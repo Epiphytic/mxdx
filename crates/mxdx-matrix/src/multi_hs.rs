@@ -582,6 +582,21 @@ impl MultiHsClient {
         }
     }
 
+    /// Sync with full_state: true via the preferred server.
+    pub async fn sync_full_state(&mut self) -> Result<()> {
+        let idx = self.preferred_index;
+        match self.entries[idx].client.sync_full_state().await {
+            Ok(()) => {
+                self.record_success(idx);
+                Ok(())
+            }
+            Err(err) => {
+                self.record_failure(idx);
+                Err(err)
+            }
+        }
+    }
+
     /// Join a room via the preferred server.
     pub async fn join_room(&mut self, room_id: &RoomId) -> Result<()> {
         let idx = self.preferred_index;
