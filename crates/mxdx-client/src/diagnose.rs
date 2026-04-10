@@ -426,29 +426,9 @@ async fn decrypt_with_temp_client(
 
     // Best-effort: pull megolm session keys from server-side backup so MSC4362
     // encrypted state events can be decrypted by the SDK.
-    let unix_user = std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "unknown".into());
-    if let Some(user_id) = client.user_id() {
-        let user_id = user_id.to_owned();
-        match ChainedKeychain::default_chain() {
-            Ok(keychain) => {
-                if let Err(e) = mxdx_matrix::backup::ensure_backup(
-                    &client,
-                    &keychain,
-                    homeserver,
-                    &user_id,
-                    &unix_user,
-                    false,
-                )
-                .await
-                {
-                    tracing::warn!(error=%e, "diagnose: ensure_backup failed, continuing");
-                }
-            }
-            Err(e) => {
-                tracing::warn!(error=%e, "diagnose: keychain unavailable, skipping ensure_backup");
-            }
+    if client.user_id().is_some() {
+        if let Err(e) = mxdx_matrix::backup::ensure_backup(&client, false).await {
+            tracing::warn!(error=%e, "diagnose: ensure_backup failed, continuing");
         }
         let _ = mxdx_matrix::backup::download_all_keys(&client).await;
         // Sync once more so freshly-downloaded keys can decrypt cached events.

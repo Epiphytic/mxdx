@@ -152,35 +152,11 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
     // start decrypting room history.
     {
         use mxdx_matrix::backup::{download_all_keys, ensure_backup, BackupState};
-        let unix_user = std::env::var("USER")
-            .or_else(|_| std::env::var("LOGNAME"))
-            .unwrap_or_else(|_| "unknown".into());
         let sdk_client = multi.preferred().inner().clone();
-        let matrix_user = sdk_client
-            .user_id()
-            .ok_or_else(|| anyhow::anyhow!("no user_id after login"))?
-            .to_owned();
-        let server = multi.preferred_server().to_string();
-        let is_first_run = any_fresh;
 
-        // Backup setup is best-effort. If it fails (e.g., the server has a
-        // stale backup from a prior device and we have no recovery key for
-        // it), the worker still operates — it just can't recover historical
-        // room keys from the server backup. The worker will set up its own
-        // keys for new rooms via normal megolm exchange.
-        //
-        // Pass `is_first_run = false` so `ensure_backup` always degrades
-        // gracefully instead of bailing on first-run + stale-server-backup.
-        let backup_state = match ensure_backup(
-            &sdk_client,
-            keychain.as_ref(),
-            &server,
-            &matrix_user,
-            &unix_user,
-            false,
-        )
-        .await
-        {
+        // Backup setup is best-effort. The worker still operates without it.
+        // Pass is_first_run = false so ensure_backup always degrades gracefully.
+        let backup_state = match ensure_backup(&sdk_client, false).await {
             Ok(state) => state,
             Err(e) => {
                 tracing::warn!(error=%e, "backup setup failed; continuing without backup");
@@ -192,7 +168,6 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
                 }
             }
         };
-        let _ = is_first_run; // preserved for future first-run-specific logic
         if backup_state.enabled {
             match download_all_keys(&sdk_client).await {
                 Ok(n) => tracing::info!(rooms = n, "backup: room keys downloaded"),
