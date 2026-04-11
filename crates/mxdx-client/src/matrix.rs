@@ -470,7 +470,7 @@ pub async fn connect_multi(
             }
             tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
             multi
-                .wait_for_key_exchange(&rid, std::time::Duration::from_secs(15))
+                .wait_for_key_exchange(&rid, std::time::Duration::from_secs(45))
                 .await
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
         } else {
@@ -493,13 +493,21 @@ pub async fn connect_multi(
         let rid = topology.exec_room_id;
         tracing::info!(exec_room = %rid, "discovered worker exec room");
 
-        // Key exchange: on session restore, keys are already cached in the
-        // crypto store so wait_for_key_exchange returns immediately (fast path).
-        // On fresh login, this blocks until keys arrive.
-        multi
-            .wait_for_key_exchange(&rid, std::time::Duration::from_secs(15))
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        if any_fresh {
+            multi.sync_once().await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            if let Err(e) = multi.join_room(&rid).await {
+                tracing::warn!(room_id = %rid, error = %e, "join_room failed (may already be a member)");
+            }
+            tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
+            multi
+                .wait_for_key_exchange(&rid, std::time::Duration::from_secs(45))
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        } else {
+            multi.sync_once().await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
 
         rid
     };

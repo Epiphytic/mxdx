@@ -194,7 +194,7 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
             }
             tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
             multi
-                .wait_for_key_exchange(&rid, std::time::Duration::from_secs(15))
+                .wait_for_key_exchange(&rid, std::time::Duration::from_secs(45))
                 .await?;
         } else {
             // Session restore: device already has keys cached in persistent crypto store.
@@ -265,10 +265,18 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
 
         let rid = topology.exec_room_id.clone();
 
-        // Key exchange: fast path returns immediately if keys are cached.
-        multi
-            .wait_for_key_exchange(&rid, std::time::Duration::from_secs(15))
-            .await?;
+        if any_fresh {
+            multi.sync_once().await?;
+            if let Err(e) = multi.join_room(&rid).await {
+                tracing::warn!(room_id = %rid, error = %e, "join_room failed (may already be a member)");
+            }
+            tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
+            multi
+                .wait_for_key_exchange(&rid, std::time::Duration::from_secs(45))
+                .await?;
+        } else {
+            multi.sync_once().await?;
+        }
 
         // Invite authorized users to the space + all child rooms so clients
         // can discover the topology via find_launcher_space.

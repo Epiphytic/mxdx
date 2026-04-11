@@ -807,10 +807,6 @@ fn run_ssh_script(script: &str) -> Output {
     child.wait_with_output().expect("failed to wait for ssh")
 }
 
-/// Get the current byte length of the worker log file (for readiness offset tracking).
-fn worker_log_offset() -> u64 {
-    std::fs::metadata(worker_log_path()).map(|m| m.len()).unwrap_or(0)
-}
 
 /// Wait for the worker to be fully ready by polling its log file for the
 /// readiness marker. Only looks at log content after `start_offset` bytes,
@@ -904,9 +900,9 @@ async fn setup_worker_with_room(server: &str, worker_user: &str, worker_pass: &s
                                  client_server: &str, client_user: &str, client_pass: &str,
                                  room: &str, authorized_user: &str,
                                  store_dir: &std::path::Path, keychain_dir: &std::path::Path) -> Child {
-    let offset = worker_log_offset();
     let w = start_worker_with_room(server, worker_user, worker_pass, room, authorized_user, store_dir, keychain_dir);
-    wait_worker_ready(Duration::from_secs(120), offset).await.expect("temp worker startup timed out");
+    // start_worker_with_room truncates the log file, so read from offset 0
+    wait_worker_ready(Duration::from_secs(120), 0).await.expect("temp worker startup timed out");
 
     let warmup = run_client(client_server, client_user, client_pass, room, &["run", "/bin/true"], store_dir, keychain_dir, 330);
     if !warmup.status.success() {
@@ -1136,13 +1132,12 @@ async fn phase_0(creds: &TestCreds) -> Result<()> {
         let t02_room = "mxdx-e2e-t02-capability";
         let t02_home = write_short_telemetry_config("t02");
         eprintln!("[t02] starting isolated worker (echo-only)...");
-        let offset = worker_log_offset();
         let mut w = start_worker_with_room_and_commands_home(
             &creds.server_url, &creds.worker_user, &creds.worker_pass,
             Some(t02_room), &auth_user, &store_dir, &keychain_dir,
             &["echo", "/bin/echo"], Some(&t02_home),
         );
-        wait_worker_ready(Duration::from_secs(120), offset).await.expect("temp worker startup timed out");
+        wait_worker_ready(Duration::from_secs(120), 0).await.expect("temp worker startup timed out");
 
         let worker_room = t02_room;
         eprintln!("[t02] running warmup...");
@@ -1230,13 +1225,12 @@ async fn phase_1(creds: &TestCreds) -> Result<TestContext> {
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(err));
 
-    let offset = worker_log_offset();
     let worker_start = Instant::now();
     let worker = spawn_child(cmd);
 
     // Wait for the worker to be FULLY ready: synced, keys shared, telemetry
-    // posted. Replaces the old 5s sleep with actual readiness detection.
-    wait_worker_ready(Duration::from_secs(120), offset).await?;
+    // posted. Log file was just truncated, so read from offset 0.
+    wait_worker_ready(Duration::from_secs(120), 0).await?;
     report("worker-startup", "setup", worker_start.elapsed(), Some(0), 0);
     eprintln!("[t10] worker fully ready ({:.1}s)", worker_start.elapsed().as_secs_f64());
 
@@ -1435,15 +1429,17 @@ async fn phase_3(ctx: &TestContext) -> Result<()> {
         .context("s2 daemon config not available (s2 warmup may have failed)")?;
 
     // t30: echo federated (via s2 daemon)
+    // Federated tests go through two homeservers + the worker's 30s sync
+    // long-poll, so allow 45s for the round trip.
     {
         let start = Instant::now();
         let out = run_client_daemon_s2(
             config_s2, &["run", "/bin/echo", "hello", "world"],
-            &ctx.store_dir, &ctx.keychain_dir, 10,
+            &ctx.store_dir, &ctx.keychain_dir, 45,
         );
         let stdout = String::from_utf8_lossy(&out.stdout);
         if !out.status.success() {
-            bail!("{}", format_test_failure("t30", "echo federated", &out, 10, true));
+            bail!("{}", format_test_failure("t30", "echo federated", &out, 45, true));
         }
         report("echo", "mxdx-federated-daemon", start.elapsed(), out.status.code(), stdout.lines().count());
     }
@@ -1453,10 +1449,10 @@ async fn phase_3(ctx: &TestContext) -> Result<()> {
         let start = Instant::now();
         let out = run_client_daemon_s2(
             config_s2, &["run", "/bin/false"],
-            &ctx.store_dir, &ctx.keychain_dir, 10,
+            &ctx.store_dir, &ctx.keychain_dir, 45,
         );
         if was_timeout(&out) {
-            bail!("{}", format_test_failure("t31", "exit-code federated", &out, 10, true));
+            bail!("{}", format_test_failure("t31", "exit-code federated", &out, 45, true));
         }
         if out.status.success() {
             bail!("t31 exit-code federated: expected failure but got success");
@@ -1714,12 +1710,11 @@ async fn phase_6(creds: &TestCreds) -> Result<()> {
             .expect("failed to create temp config dir");
         write_test_config(config_a.path(), creds, explicit_room);
 
-        let offset_a = worker_log_offset();
         let mut worker_a = start_worker_with_room(
             &creds.server_url, &creds.worker_user, &creds.worker_pass, explicit_room, &auth_user,
             &store_a, &kc_a,
         );
-        wait_worker_ready(Duration::from_secs(120), offset_a).await.expect("temp worker startup timed out");
+        wait_worker_ready(Duration::from_secs(120), 0).await.expect("temp worker startup timed out");
 
         let out_a = run_client_daemon(
             config_a.path(),
@@ -1825,18 +1820,28 @@ async fn phase_6(creds: &TestCreds) -> Result<()> {
         let config_home = persistent_test_config_dir("t44");
         write_test_config(&config_home, creds, &worker_room);
 
-        let offset_w = worker_log_offset();
         let mut worker = start_worker(
             &creds.server_url, &creds.worker_user, &creds.worker_pass, &auth_user,
             &store, &kc,
         );
-        wait_worker_ready(Duration::from_secs(120), offset_w).await.expect("temp worker startup timed out");
+        // start_worker truncates the log file, so read from offset 0
+        wait_worker_ready(Duration::from_secs(120), 0).await.expect("temp worker startup timed out");
 
         let _ = run_client_daemon(
             &config_home,
             &["run", "/bin/echo", "t44-marker"],
             &store, &kc, 330,
         );
+
+        // Kill the worker BEFORE running diagnose so they don't contend
+        // over the SQLite crypto store.
+        let _ = worker.kill();
+        let _ = worker.wait();
+        // Also kill any daemon spawned by run_client_daemon
+        let _ = std::process::Command::new("pkill")
+            .args(["-f", "mxdx-client.*_daemon.*t44"])
+            .output();
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
         let client_bin = cargo_bin("mxdx-client");
         let out = Command::new(client_bin)
@@ -1854,9 +1859,6 @@ async fn phase_6(creds: &TestCreds) -> Result<()> {
             .stderr(Stdio::piped())
             .output()
             .expect("diagnose failed to run");
-
-        let _ = worker.kill();
-        let _ = worker.wait();
 
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
