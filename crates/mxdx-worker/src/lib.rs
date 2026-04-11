@@ -194,7 +194,7 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
             }
             tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
             multi
-                .wait_for_key_exchange(&rid, std::time::Duration::from_secs(45))
+                .wait_for_key_exchange(&rid, std::time::Duration::from_secs(90))
                 .await?;
         } else {
             // Session restore: device already has keys cached in persistent crypto store.
@@ -272,7 +272,7 @@ pub async fn connect(config: &WorkerRuntimeConfig) -> Result<matrix::MatrixWorke
             }
             tracing::info!(room_id = %rid, "waiting for E2EE key exchange");
             multi
-                .wait_for_key_exchange(&rid, std::time::Duration::from_secs(45))
+                .wait_for_key_exchange(&rid, std::time::Duration::from_secs(90))
                 .await?;
         } else {
             multi.sync_once().await?;

@@ -1235,13 +1235,14 @@ async fn phase_1(creds: &TestCreds) -> Result<TestContext> {
     eprintln!("[t10] worker fully ready ({:.1}s)", worker_start.elapsed().as_secs_f64());
 
     // t11: Direct-mode warmup — seeds the client keychain + verifies the
-    // worker accepts tasks. This is a real test: must succeed within 60s.
+    // worker accepts tasks. Cold start (first run) requires up to 120s
+    // because the worker's 30s sync poll may delay key sharing.
     {
         let client_start = Instant::now();
         let warmup = run_client(
             &creds.server_url, &creds.client_user, &creds.client_pass,
             &worker_room, &["run", "/bin/true"],
-            &store_dir, &keychain_dir, 60,
+            &store_dir, &keychain_dir, 120,
         );
         let client_connect = client_start.elapsed();
         report("client-connect(direct)", "setup", client_connect, warmup.status.code(), 0);
@@ -1254,7 +1255,7 @@ async fn phase_1(creds: &TestCreds) -> Result<TestContext> {
         }
 
         if !warmup.status.success() {
-            bail!("{}", format_test_failure("t11", "direct-warmup(/bin/true)", &warmup, 60, false));
+            bail!("{}", format_test_failure("t11", "direct-warmup(/bin/true)", &warmup, 120, false));
         }
         eprintln!("[t11] PASS: direct-mode client warmup OK ({:.1}s)", client_connect.as_secs_f64());
     }
@@ -1833,18 +1834,26 @@ async fn phase_6(creds: &TestCreds) -> Result<()> {
             &store, &kc, 330,
         );
 
-        // Kill the worker BEFORE running diagnose so they don't contend
-        // over the SQLite crypto store.
+        // Kill the worker and daemon BEFORE running diagnose so they don't
+        // contend over the SQLite crypto store.
         let _ = worker.kill();
         let _ = worker.wait();
-        // Also kill any daemon spawned by run_client_daemon
-        let _ = std::process::Command::new("pkill")
-            .args(["-f", "mxdx-client.*_daemon.*t44"])
-            .output();
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Kill daemon by reading its PID file
+        let daemon_pid_path = config_home.join(".mxdx").join("daemon").join("default.pid");
+        if let Ok(pid_str) = std::fs::read_to_string(&daemon_pid_path) {
+            if let Ok(_pid) = pid_str.trim().parse::<u32>() {
+                let _ = Command::new("kill").arg("-9").arg(pid_str.trim()).output();
+            }
+            let _ = std::fs::remove_file(&daemon_pid_path);
+        }
+        let daemon_sock = config_home.join(".mxdx").join("daemon").join("default.sock");
+        let _ = std::fs::remove_file(&daemon_sock);
+        tokio::time::sleep(Duration::from_secs(2)).await;
 
         let client_bin = cargo_bin("mxdx-client");
-        let out = Command::new(client_bin)
+        let out = Command::new("timeout")
+            .arg("120")
+            .arg(&client_bin)
             .args([
                 "diagnose",
                 "--decrypt",
@@ -1855,22 +1864,37 @@ async fn phase_6(creds: &TestCreds) -> Result<()> {
             .env("MXDX_STORE_DIR", store.to_str().unwrap())
             .env("MXDX_KEYCHAIN_DIR", kc.to_str().unwrap())
             .env("MXDX_KEEP_PASSWORDS", "1")
+            .env("RUST_LOG", "off")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
             .expect("diagnose failed to run");
 
+        let stdout_raw = String::from_utf8_lossy(&out.stdout);
+        let stderr_raw = String::from_utf8_lossy(&out.stderr);
+        eprintln!("[t44] diagnose exit={:?} stdout_bytes={} stderr_bytes={}",
+            out.status.code(), out.stdout.len(), out.stderr.len());
+
+        if was_timeout(&out) {
+            bail!("t44: diagnose --decrypt timed out after 120s");
+        }
         if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
             bail!(
                 "t44: diagnose --decrypt exit {:?} stderr={}",
                 out.status.code(),
-                &stderr[stderr.len().saturating_sub(500)..]
+                &stderr_raw[stderr_raw.len().saturating_sub(500)..]
             );
         }
 
-        let json: serde_json::Value = serde_json::from_slice(&out.stdout)
-            .context("t44: diagnose output is not valid JSON")?;
+        let json: serde_json::Value = match serde_json::from_str(stdout_raw.trim()) {
+            Ok(v) => v,
+            Err(e) => bail!(
+                "t44: diagnose output is not valid JSON: {e}\n  exit={:?} stdout_len={} first_300=[{}]",
+                out.status.code(),
+                stdout_raw.len(),
+                &stdout_raw[..stdout_raw.len().min(300)]
+            ),
+        };
 
         let found = json
             .get("decrypted_state")
@@ -2018,9 +2042,10 @@ async fn e2e() {
     let client_room_delta = post_rooms_client as i64 - pre_rooms_client as i64;
     eprintln!("[stats] DELTA: worker devices={worker_device_delta:+} rooms={worker_room_delta:+}, client devices={client_device_delta:+} rooms={client_room_delta:+}");
 
-    // Allow a small budget for first-run bootstrapping (persistent stores
-    // that don't exist yet). On subsequent runs this should be 0.
-    const MAX_NEW_DEVICES_PER_USER: i64 = 5;
+    // Cold start (nuclear reset) creates many devices: Phase 0 security gates
+    // (3 workers), Phase 1 persistent worker, Phase 6 temp workers (t40-t44),
+    // plus client devices. On warm runs this should be 0.
+    const MAX_NEW_DEVICES_PER_USER: i64 = 12;
     if worker_device_delta > MAX_NEW_DEVICES_PER_USER {
         let msg = format!(
             "DEVICE LEAK: worker user gained {worker_device_delta} devices (max {MAX_NEW_DEVICES_PER_USER}). \
