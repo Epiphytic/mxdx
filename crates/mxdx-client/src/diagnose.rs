@@ -415,6 +415,7 @@ async fn decrypt_with_temp_client(
     client
         .matrix_auth()
         .login_username(matrix_user, password)
+        .device_id("mxdx-diagnose")
         .send()
         .await
         .context("diagnose temp client login failed")?;

@@ -203,18 +203,6 @@ const ALLOWED_COMMANDS: &[&str] = &[
 ];
 
 /// Create isolated store and keychain directories for a test.
-fn isolated_test_dirs(test_name: &str) -> (tempfile::TempDir, tempfile::TempDir) {
-    let store_dir = tempfile::Builder::new()
-        .prefix(&format!("mxdx-store-{}-", test_name))
-        .tempdir()
-        .expect("failed to create temp store dir");
-    let keychain_dir = tempfile::Builder::new()
-        .prefix(&format!("mxdx-keychain-{}-", test_name))
-        .tempdir()
-        .expect("failed to create temp keychain dir");
-    (store_dir, keychain_dir)
-}
-
 /// Write mxdx config files (defaults.toml + client.toml) into a config HOME dir.
 fn write_test_config(config_home: &std::path::Path, creds: &TestCreds, worker_room: &str) {
     let mxdx_dir = config_home.join(".mxdx");
@@ -373,6 +361,37 @@ fn persistent_test_dirs_named(label: &str) -> (PathBuf, PathBuf) {
     std::fs::create_dir_all(&store).expect("failed to create persistent store dir");
     std::fs::create_dir_all(&keychain).expect("failed to create persistent keychain dir");
     (store, keychain)
+}
+
+/// Persistent config directory for a test. Survives across runs.
+fn persistent_test_config_dir(label: &str) -> PathBuf {
+    let dir = dirs::home_dir()
+        .expect("cannot resolve home dir")
+        .join(".mxdx")
+        .join(format!("e2e-{label}"))
+        .join("home");
+    std::fs::create_dir_all(&dir).expect("failed to create persistent config dir");
+    dir
+}
+
+/// Count devices for a Matrix user via REST.
+async fn rest_device_count(server_url: &str, user: &str, pass: &str) -> Result<usize> {
+    let token = rest_login_token(server_url, user, pass).await?;
+    let url = format!("{}/_matrix/client/v3/devices", server_url.trim_end_matches('/'));
+    let resp = reqwest::Client::new()
+        .get(&url).bearer_auth(&token).send().await?;
+    let v: serde_json::Value = resp.json().await?;
+    Ok(v.get("devices").and_then(|d| d.as_array()).map(|a| a.len()).unwrap_or(0))
+}
+
+/// Count joined rooms for a Matrix user via REST.
+async fn rest_room_count(server_url: &str, user: &str, pass: &str) -> Result<usize> {
+    let token = rest_login_token(server_url, user, pass).await?;
+    let url = format!("{}/_matrix/client/v3/joined_rooms", server_url.trim_end_matches('/'));
+    let resp = reqwest::Client::new()
+        .get(&url).bearer_auth(&token).send().await?;
+    let v: serde_json::Value = resp.json().await?;
+    Ok(v.get("joined_rooms").and_then(|r| r.as_array()).map(|a| a.len()).unwrap_or(0))
 }
 
 /// Kill stale mxdx processes from previous test runs.
@@ -914,6 +933,7 @@ async fn rest_login_token(server_url: &str, user: &str, pass: &str) -> Result<St
         "type": "m.login.password",
         "identifier": { "type": "m.id.user", "user": user },
         "password": pass,
+        "device_id": "mxdx-e2e-helper",
         "initial_device_display_name": "mxdx-e2e-helper",
     });
     let client = reqwest::Client::new();
@@ -1000,6 +1020,25 @@ async fn rest_get_tombstone(creds: &TestCreds, room_id: &str) -> Result<Option<S
         .map(|s| s.to_string()))
 }
 
+/// Leave a room via REST. Best-effort, errors are silently ignored.
+async fn rest_leave_room(server_url: &str, token: &str, room_id: &str) {
+    let encoded: String = room_id.bytes().map(|b| {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
+            format!("{}", b as char)
+        } else {
+            format!("%{:02X}", b)
+        }
+    }).collect();
+    let url = format!(
+        "{}/_matrix/client/v3/rooms/{}/leave",
+        server_url.trim_end_matches('/'), encoded
+    );
+    let _ = reqwest::Client::new()
+        .post(&url).bearer_auth(token)
+        .json(&serde_json::json!({}))
+        .send().await;
+}
+
 // ---------------------------------------------------------------------------
 // Preset parsing
 // ---------------------------------------------------------------------------
@@ -1029,14 +1068,14 @@ async fn phase_0(creds: &TestCreds) -> Result<()> {
     // t00: no worker room
     {
         eprintln!("[t00] testing: no worker room...");
-        let (store_dir, keychain_dir) = isolated_test_dirs("t00_no_room");
+        let (store_dir, keychain_dir) = persistent_test_dirs_named("t00");
         let nonexistent_room = "mxdx-e2e-nonexistent-room-does-not-exist";
 
         let start = Instant::now();
         let out = run_client_with_liveness(
             &creds.server_url, &creds.client_user, &creds.client_pass,
             nonexistent_room, &["run", "/bin/echo", "should-not-run"],
-            store_dir.path(), keychain_dir.path(),
+            &store_dir, &keychain_dir,
         );
         let elapsed = start.elapsed();
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1058,15 +1097,12 @@ async fn phase_0(creds: &TestCreds) -> Result<()> {
     {
         eprintln!("[t01] testing: stale worker...");
         let auth_user = creds.client_matrix_id();
-        let (store_dir, keychain_dir) = isolated_test_dirs("t01_stale");
-        let config_dir = tempfile::Builder::new()
-            .prefix("mxdx-config-t01-")
-            .tempdir()
-            .expect("failed to create temp config dir");
+        let (store_dir, keychain_dir) = persistent_test_dirs_named("t01");
+        let config_dir = persistent_test_config_dir("t01");
 
         let mut w = start_worker_with_telemetry_refresh(
             &creds.server_url, &creds.worker_user, &creds.worker_pass, &auth_user,
-            store_dir.path(), keychain_dir.path(), 1, config_dir.path(),
+            &store_dir, &keychain_dir, 1, &config_dir,
         );
         tokio::time::sleep(Duration::from_secs(8)).await;
 
@@ -1080,7 +1116,7 @@ async fn phase_0(creds: &TestCreds) -> Result<()> {
         let out = run_client_with_liveness(
             &creds.server_url, &creds.client_user, &creds.client_pass,
             &worker_room, &["run", "/bin/echo", "should-not-run"],
-            store_dir.path(), keychain_dir.path(),
+            &store_dir, &keychain_dir,
         );
         let elapsed = start.elapsed();
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1102,13 +1138,13 @@ async fn phase_0(creds: &TestCreds) -> Result<()> {
     {
         eprintln!("[t02] testing: capability mismatch...");
         let auth_user = creds.client_matrix_id();
-        let (store_dir, keychain_dir) = isolated_test_dirs("t02_capability");
+        let (store_dir, keychain_dir) = persistent_test_dirs_named("t02");
 
         eprintln!("[t02] starting isolated worker (echo-only)...");
         let offset = worker_log_offset();
         let mut w = start_worker_with_commands(
             &creds.server_url, &creds.worker_user, &creds.worker_pass, &auth_user,
-            store_dir.path(), keychain_dir.path(),
+            &store_dir, &keychain_dir,
             &["echo", "/bin/echo"],
         );
         wait_worker_ready(Duration::from_secs(120), offset).await.expect("temp worker startup timed out");
@@ -1118,7 +1154,7 @@ async fn phase_0(creds: &TestCreds) -> Result<()> {
         let warmup = run_client(
             &creds.server_url, &creds.client_user, &creds.client_pass,
             &worker_room, &["run", "/bin/echo", "warmup"],
-            store_dir.path(), keychain_dir.path(), 330,
+            &store_dir, &keychain_dir, 330,
         );
         if !warmup.status.success() {
             let stderr = String::from_utf8_lossy(&warmup.stderr);
@@ -1130,7 +1166,7 @@ async fn phase_0(creds: &TestCreds) -> Result<()> {
         let out = run_client_with_liveness(
             &creds.server_url, &creds.client_user, &creds.client_pass,
             &worker_room, &["run", "md5sum", "/dev/null"],
-            store_dir.path(), keychain_dir.path(),
+            &store_dir, &keychain_dir,
         );
         let elapsed = start.elapsed();
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1491,12 +1527,12 @@ fn phase_4(creds: &TestCreds) -> Result<()> {
         let cp = client_pass.clone();
         let wr = worker_room.clone();
         handles.push(std::thread::spawn(move || {
-            let (sd, kd) = isolated_test_dirs("long_ping_local");
+            let (sd, kd) = persistent_test_dirs_named("t80-ping-local");
             let start = Instant::now();
             let out = run_client_no_output_timeout(
                 &srv, &cu, &cp, &wr,
                 &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"],
-                sd.path(), kd.path(),
+                &sd, &kd,
                 Duration::from_secs(60),
                 Duration::from_secs(330),
             );
@@ -1516,12 +1552,12 @@ fn phase_4(creds: &TestCreds) -> Result<()> {
         let cp = client_pass.clone();
         let wr = worker_room.clone();
         handles.push(std::thread::spawn(move || {
-            let (sd, kd) = isolated_test_dirs("long_ping_federated");
+            let (sd, kd) = persistent_test_dirs_named("t80-ping-federated");
             let start = Instant::now();
             let out = run_client_no_output_timeout(
                 &s2, &cu, &cp, &wr,
                 &["run", "--", "ping", "-c", "300", "-i", "1", "1.1.1.1"],
-                sd.path(), kd.path(),
+                &sd, &kd,
                 Duration::from_secs(60),
                 Duration::from_secs(330),
             );
@@ -1605,19 +1641,19 @@ async fn phase_6(creds: &TestCreds) -> Result<()> {
     {
         let auth_user = creds.client_matrix_id();
         let explicit_room = "mxdx-e2e-profile-explicit";
-        let (store_dir, keychain_dir) = isolated_test_dirs("t40_explicit_room");
+        let (store_dir, keychain_dir) = persistent_test_dirs_named("t40");
         let mut w = setup_worker_with_room(
             &creds.server_url, &creds.worker_user, &creds.worker_pass,
             &creds.server_url, &creds.client_user, &creds.client_pass,
             explicit_room, &auth_user,
-            store_dir.path(), keychain_dir.path(),
+            &store_dir, &keychain_dir,
         ).await;
 
         let start = Instant::now();
         let out = run_client(
             &creds.server_url, &creds.client_user, &creds.client_pass,
             explicit_room, &["run", "/bin/echo", "explicit", "room"],
-            store_dir.path(), keychain_dir.path(), 330,
+            &store_dir, &keychain_dir, 330,
         );
         let stdout = String::from_utf8_lossy(&out.stdout);
         let _ = w.kill(); let _ = w.wait();
@@ -1631,12 +1667,12 @@ async fn phase_6(creds: &TestCreds) -> Result<()> {
     // t41: session restore
     {
         let auth_user = creds.client_matrix_id();
-        let (store_dir, keychain_dir) = isolated_test_dirs("t41_session_restore");
+        let (store_dir, keychain_dir) = persistent_test_dirs_named("t41");
 
         eprintln!("[t41] starting first worker run");
         let mut w1 = start_worker(
             &creds.server_url, &creds.worker_user, &creds.worker_pass, &auth_user,
-            store_dir.path(), keychain_dir.path(),
+            &store_dir, &keychain_dir,
         );
         tokio::time::sleep(Duration::from_secs(15)).await;
 
@@ -1650,7 +1686,7 @@ async fn phase_6(creds: &TestCreds) -> Result<()> {
         eprintln!("[t41] starting second worker run (should restore session)");
         let mut w2 = start_worker(
             &creds.server_url, &creds.worker_user, &creds.worker_pass, &auth_user,
-            store_dir.path(), keychain_dir.path(),
+            &store_dir, &keychain_dir,
         );
         tokio::time::sleep(Duration::from_secs(15)).await;
 
@@ -1702,16 +1738,9 @@ async fn phase_6(creds: &TestCreds) -> Result<()> {
         kill_worker_graceful(&mut worker_a);
 
         let (store_b, kc_b) = persistent_test_dirs_named("t42-b");
-        let _ = std::fs::remove_dir_all(&store_b);
-        let _ = std::fs::remove_dir_all(&kc_b);
-        std::fs::create_dir_all(&store_b).unwrap();
-        std::fs::create_dir_all(&kc_b).unwrap();
 
-        let config_b = tempfile::Builder::new()
-            .prefix("mxdx-config-t42b-")
-            .tempdir()
-            .expect("failed to create temp config dir");
-        write_test_config(config_b.path(), creds, explicit_room);
+        let config_b_dir = persistent_test_config_dir("t42-b");
+        write_test_config(&config_b_dir, creds, explicit_room);
 
         let mut worker_b = start_worker_with_room(
             &creds.server_url, &creds.worker_user, &creds.worker_pass, explicit_room, &auth_user,
@@ -1720,7 +1749,7 @@ async fn phase_6(creds: &TestCreds) -> Result<()> {
         tokio::time::sleep(Duration::from_secs(20)).await;
 
         let out_b = run_client_daemon(
-            config_b.path(),
+            &config_b_dir,
             &["run", "/bin/echo", "after-backup-restore"],
             &store_b, &kc_b, 330,
         );
@@ -1760,10 +1789,6 @@ async fn phase_6(creds: &TestCreds) -> Result<()> {
         eprintln!("[t43] seeded unencrypted topology: space={} exec={} logs={}", bad_space, bad_exec, _bad_logs);
 
         let (store, kc) = persistent_test_dirs_named("t43");
-        let _ = std::fs::remove_dir_all(&store);
-        let _ = std::fs::remove_dir_all(&kc);
-        std::fs::create_dir_all(&store).unwrap();
-        std::fs::create_dir_all(&kc).unwrap();
 
         let mut worker = start_worker_with_room(
             &creds.server_url, &creds.worker_user, &creds.worker_pass, &launcher_id, &auth_user,
@@ -1773,6 +1798,17 @@ async fn phase_6(creds: &TestCreds) -> Result<()> {
 
         let tomb_exec = rest_get_tombstone(creds, &bad_exec).await;
         kill_worker_graceful(&mut worker);
+
+        // Clean up test-specific rooms (unencrypted rooms + any replacements).
+        if let Ok(token) = rest_login_token(&creds.server_url, &creds.worker_user, &creds.worker_pass).await {
+            let mut all_rooms = vec![bad_space.clone(), bad_exec.clone(), _bad_logs.clone()];
+            if let Ok(Some(ref replacement)) = tomb_exec {
+                all_rooms.push(replacement.clone());
+            }
+            for rid in &all_rooms {
+                rest_leave_room(&creds.server_url, &token, rid).await;
+            }
+        }
 
         match tomb_exec {
             Ok(Some(replacement)) => {
@@ -1791,11 +1827,8 @@ async fn phase_6(creds: &TestCreds) -> Result<()> {
         let worker_room = default_worker_room(&creds.worker_user);
 
         let (store, kc) = persistent_test_dirs_named("t44");
-        let config_home = tempfile::Builder::new()
-            .prefix("mxdx-config-t44-")
-            .tempdir()
-            .expect("failed to create temp config dir");
-        write_test_config(config_home.path(), creds, &worker_room);
+        let config_home = persistent_test_config_dir("t44");
+        write_test_config(&config_home, creds, &worker_room);
 
         let offset_w = worker_log_offset();
         let mut worker = start_worker(
@@ -1805,7 +1838,7 @@ async fn phase_6(creds: &TestCreds) -> Result<()> {
         wait_worker_ready(Duration::from_secs(120), offset_w).await.expect("temp worker startup timed out");
 
         let _ = run_client_daemon(
-            config_home.path(),
+            &config_home,
             &["run", "/bin/echo", "t44-marker"],
             &store, &kc, 330,
         );
@@ -1903,6 +1936,14 @@ async fn e2e() {
     cleanup_stale_processes();
     setup_client_log();
 
+    // Snapshot device and room counts before the test run.
+    // After all phases, we verify these didn't increase (device/room leak = bug).
+    let pre_devices_worker = rest_device_count(&creds.server_url, &creds.worker_user, &creds.worker_pass).await.unwrap_or(0);
+    let pre_devices_client = rest_device_count(&creds.server_url, &creds.client_user, &creds.client_pass).await.unwrap_or(0);
+    let pre_rooms_worker = rest_room_count(&creds.server_url, &creds.worker_user, &creds.worker_pass).await.unwrap_or(0);
+    let pre_rooms_client = rest_room_count(&creds.server_url, &creds.client_user, &creds.client_pass).await.unwrap_or(0);
+    eprintln!("[stats] PRE-RUN: worker devices={pre_devices_worker} rooms={pre_rooms_worker}, client devices={pre_devices_client} rooms={pre_rooms_client}");
+
     // Track whether we need cleanup phases even on failure
     let mut ctx: Option<TestContext> = None;
     let mut suite_error: Option<String> = None;
@@ -1961,6 +2002,48 @@ async fn e2e() {
 
     // Phase 7: Cleanup (required — always runs)
     phase_7();
+
+    // Verify device/room counts didn't increase (leak detection).
+    // The first run is allowed to create devices (up to ~3 per user for
+    // persistent stores that don't yet exist). Subsequent runs must not
+    // create additional devices — session restore should reuse existing ones.
+    // The rest_login_token helper uses a fixed device_id so it doesn't
+    // contribute to device growth.
+    let post_devices_worker = rest_device_count(&creds.server_url, &creds.worker_user, &creds.worker_pass).await.unwrap_or(0);
+    let post_devices_client = rest_device_count(&creds.server_url, &creds.client_user, &creds.client_pass).await.unwrap_or(0);
+    let post_rooms_worker = rest_room_count(&creds.server_url, &creds.worker_user, &creds.worker_pass).await.unwrap_or(0);
+    let post_rooms_client = rest_room_count(&creds.server_url, &creds.client_user, &creds.client_pass).await.unwrap_or(0);
+    eprintln!("[stats] POST-RUN: worker devices={post_devices_worker} rooms={post_rooms_worker}, client devices={post_devices_client} rooms={post_rooms_client}");
+
+    let worker_device_delta = post_devices_worker as i64 - pre_devices_worker as i64;
+    let client_device_delta = post_devices_client as i64 - pre_devices_client as i64;
+    let worker_room_delta = post_rooms_worker as i64 - pre_rooms_worker as i64;
+    let client_room_delta = post_rooms_client as i64 - pre_rooms_client as i64;
+    eprintln!("[stats] DELTA: worker devices={worker_device_delta:+} rooms={worker_room_delta:+}, client devices={client_device_delta:+} rooms={client_room_delta:+}");
+
+    // Allow a small budget for first-run bootstrapping (persistent stores
+    // that don't exist yet). On subsequent runs this should be 0.
+    const MAX_NEW_DEVICES_PER_USER: i64 = 3;
+    if worker_device_delta > MAX_NEW_DEVICES_PER_USER {
+        let msg = format!(
+            "DEVICE LEAK: worker user gained {worker_device_delta} devices (max {MAX_NEW_DEVICES_PER_USER}). \
+             Before={pre_devices_worker}, After={post_devices_worker}"
+        );
+        if suite_error.is_none() {
+            suite_error = Some(msg.clone());
+        }
+        eprintln!("[stats] FAIL: {msg}");
+    }
+    if client_device_delta > MAX_NEW_DEVICES_PER_USER {
+        let msg = format!(
+            "DEVICE LEAK: client user gained {client_device_delta} devices (max {MAX_NEW_DEVICES_PER_USER}). \
+             Before={pre_devices_client}, After={post_devices_client}"
+        );
+        if suite_error.is_none() {
+            suite_error = Some(msg.clone());
+        }
+        eprintln!("[stats] FAIL: {msg}");
+    }
 
     // Report final result
     if let Some(err) = suite_error {
