@@ -1,13 +1,4 @@
 {
-  "last_dolt_commit": "r2ubavqqj30suv832pdo14nl0pqobngm",
-  "last_event_id": 0,
-  "timestamp": "2026-04-02T05:48:00.461315492Z",
-  "counts": {
-    "issues": 4,
-    "events": 5,
-    "comments": 0,
-    "dependencies": 0,
-    "labels": 1,
-    "config": 12
-  }
+  "last_dolt_commit": "kgurb3fuusg98kqgrp6k9ppta9fphr3q",
+  "timestamp": "2026-04-10T22:20:05.634355125Z"
 }
