@@ -469,42 +469,6 @@ fn start_worker(hs: &str, user: &str, pass: &str, authorized_user: &str,
     spawn_child(cmd)
 }
 
-/// Start the worker with a custom telemetry refresh interval.
-fn start_worker_with_telemetry_refresh(
-    hs: &str, user: &str, pass: &str, authorized_user: &str,
-    store_dir: &std::path::Path, keychain_dir: &std::path::Path,
-    telemetry_refresh_secs: u64,
-    config_dir: &std::path::Path,
-) -> Child {
-    let mxdx_config_dir = config_dir.join(".mxdx");
-    std::fs::create_dir_all(&mxdx_config_dir).expect("failed to create config dir");
-    std::fs::write(
-        mxdx_config_dir.join("worker.toml"),
-        format!("telemetry_refresh_seconds = {}\n", telemetry_refresh_secs),
-    ).expect("failed to write worker.toml");
-
-    let mut args = vec![
-        "start".to_string(),
-        "--homeserver".to_string(), hs.to_string(),
-        "--username".to_string(), user.to_string(),
-        "--password".to_string(), pass.to_string(),
-        "--authorized-user".to_string(), authorized_user.to_string(),
-    ];
-    for cmd in ALLOWED_COMMANDS {
-        args.push("--allowed-command".to_string());
-        args.push(cmd.to_string());
-    }
-    let (out, err) = worker_log_files();
-    let mut cmd = Command::new(cargo_bin("mxdx-worker"));
-    cmd.args(&args)
-        .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
-        .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
-        .env("HOME", config_dir.to_str().unwrap())
-        .stdout(Stdio::from(out))
-        .stderr(Stdio::from(err));
-    spawn_child(cmd)
-}
-
 /// Start the worker with an explicit `--room-name` override.
 fn start_worker_with_room(hs: &str, user: &str, pass: &str, room: &str, authorized_user: &str,
                           store_dir: &std::path::Path, keychain_dir: &std::path::Path) -> Child {
@@ -530,9 +494,9 @@ fn start_worker_with_room(hs: &str, user: &str, pass: &str, room: &str, authoriz
     spawn_child(cmd)
 }
 
-/// Start the worker with only specific allowed commands (for capability mismatch tests).
-fn start_worker_with_commands(
-    hs: &str, user: &str, pass: &str, authorized_user: &str,
+/// Start the worker with specific allowed commands and optional room name.
+fn start_worker_with_room_and_commands(
+    hs: &str, user: &str, pass: &str, room: Option<&str>, authorized_user: &str,
     store_dir: &std::path::Path, keychain_dir: &std::path::Path,
     allowed_commands: &[&str],
 ) -> Child {
@@ -543,6 +507,10 @@ fn start_worker_with_commands(
         "--password".to_string(), pass.to_string(),
         "--authorized-user".to_string(), authorized_user.to_string(),
     ];
+    if let Some(r) = room {
+        args.push("--room-name".to_string());
+        args.push(r.to_string());
+    }
     for cmd in allowed_commands {
         args.push("--allowed-command".to_string());
         args.push(cmd.to_string());
@@ -1093,16 +1061,17 @@ async fn phase_0(creds: &TestCreds) -> Result<()> {
         eprintln!("[t00] PASS: client correctly rejected — no worker room");
     }
 
-    // t01: stale worker
+    // t01: stale worker — uses a dedicated room name so its lock doesn't
+    // collide with Phase 1's persistent worker on the default room.
     {
         eprintln!("[t01] testing: stale worker...");
         let auth_user = creds.client_matrix_id();
         let (store_dir, keychain_dir) = persistent_test_dirs_named("t01");
-        let config_dir = persistent_test_config_dir("t01");
+        let t01_room = "mxdx-e2e-t01-stale-worker";
 
-        let mut w = start_worker_with_telemetry_refresh(
-            &creds.server_url, &creds.worker_user, &creds.worker_pass, &auth_user,
-            &store_dir, &keychain_dir, 1, &config_dir,
+        let mut w = start_worker_with_room(
+            &creds.server_url, &creds.worker_user, &creds.worker_pass,
+            t01_room, &auth_user, &store_dir, &keychain_dir,
         );
         tokio::time::sleep(Duration::from_secs(8)).await;
 
@@ -1111,7 +1080,7 @@ async fn phase_0(creds: &TestCreds) -> Result<()> {
         eprintln!("[t01] worker killed, waiting for staleness threshold...");
         tokio::time::sleep(Duration::from_secs(5)).await;
 
-        let worker_room = default_worker_room(&creds.worker_user);
+        let worker_room = t01_room;
         let start = Instant::now();
         let out = run_client_with_liveness(
             &creds.server_url, &creds.client_user, &creds.client_pass,
@@ -1140,16 +1109,17 @@ async fn phase_0(creds: &TestCreds) -> Result<()> {
         let auth_user = creds.client_matrix_id();
         let (store_dir, keychain_dir) = persistent_test_dirs_named("t02");
 
+        let t02_room = "mxdx-e2e-t02-capability";
         eprintln!("[t02] starting isolated worker (echo-only)...");
         let offset = worker_log_offset();
-        let mut w = start_worker_with_commands(
-            &creds.server_url, &creds.worker_user, &creds.worker_pass, &auth_user,
-            &store_dir, &keychain_dir,
+        let mut w = start_worker_with_room_and_commands(
+            &creds.server_url, &creds.worker_user, &creds.worker_pass,
+            Some(t02_room), &auth_user, &store_dir, &keychain_dir,
             &["echo", "/bin/echo"],
         );
         wait_worker_ready(Duration::from_secs(120), offset).await.expect("temp worker startup timed out");
 
-        let worker_room = default_worker_room(&creds.worker_user);
+        let worker_room = t02_room;
         eprintln!("[t02] running warmup...");
         let warmup = run_client(
             &creds.server_url, &creds.client_user, &creds.client_pass,
