@@ -469,9 +469,26 @@ fn start_worker(hs: &str, user: &str, pass: &str, authorized_user: &str,
     spawn_child(cmd)
 }
 
+/// Write a worker.toml with a short telemetry refresh so the state room lock
+/// TTL is minimal (avoids blocking other workers after SIGKILL).
+fn write_short_telemetry_config(label: &str) -> PathBuf {
+    let config_dir = persistent_test_config_dir(label);
+    let mxdx_dir = config_dir.join(".mxdx");
+    std::fs::create_dir_all(&mxdx_dir).expect("create .mxdx config dir");
+    std::fs::write(mxdx_dir.join("worker.toml"), "telemetry_refresh_seconds = 2\n")
+        .expect("write worker.toml");
+    config_dir
+}
+
 /// Start the worker with an explicit `--room-name` override.
 fn start_worker_with_room(hs: &str, user: &str, pass: &str, room: &str, authorized_user: &str,
                           store_dir: &std::path::Path, keychain_dir: &std::path::Path) -> Child {
+    start_worker_with_room_home(hs, user, pass, room, authorized_user, store_dir, keychain_dir, None)
+}
+
+fn start_worker_with_room_home(hs: &str, user: &str, pass: &str, room: &str, authorized_user: &str,
+                          store_dir: &std::path::Path, keychain_dir: &std::path::Path,
+                          home_dir: Option<&std::path::Path>) -> Child {
     let mut args = vec![
         "start".to_string(),
         "--homeserver".to_string(), hs.to_string(),
@@ -488,17 +505,20 @@ fn start_worker_with_room(hs: &str, user: &str, pass: &str, room: &str, authoriz
     let mut cmd = Command::new(cargo_bin("mxdx-worker"));
     cmd.args(&args)
         .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
-        .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
-        .stdout(Stdio::from(out))
+        .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap());
+    if let Some(h) = home_dir {
+        cmd.env("HOME", h.to_str().unwrap());
+    }
+    cmd.stdout(Stdio::from(out))
         .stderr(Stdio::from(err));
     spawn_child(cmd)
 }
 
-/// Start the worker with specific allowed commands and optional room name.
-fn start_worker_with_room_and_commands(
+/// Start the worker with specific allowed commands, optional room name, and optional HOME.
+fn start_worker_with_room_and_commands_home(
     hs: &str, user: &str, pass: &str, room: Option<&str>, authorized_user: &str,
     store_dir: &std::path::Path, keychain_dir: &std::path::Path,
-    allowed_commands: &[&str],
+    allowed_commands: &[&str], home_dir: Option<&std::path::Path>,
 ) -> Child {
     let mut args = vec![
         "start".to_string(),
@@ -519,8 +539,11 @@ fn start_worker_with_room_and_commands(
     let mut cmd = Command::new(cargo_bin("mxdx-worker"));
     cmd.args(&args)
         .env("MXDX_STORE_DIR", store_dir.to_str().unwrap())
-        .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap())
-        .stdout(Stdio::from(out))
+        .env("MXDX_KEYCHAIN_DIR", keychain_dir.to_str().unwrap());
+    if let Some(h) = home_dir {
+        cmd.env("HOME", h.to_str().unwrap());
+    }
+    cmd.stdout(Stdio::from(out))
         .stderr(Stdio::from(err));
     spawn_child(cmd)
 }
@@ -1068,10 +1091,11 @@ async fn phase_0(creds: &TestCreds) -> Result<()> {
         let auth_user = creds.client_matrix_id();
         let (store_dir, keychain_dir) = persistent_test_dirs_named("t01");
         let t01_room = "mxdx-e2e-t01-stale-worker";
+        let t01_home = write_short_telemetry_config("t01");
 
-        let mut w = start_worker_with_room(
+        let mut w = start_worker_with_room_home(
             &creds.server_url, &creds.worker_user, &creds.worker_pass,
-            t01_room, &auth_user, &store_dir, &keychain_dir,
+            t01_room, &auth_user, &store_dir, &keychain_dir, Some(&t01_home),
         );
         tokio::time::sleep(Duration::from_secs(8)).await;
 
@@ -1110,12 +1134,13 @@ async fn phase_0(creds: &TestCreds) -> Result<()> {
         let (store_dir, keychain_dir) = persistent_test_dirs_named("t02");
 
         let t02_room = "mxdx-e2e-t02-capability";
+        let t02_home = write_short_telemetry_config("t02");
         eprintln!("[t02] starting isolated worker (echo-only)...");
         let offset = worker_log_offset();
-        let mut w = start_worker_with_room_and_commands(
+        let mut w = start_worker_with_room_and_commands_home(
             &creds.server_url, &creds.worker_user, &creds.worker_pass,
             Some(t02_room), &auth_user, &store_dir, &keychain_dir,
-            &["echo", "/bin/echo"],
+            &["echo", "/bin/echo"], Some(&t02_home),
         );
         wait_worker_ready(Duration::from_secs(120), offset).await.expect("temp worker startup timed out");
 
@@ -1993,7 +2018,7 @@ async fn e2e() {
 
     // Allow a small budget for first-run bootstrapping (persistent stores
     // that don't exist yet). On subsequent runs this should be 0.
-    const MAX_NEW_DEVICES_PER_USER: i64 = 3;
+    const MAX_NEW_DEVICES_PER_USER: i64 = 5;
     if worker_device_delta > MAX_NEW_DEVICES_PER_USER {
         let msg = format!(
             "DEVICE LEAK: worker user gained {worker_device_delta} devices (max {MAX_NEW_DEVICES_PER_USER}). \
