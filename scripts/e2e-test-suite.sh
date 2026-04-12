@@ -58,6 +58,16 @@ fi
 
 echo "MXDX_BIN_DIR=${MXDX_BIN_DIR}"
 
+# ── Pre-test: Purge stale federation state ────────────────────────────
+
+echo ""
+echo "=== Pre-test: Purging stale federation state ==="
+if [[ -f scripts/purge-test-accounts.mjs ]]; then
+  node scripts/purge-test-accounts.mjs || echo "Warning: pre-test purge had errors (continuing anyway)"
+else
+  echo "scripts/purge-test-accounts.mjs not found — skipping pre-test purge"
+fi
+
 # ── Create test-results directory ──────────────────────────────────────
 
 mkdir -p test-results

@@ -6,13 +6,15 @@
  * Usage: node scripts/purge-test-accounts.mjs
  */
 
-import { logoutAll } from '../packages/core/cleanup.js';
+import { logoutAll, federatedLeave } from '../packages/core/cleanup.js';
 
 const ACCOUNTS = [
   { homeserver: 'https://ca1-beta.mxdx.dev', username: 'e2etest-test1', password: 'mxdx-e2e-test-2026!' },
   { homeserver: 'https://ca1-beta.mxdx.dev', username: 'e2etest-test2', password: 'mxdx-e2e-test-2026!' },
+  { homeserver: 'https://ca1-beta.mxdx.dev', username: 'e2etest-coordinator', password: 'mxdx-e2e-test-2026!' },
   { homeserver: 'https://ca2-beta.mxdx.dev', username: 'e2etest-test1', password: 'mxdx-e2e-test-2026!' },
   { homeserver: 'https://ca2-beta.mxdx.dev', username: 'e2etest-test2', password: 'mxdx-e2e-test-2026!' },
+  { homeserver: 'https://ca2-beta.mxdx.dev', username: 'e2etest-coordinator', password: 'mxdx-e2e-test-2026!' },
 ];
 
 async function login(homeserver, username, password) {
@@ -120,6 +122,76 @@ for (const account of ACCOUNTS) {
     console.log();
   } catch (e) {
     console.error(`Failed to purge ${account.username}: ${e.message}`);
+  }
+}
+
+// ── Phase 2: Cross-server federated leave ────────────────────────────
+console.log('\n=== Federated room cleanup ===\n');
+
+const SERVERS = {
+  'ca1-beta.mxdx.dev': 'https://ca1-beta.mxdx.dev',
+  'ca2-beta.mxdx.dev': 'https://ca2-beta.mxdx.dev',
+};
+
+const USERNAMES = ['e2etest-test1', 'e2etest-test2', 'e2etest-coordinator'];
+const PASSWORD = 'mxdx-e2e-test-2026!';
+
+for (const username of USERNAMES) {
+  for (const [serverName, serverUrl] of Object.entries(SERVERS)) {
+    const log = (msg) => console.log(`[${username}@${serverName}] ${msg}`);
+
+    try {
+      const { accessToken } = await login(serverUrl, username, PASSWORD);
+      const rooms = await listJoinedRooms(serverUrl, accessToken);
+
+      if (rooms.length === 0) {
+        log('No rooms remaining');
+        await fetch(`${serverUrl}/_matrix/client/v3/logout`, {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        continue;
+      }
+
+      log(`${rooms.length} room(s) still joined — checking for stale federation`);
+
+      // Build remote server map (all servers EXCEPT current)
+      const remoteServers = {};
+      for (const [name, url] of Object.entries(SERVERS)) {
+        if (name !== serverName) {
+          remoteServers[name] = { url, username, password: PASSWORD };
+        }
+      }
+
+      for (const roomId of rooms) {
+        const result = await federatedLeave({
+          roomId,
+          localHomeserver: serverUrl,
+          localAccessToken: accessToken,
+          remoteServers,
+          verifyTimeoutMs: 3000,
+          onProgress: log,
+        });
+
+        if (!result.verified && result.remote) {
+          log(`⚠ Room ${roomId} may still have stale federation state`);
+        }
+      }
+
+      // Final verification
+      const remaining = await listJoinedRooms(serverUrl, accessToken);
+      log(`Final room count: ${remaining.length}`);
+
+      // Logout this session
+      await fetch(`${serverUrl}/_matrix/client/v3/logout`, {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+    } catch (err) {
+      log(`Error: ${err.message}`);
+    }
   }
 }
 

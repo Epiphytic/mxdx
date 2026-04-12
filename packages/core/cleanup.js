@@ -27,7 +27,7 @@ async function matrixFetch(homeserverUrl, path, accessToken, options = {}, _retr
   const resp = await fetch(url, {
     ...options,
     headers: {
-      'Authorization': `Bearer ${accessToken}`,
+      ...(accessToken ? { 'Authorization': `Bearer ${accessToken}` } : {}),
       'Content-Type': 'application/json',
       ...options.headers,
     },
@@ -358,4 +358,99 @@ async function fetchMxdxEvents(homeserverUrl, accessToken, roomId, olderThan, us
   }
 
   return events;
+}
+
+/**
+ * Leave a room from both the local and remote server's perspective.
+ * Matrix room IDs encode origin: !abc:server.name
+ * If the room originated on a different server, we log in on that server
+ * and leave there too, then verify the leave propagated.
+ *
+ * @param {object} opts
+ * @param {string} opts.roomId - The room to leave
+ * @param {string} opts.localHomeserver - The user's homeserver URL
+ * @param {string} opts.localAccessToken - Access token on local server
+ * @param {object} opts.remoteServers - Map of server_name -> { url, username, password }
+ *   e.g. { 'ca1-beta.mxdx.dev': { url: 'https://ca1-beta.mxdx.dev', username: 'e2etest-test1', password: '...' } }
+ * @param {number} [opts.verifyTimeoutMs=5000] - How long to poll for leave confirmation
+ * @param {function} [opts.onProgress]
+ * @returns {{ local: boolean, remote: boolean, verified: boolean }}
+ */
+export async function federatedLeave({ roomId, localHomeserver, localAccessToken, remoteServers, verifyTimeoutMs = 5000, onProgress = () => {} }) {
+  const result = { local: false, remote: false, verified: false };
+
+  // Step 1: Leave locally
+  onProgress(`Leaving ${roomId} locally...`);
+  const leaveResp = await matrixFetch(localHomeserver, `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/leave`, localAccessToken, { method: 'POST', body: '{}' });
+  result.local = leaveResp.ok || leaveResp.status === 403; // 403 = already left
+
+  // Forget locally (best effort)
+  await matrixFetch(localHomeserver, `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/forget`, localAccessToken, { method: 'POST', body: '{}' });
+
+  // Step 2: Determine origin server from room ID
+  const serverName = roomId.split(':').slice(1).join(':'); // handle : in server names
+  if (!serverName) {
+    onProgress(`Cannot parse server from room ID: ${roomId}`);
+    return result;
+  }
+
+  const remoteServer = remoteServers[serverName];
+  if (!remoteServer) {
+    onProgress(`No remote credentials for ${serverName}, skipping remote leave`);
+    return result;
+  }
+
+  // Step 3: Login on remote server and leave there too
+  onProgress(`Leaving ${roomId} on remote server ${serverName}...`);
+  try {
+    const loginResp = await matrixFetch(remoteServer.url, '/_matrix/client/v3/login', null, {
+      method: 'POST',
+      body: JSON.stringify({
+        type: 'm.login.password',
+        identifier: { type: 'm.id.user', user: remoteServer.username },
+        password: remoteServer.password,
+      }),
+    });
+
+    if (!loginResp.ok) {
+      onProgress(`Remote login failed on ${serverName}: ${loginResp.status}`);
+      return result;
+    }
+
+    const { access_token: remoteToken } = await loginResp.json();
+
+    // Leave on remote
+    const remoteLeaveResp = await matrixFetch(remoteServer.url, `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/leave`, remoteToken, { method: 'POST', body: '{}' });
+    result.remote = remoteLeaveResp.ok || remoteLeaveResp.status === 403;
+
+    // Forget on remote
+    await matrixFetch(remoteServer.url, `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/forget`, remoteToken, { method: 'POST', body: '{}' });
+
+    // Step 4: Verify — poll remote joined_rooms to confirm room is gone
+    const deadline = Date.now() + verifyTimeoutMs;
+    while (Date.now() < deadline) {
+      const joinedResp = await matrixFetch(remoteServer.url, '/_matrix/client/v3/joined_rooms', remoteToken);
+      if (joinedResp.ok) {
+        const { joined_rooms } = await joinedResp.json();
+        if (!joined_rooms.includes(roomId)) {
+          result.verified = true;
+          break;
+        }
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    // Logout remote session
+    await matrixFetch(remoteServer.url, '/_matrix/client/v3/logout', remoteToken, { method: 'POST', body: '{}' });
+
+    if (result.verified) {
+      onProgress(`✓ ${roomId} left on both servers and verified`);
+    } else {
+      onProgress(`⚠ ${roomId} left on both servers but could not verify removal`);
+    }
+  } catch (err) {
+    onProgress(`Error during remote leave on ${serverName}: ${err.message}`);
+  }
+
+  return result;
 }
