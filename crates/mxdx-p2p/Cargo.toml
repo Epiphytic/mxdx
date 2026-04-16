@@ -34,6 +34,10 @@ bytes = "1"
 # `sync` feature is runtime-free and works on wasm; we gate the richer
 # runtime features under the non-wasm target below.
 tokio = { version = "1", default-features = false, features = ["sync"] }
+# Phase 5 T-53 Verifying handshake uses Ed25519 signatures. Pure-Rust,
+# wasm-compatible. No `rand_core` feature needed here (we use
+# `aes_gcm::aead::OsRng` directly for key and nonce generation).
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Phase 5 driver + public API re-exports `Megolm<T>` from mxdx-matrix for
@@ -42,7 +46,6 @@ tokio = { version = "1", default-features = false, features = ["sync"] }
 # is incompatible with wasm32. Phase 8 (wasm driver) will revisit with a
 # wasm-compatible shim.
 mxdx-matrix = { path = "../mxdx-matrix", version = "1.1.0" }
-ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
 tracing = { workspace = true }
 # Native HTTP for TURN credential fetch. Gated off wasm — real wasm HTTP is a
 # Phase 8 concern (web-sys fetch). Phase 2 only exposes a stub on wasm.
