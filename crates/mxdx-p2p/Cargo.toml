@@ -35,3 +35,4 @@ getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] 
 
 [dev-dependencies]
 rand_chacha = "0.9"
+trybuild = "1"

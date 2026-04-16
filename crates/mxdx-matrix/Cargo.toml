@@ -30,3 +30,4 @@ uuid = { workspace = true }
 toml = { workspace = true }
 mockito = "1"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+trybuild = "1"
