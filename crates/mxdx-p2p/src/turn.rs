@@ -238,6 +238,271 @@ fn is_safe_scheme(url: &Url) -> bool {
 }
 
 // ---------------------------------------------------------------------------
+// Active-call refresh (T-21)
+// ---------------------------------------------------------------------------
+
+/// Outcome of a single refresh cycle in [`TurnRefreshTask`].
+///
+/// * [`Refreshed`](Self::Refreshed): new credentials fetched. The transport
+///   (Phase 3) will pass the associated URIs into
+///   `WebRtcChannel::restart_ice(new_ice_servers)` — this T-21 surface only
+///   produces the outcome; wiring is out of scope.
+/// * [`RetryPending`](Self::RetryPending): fetch failed; the task will retry
+///   with exponential backoff until the initial `expires_at()` is reached.
+/// * [`Expired`](Self::Expired): TTL elapsed without a successful fetch.
+///   The transport MUST hang up with reason `"turn_expired"` and fall back
+///   to Matrix (storm §2.4 / §4.1).
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug)]
+pub enum TurnRefreshOutcome {
+    Refreshed(TurnCredentials),
+    RetryPending,
+    Expired,
+}
+
+/// Abstraction over `fetch_turn_credentials` so the refresh loop can be
+/// tested without a real homeserver. Production code uses
+/// [`HttpFetcher`]; tests substitute a deterministic stub.
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+trait TurnFetcher: Send + Sync + 'static {
+    async fn fetch(&self) -> Result<Option<TurnCredentials>, TurnError>;
+}
+
+/// Production fetcher — wraps [`fetch_turn_credentials`] against a fixed
+/// homeserver URL and bearer token.
+#[cfg(not(target_arch = "wasm32"))]
+struct HttpFetcher {
+    homeserver: Url,
+    access_token: String,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[async_trait::async_trait]
+impl TurnFetcher for HttpFetcher {
+    async fn fetch(&self) -> Result<Option<TurnCredentials>, TurnError> {
+        fetch_turn_credentials(&self.homeserver, &self.access_token).await
+    }
+}
+
+/// Active-call TURN refresh loop.
+///
+/// Wakes at `refresh_at()` (= fetched_at + ttl/2), calls the fetcher, and
+/// emits one [`TurnRefreshOutcome`] per cycle on the outbound channel.
+/// On fetch failure, enters exponential backoff (5s, 10s, 20s, 40s, 60s
+/// cap) and keeps emitting `RetryPending` until either a refresh succeeds
+/// or the initial `expires_at()` passes (in which case it emits `Expired`
+/// and exits).
+///
+/// **Expiry-during-reconnect race** (storm §2.4 / §3.4): the transport
+/// (Phase 5) may need fresh credentials before sending `m.call.invite` on
+/// a reconnect. [`TurnRefreshTask::trigger_refresh_now`] wakes the loop
+/// immediately and causes it to fetch; the next outcome sent on the
+/// channel reflects that fetch. The transport awaits that outcome before
+/// sending the invite — serializing the reconnect path through a fresh
+/// fetch.
+///
+/// Shutdown: call [`TurnRefreshTask::shutdown`] to cancel the loop and
+/// await its join handle cleanly. In-flight reqwest futures drop; the
+/// in-memory `TurnCredentials` struct is zeroized by its `Drop` impl.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct TurnRefreshTask {
+    shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
+    trigger_tx: tokio::sync::mpsc::UnboundedSender<()>,
+    handle: Option<tokio::task::JoinHandle<()>>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl TurnRefreshTask {
+    /// Spawn a refresh loop seeded with `initial` credentials.
+    ///
+    /// Returns the task handle and an `mpsc::Receiver` of outcomes. Drop
+    /// the receiver to signal "caller no longer listening"; the task
+    /// itself runs until [`Self::shutdown`] is called or `Expired` is
+    /// emitted.
+    pub fn spawn(
+        initial: TurnCredentials,
+        homeserver: Url,
+        access_token: String,
+    ) -> (Self, tokio::sync::mpsc::Receiver<TurnRefreshOutcome>) {
+        let fetcher = HttpFetcher {
+            homeserver,
+            access_token,
+        };
+        Self::spawn_with_fetcher(initial, std::sync::Arc::new(fetcher))
+    }
+
+    /// Test-only: spawn with a caller-supplied fetcher.
+    #[cfg(test)]
+    fn spawn_with_fetcher_for_tests(
+        initial: TurnCredentials,
+        fetcher: std::sync::Arc<dyn TurnFetcher>,
+    ) -> (Self, tokio::sync::mpsc::Receiver<TurnRefreshOutcome>) {
+        Self::spawn_with_fetcher(initial, fetcher)
+    }
+
+    fn spawn_with_fetcher(
+        initial: TurnCredentials,
+        fetcher: std::sync::Arc<dyn TurnFetcher>,
+    ) -> (Self, tokio::sync::mpsc::Receiver<TurnRefreshOutcome>) {
+        let (outcome_tx, outcome_rx) = tokio::sync::mpsc::channel(8);
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+        let (trigger_tx, trigger_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let handle = tokio::spawn(async move {
+            run_refresh_loop(initial, fetcher, outcome_tx, shutdown_rx, trigger_rx).await;
+        });
+
+        (
+            TurnRefreshTask {
+                shutdown_tx: Some(shutdown_tx),
+                trigger_tx,
+                handle: Some(handle),
+            },
+            outcome_rx,
+        )
+    }
+
+    /// Wake the loop immediately and cause it to perform a fetch on the
+    /// next poll. Used by the reconnect-pending-with-expired-creds path
+    /// to serialize a fresh fetch before `m.call.invite`.
+    ///
+    /// Returns `Err(())` if the loop has already exited (e.g. received
+    /// `Expired` and stopped).
+    pub fn trigger_refresh_now(&self) -> Result<(), ()> {
+        self.trigger_tx.send(()).map_err(|_| ())
+    }
+
+    /// Signal shutdown and await the task's completion.
+    pub async fn shutdown(mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.await;
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for TurnRefreshTask {
+    fn drop(&mut self) {
+        // Best-effort shutdown if the caller forgot to await shutdown().
+        // The spawned task will observe the closed channel and exit its loop.
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            handle.abort();
+        }
+    }
+}
+
+/// Exponential backoff schedule (in seconds) for failed refreshes.
+/// Capped at 60s per storm §4.2 backoff policy.
+#[cfg(not(target_arch = "wasm32"))]
+const REFRESH_BACKOFF_SECS: &[u64] = &[5, 10, 20, 40, 60];
+
+/// Run the refresh loop. Exits when:
+/// * `shutdown_rx` fires (clean shutdown requested), OR
+/// * `Expired` outcome is emitted (TTL elapsed without success), OR
+/// * the outcome receiver is dropped (channel closed).
+///
+/// Timing uses [`tokio::time::Instant`] (monotonic, test-paused-aware) for
+/// sleeps so that `tokio::time::pause` + `advance` can drive the loop in
+/// virtual time. The seed `TurnCredentials` is consumed on entry and its
+/// `SystemTime::fetched_at + ttl` is projected onto the Tokio clock at
+/// loop start.
+#[cfg(not(target_arch = "wasm32"))]
+async fn run_refresh_loop(
+    initial: TurnCredentials,
+    fetcher: std::sync::Arc<dyn TurnFetcher>,
+    outcome_tx: tokio::sync::mpsc::Sender<TurnRefreshOutcome>,
+    mut shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+    mut trigger_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
+) {
+    use tokio::time::Instant;
+
+    let now_tokio = Instant::now();
+    // Compute Tokio-Instant equivalents of the seed's wall-clock moments.
+    // If seed was already expired (e.g. historic fetched_at), expiry is "now".
+    let seed_now_wall = SystemTime::now();
+    let ttl_remaining = initial
+        .expires_at()
+        .duration_since(seed_now_wall)
+        .unwrap_or(Duration::from_millis(0));
+    let refresh_remaining = initial
+        .refresh_at()
+        .duration_since(seed_now_wall)
+        .unwrap_or(Duration::from_millis(0));
+
+    let hard_expiry = now_tokio + ttl_remaining;
+    let mut next_wake = now_tokio + refresh_remaining;
+    let mut backoff_idx = 0usize;
+
+    // Drop the seed — its username/password are zeroized on drop.
+    drop(initial);
+
+    loop {
+        let now = Instant::now();
+        let sleep_for = next_wake.saturating_duration_since(now);
+
+        tokio::select! {
+            biased;
+            _ = &mut shutdown_rx => {
+                return;
+            }
+            _ = trigger_rx.recv() => {
+                // Immediate-trigger path: fetch now, regardless of timer.
+            }
+            _ = tokio::time::sleep(sleep_for) => {
+                // Timer fired — proceed to fetch.
+            }
+        }
+
+        // Check hard expiry before the fetch attempt.
+        if Instant::now() >= hard_expiry {
+            let _ = outcome_tx.send(TurnRefreshOutcome::Expired).await;
+            return;
+        }
+
+        // Attempt fetch.
+        let outcome = match fetcher.fetch().await {
+            Ok(Some(new_creds)) => {
+                // Success: schedule next refresh at the new half-life
+                // (projected into Tokio-Instant from the new creds' wall clock).
+                let new_wall_now = SystemTime::now();
+                let new_refresh_in = new_creds
+                    .refresh_at()
+                    .duration_since(new_wall_now)
+                    .unwrap_or(Duration::from_millis(0));
+                backoff_idx = 0;
+                next_wake = Instant::now() + new_refresh_in;
+                TurnRefreshOutcome::Refreshed(new_creds)
+            }
+            Ok(None) | Err(_) => {
+                // Failure: retry with backoff, capped at hard_expiry.
+                let backoff =
+                    Duration::from_secs(REFRESH_BACKOFF_SECS[backoff_idx]);
+                backoff_idx = (backoff_idx + 1).min(REFRESH_BACKOFF_SECS.len() - 1);
+                let candidate_wake = Instant::now() + backoff;
+                next_wake = if candidate_wake >= hard_expiry {
+                    hard_expiry
+                } else {
+                    candidate_wake
+                };
+                TurnRefreshOutcome::RetryPending
+            }
+        };
+
+        // Send outcome; exit if the receiver dropped.
+        if outcome_tx.send(outcome).await.is_err() {
+            return;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Wasm stub (target_arch = "wasm32")
 // ---------------------------------------------------------------------------
 
@@ -460,6 +725,232 @@ mod tests {
         let url = Url::parse(&server.url()).unwrap();
         let res = fetch_turn_credentials(&url, "tok").await.unwrap();
         assert!(res.is_none());
+    }
+
+    // ---------------------------------------------------------------------
+    // T-21: TurnRefreshTask tests — use tokio::time::pause + a stub fetcher
+    // so every test runs in virtual-time milliseconds without real HTTP.
+    // ---------------------------------------------------------------------
+
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::sync::Mutex;
+
+    /// Stub fetcher: caller feeds a queue of outcomes; each `fetch()` pops one.
+    ///
+    /// Empty queue yields `Ok(None)` (simulates homeserver degradation).
+    struct StubFetcher {
+        queue: Mutex<std::collections::VecDeque<Result<Option<TurnCredentials>, TurnError>>>,
+        count: AtomicUsize,
+    }
+
+    impl StubFetcher {
+        fn new() -> Self {
+            Self {
+                queue: Mutex::new(std::collections::VecDeque::new()),
+                count: AtomicUsize::new(0),
+            }
+        }
+        fn push(&self, r: Result<Option<TurnCredentials>, TurnError>) {
+            self.queue.lock().unwrap().push_back(r);
+        }
+        fn call_count(&self) -> usize {
+            self.count.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TurnFetcher for StubFetcher {
+        async fn fetch(&self) -> Result<Option<TurnCredentials>, TurnError> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            self.queue
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or(Ok(None))
+        }
+    }
+
+    fn fresh_creds_with_ttl(ttl_secs: u64) -> TurnCredentials {
+        TurnCredentials {
+            uris: vec!["turn:a.example.org:3478".into()],
+            username: "u".into(),
+            password: "p".into(),
+            ttl: Duration::from_secs(ttl_secs),
+            fetched_at: SystemTime::now(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refresh_success_before_ttl_half_emits_refreshed() {
+        let stub = Arc::new(StubFetcher::new());
+        stub.push(Ok(Some(TurnCredentials {
+            uris: vec!["turn:fresh.example.org:3478".into()],
+            username: "new_user".into(),
+            password: "new_pass".into(),
+            ttl: Duration::from_secs(3600),
+            fetched_at: SystemTime::now(),
+        })));
+
+        let initial = fresh_creds_with_ttl(600); // refresh_at = now + 300s
+        let (task, mut rx) =
+            TurnRefreshTask::spawn_with_fetcher_for_tests(initial, stub.clone());
+
+        // Let the spawned task reach its first sleep.
+        tokio::task::yield_now().await;
+        // Advance past the half-life (300s) — the task should wake and fetch.
+        tokio::time::advance(Duration::from_secs(301)).await;
+
+        let outcome = rx.recv().await.expect("channel open");
+        match outcome {
+            TurnRefreshOutcome::Refreshed(creds) => {
+                assert_eq!(creds.username, "new_user");
+            }
+            other => panic!("expected Refreshed, got {other:?}"),
+        }
+        assert_eq!(stub.call_count(), 1);
+        task.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refresh_failure_backs_off_and_eventually_expires() {
+        let stub = Arc::new(StubFetcher::new());
+        // Queue: infinite failures (empty queue -> Ok(None), treated as failure).
+
+        let initial = fresh_creds_with_ttl(120); // expires 120s, refresh_at = 60s
+        let (task, mut rx) =
+            TurnRefreshTask::spawn_with_fetcher_for_tests(initial, stub.clone());
+
+        // Let the spawned task reach its first sleep.
+        tokio::task::yield_now().await;
+        // Advance past refresh_at (60s): first failure -> RetryPending.
+        tokio::time::advance(Duration::from_secs(61)).await;
+        let outcome = rx.recv().await.expect("channel open");
+        assert!(matches!(outcome, TurnRefreshOutcome::RetryPending), "got {outcome:?}");
+
+        // Continue advancing; the backoff schedule is 5, 10, 20, 40, 60 —
+        // advancing past the total remaining TTL window must ultimately
+        // emit Expired.
+        let mut saw_expired = false;
+        for _ in 0..30 {
+            tokio::time::advance(Duration::from_secs(10)).await;
+            tokio::task::yield_now().await;
+            match rx.try_recv() {
+                Ok(TurnRefreshOutcome::Expired) => {
+                    saw_expired = true;
+                    break;
+                }
+                Ok(TurnRefreshOutcome::RetryPending) => continue,
+                Ok(other) => panic!("unexpected: {other:?}"),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => continue,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    panic!("channel closed before Expired")
+                }
+            }
+        }
+        assert!(saw_expired, "expected Expired outcome within TTL window");
+        task.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn refresh_recovers_after_one_failure() {
+        let stub = Arc::new(StubFetcher::new());
+        // First call fails (returns Ok(None) = "no TURN available" = failure branch).
+        stub.push(Ok(None));
+        // Second call succeeds.
+        stub.push(Ok(Some(TurnCredentials {
+            uris: vec!["turn:recovered.example.org:3478".into()],
+            username: "recovered".into(),
+            password: "p2".into(),
+            ttl: Duration::from_secs(3600),
+            fetched_at: SystemTime::now(),
+        })));
+
+        let initial = fresh_creds_with_ttl(600); // refresh_at = 300s
+        let (task, mut rx) =
+            TurnRefreshTask::spawn_with_fetcher_for_tests(initial, stub.clone());
+
+        // Let the spawned task reach its first sleep.
+        tokio::task::yield_now().await;
+        // Wake 1: fail -> RetryPending.
+        tokio::time::advance(Duration::from_secs(301)).await;
+        let o = rx.recv().await.expect("channel open");
+        assert!(matches!(o, TurnRefreshOutcome::RetryPending), "got {o:?}");
+
+        // Wake 2: backoff 5s -> succeed -> Refreshed.
+        tokio::time::advance(Duration::from_secs(6)).await;
+        let o = rx.recv().await.expect("channel open");
+        match o {
+            TurnRefreshOutcome::Refreshed(c) => {
+                assert_eq!(c.username, "recovered");
+            }
+            other => panic!("expected Refreshed, got {other:?}"),
+        }
+        assert_eq!(stub.call_count(), 2);
+        task.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn trigger_refresh_now_wakes_immediately() {
+        let stub = Arc::new(StubFetcher::new());
+        stub.push(Ok(Some(TurnCredentials {
+            uris: vec!["turn:triggered.example.org:3478".into()],
+            username: "triggered".into(),
+            password: "t".into(),
+            ttl: Duration::from_secs(3600),
+            fetched_at: SystemTime::now(),
+        })));
+
+        // Large TTL — natural refresh would be far in the future.
+        let initial = fresh_creds_with_ttl(86400); // refresh_at = 43200s (12h)
+        let (task, mut rx) =
+            TurnRefreshTask::spawn_with_fetcher_for_tests(initial, stub.clone());
+
+        // Let the spawned task reach its first sleep.
+        tokio::task::yield_now().await;
+        // Don't advance time. Trigger immediate refresh (reconnect path).
+        task.trigger_refresh_now().expect("loop running");
+
+        let o = rx.recv().await.expect("channel open");
+        match o {
+            TurnRefreshOutcome::Refreshed(c) => {
+                assert_eq!(c.username, "triggered");
+            }
+            other => panic!("expected Refreshed, got {other:?}"),
+        }
+        // The trigger path bypassed the 12h sleep.
+        assert_eq!(stub.call_count(), 1);
+        task.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_is_clean_without_outcomes() {
+        let stub = Arc::new(StubFetcher::new());
+        let initial = fresh_creds_with_ttl(86400);
+        let (task, _rx) =
+            TurnRefreshTask::spawn_with_fetcher_for_tests(initial, stub.clone());
+        // Shut down immediately; the loop should exit without panic or leak.
+        task.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn trigger_after_expired_returns_err() {
+        let stub = Arc::new(StubFetcher::new());
+        // Short TTL so expiry fires quickly in virtual time.
+        let initial = fresh_creds_with_ttl(2);
+        let (task, mut rx) =
+            TurnRefreshTask::spawn_with_fetcher_for_tests(initial, stub.clone());
+
+        // Let the spawned task reach its first sleep.
+        tokio::task::yield_now().await;
+        // Advance past hard expiry — the loop will emit Expired and exit.
+        tokio::time::advance(Duration::from_secs(3)).await;
+        let o = rx.recv().await.expect("channel open");
+        assert!(matches!(o, TurnRefreshOutcome::Expired));
+
+        // The task has exited after emitting Expired. Clean shutdown of the
+        // task handle should still work without panic (the join yields ()).
+        task.shutdown().await;
     }
 
     #[tokio::test]

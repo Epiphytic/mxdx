@@ -30,6 +30,9 @@ url = { version = "2", default-features = false }
 # Phase 8 concern (web-sys fetch). Phase 2 only exposes a stub on wasm.
 reqwest = { workspace = true }
 tokio = { workspace = true }
+# async-trait is used on the internal TurnFetcher abstraction so the refresh
+# loop can be tested without a real homeserver.
+async-trait = "0.1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # aes-gcm 0.10 pulls rand_core 0.6 -> getrandom 0.2; enable the JS backend for
