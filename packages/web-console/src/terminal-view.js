@@ -378,10 +378,13 @@ async function attemptBrowserP2P(client, transport, dmRoomId, sessionKey, execRo
       throw new Error('Invalid invite');
     }
 
-    // Extract shared session key from offerer's invite
+    // Extract shared session key from offerer's invite. Field name is
+    // `mxdx_session_key` per ADR 2026-04-15-mcall-wire-format.md (2026-04-16
+    // addendum) — locked in step with crates/mxdx-p2p via the coordinated-
+    // release policy (ADR 2026-04-16-coordinated-rust-npm-releases.md).
     let answererP2PCrypto = null;
-    if (inviteContent.session_key) {
-      answererP2PCrypto = await createP2PCrypto(inviteContent.session_key);
+    if (inviteContent.mxdx_session_key) {
+      answererP2PCrypto = await createP2PCrypto(inviteContent.mxdx_session_key);
       console.log('[p2p] Answerer: using shared session key from invite');
     }
 

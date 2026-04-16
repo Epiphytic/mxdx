@@ -1616,10 +1616,14 @@ export class LauncherRuntime {
       const callId = inviteContent.call_id;
       if (!callId || !inviteContent.offer?.sdp) return;
 
-      // Extract shared session key from offerer's invite
+      // Extract shared session key from offerer's invite. Field name is
+      // `mxdx_session_key` per ADR 2026-04-15-mcall-wire-format.md (2026-04-16
+      // addendum) — the Rust emitter in crates/mxdx-p2p emits the same field
+      // via the coordinated-release policy
+      // (ADR 2026-04-16-coordinated-rust-npm-releases.md).
       let answererP2PCrypto = null;
-      if (inviteContent.session_key) {
-        answererP2PCrypto = await createP2PCrypto(inviteContent.session_key);
+      if (inviteContent.mxdx_session_key) {
+        answererP2PCrypto = await createP2PCrypto(inviteContent.mxdx_session_key);
       }
 
       const channel = new NodeWebRTCChannel({ iceServers, turnOnly });
