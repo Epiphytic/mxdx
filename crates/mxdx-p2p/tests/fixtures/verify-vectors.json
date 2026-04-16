@@ -1,0 +1,36 @@
+{
+  "_comment": "Cross-runtime verify-handshake transcript vectors. Bead mxdx-fqt. Regenerate via: cargo test -p mxdx-p2p --test verify_vectors -- --ignored generate_verify_vectors --exact --nocapture",
+  "sdp_fingerprint_normalization": {
+    "cases": [
+      {
+        "expected": "AA:BB:CC",
+        "sdp": "v=0\r\na=fingerprint:sha-256 aa:bb:cc\r\n"
+      },
+      {
+        "expected": "00:11:22",
+        "sdp": "v=0\r\na=fingerprint:sha-256 ZZ:YY:XX\r\na=fingerprint:sha-256 00:11:22\r\n"
+      },
+      {
+        "expected": "AB:CD",
+        "sdp": "v=0\r\na=fingerprint:sha-1 ff:ff:ff\r\na=fingerprint:sha-256 ab:cd\r\n"
+      }
+    ],
+    "description": "SDP fingerprint extractor: upper-case, picks lex-smallest when multiple"
+  },
+  "transcript_vector_basic": {
+    "description": "canonical transcript bytes for a basic (no-glare, session_uuid=None) handshake",
+    "inputs": {
+      "answerer_nonce_b64": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+      "answerer_party_id": "p-answer",
+      "answerer_sdp_fingerprint": "11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00",
+      "call_id": "call-xyz-1",
+      "offerer_nonce_b64": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+      "offerer_party_id": "p-offer",
+      "offerer_sdp_fingerprint": "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99",
+      "room_id": "!abcdef:example.org",
+      "session_uuid": ""
+    },
+    "transcript_hex": "6d7864782e7032702e7665726966792e763100216162636465663a6578616d706c652e6f7267000063616c6c2d78797a2d31000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f00702d6f6666657200702d616e737765720041413a42423a43433a44443a45453a46463a30303a31313a32323a33333a34343a35353a36363a37373a38383a39393a41413a42423a43433a44443a45453a46463a30303a31313a32323a33333a34343a35353a36363a37373a38383a39390031313a32323a33333a34343a35353a36363a37373a38383a39393a41413a42423a43433a44443a45453a46463a30303a31313a32323a33333a34343a35353a36363a37373a38383a39393a41413a42423a43433a44443a45453a46463a3030"
+  },
+  "version": 1
+}
