@@ -24,6 +24,11 @@ pub struct Cli {
     /// Bypass daemon, connect directly
     #[arg(long, global = true, default_value_t = false)]
     pub no_daemon: bool,
+    /// Disable the P2P transport for this invocation (overrides config).
+    /// Forces all sends through Matrix regardless of `config.p2p.enabled`.
+    /// Intended for incident response / diagnostics per storm §4.7.
+    #[arg(long, global = true, default_value_t = false)]
+    pub no_p2p: bool,
     #[command(subcommand)]
     pub command: Commands,
 }

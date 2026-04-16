@@ -2866,6 +2866,7 @@ dependencies = [
  "futures-util",
  "hostname",
  "mxdx-matrix",
+ "mxdx-p2p",
  "mxdx-test-helpers",
  "mxdx-types",
  "reqwest",

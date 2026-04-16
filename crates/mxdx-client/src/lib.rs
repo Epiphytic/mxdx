@@ -10,6 +10,7 @@ pub mod liveness;
 pub mod logs;
 pub mod ls;
 pub mod matrix;
+pub mod p2p_integration;
 pub mod protocol;
 pub mod reconnect;
 pub mod submit;
