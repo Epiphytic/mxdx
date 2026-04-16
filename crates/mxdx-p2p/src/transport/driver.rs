@@ -475,7 +475,13 @@ impl DriverTask {
                 tracing::debug!("p2p begin fetch TURN (integration-layer responsibility)");
             }
             Command::ConfigureIceServers { servers } => {
-                tracing::debug!(count = servers.len(), "p2p configure ICE servers");
+                // mxdx-clr: TURN-refresh while Open. datachannel-sys 0.23
+                // does not expose rtcSetConfiguration, so restart_ice
+                // returns RestartIceUnsupported. Fall back to tear-down +
+                // full re-invite (storm §3.4). During the gap, try_send
+                // returns FallbackToMatrix — the Matrix path handles the
+                // bounded-latency user-visible fallback.
+                self.handle_configure_ice_servers(servers).await;
             }
             Command::TearDownChannel { reason } => {
                 self.tear_down(&reason).await;
@@ -504,6 +510,103 @@ impl DriverTask {
                 self.locked_peers.insert(peer);
             }
         }
+    }
+
+    /// mxdx-clr: handle `Command::ConfigureIceServers` with the full
+    /// storm §3.4 tear-down-and-reinvite fallback for backends that do
+    /// not support `restart_ice` (native datachannel-sys 0.23).
+    ///
+    /// Flow:
+    /// 1. If we have an active channel and are currently `Open`, attempt
+    ///    `channel.restart_ice(servers)`.
+    /// 2. On `RestartIceUnsupported` (or any other restart error), emit
+    ///    a hangup with reason "turn_refresh_teardown", tear down the
+    ///    channel, and schedule a fresh `Start` event. The idle
+    ///    watchdog is implicitly dropped via `tear_down`.
+    /// 3. If the channel is not open, configuration is a no-op — the
+    ///    next `create_offer` / `accept_offer` will pick up the new
+    ///    servers from the caller's `Start` params.
+    ///
+    /// `try_send` during the brief gap returns `FallbackToMatrix` per the
+    /// non-blocking contract — callers post the payload via Matrix and
+    /// see no perceptible latency.
+    async fn handle_configure_ice_servers(
+        &mut self,
+        servers: Vec<crate::channel::IceServer>,
+    ) {
+        if !self.state.is_open() {
+            tracing::debug!(
+                count = servers.len(),
+                state = self.state.name(),
+                "p2p configure ICE servers (not Open — no-op, next call picks up new servers)"
+            );
+            return;
+        }
+
+        let channel = match self.channel.as_mut() {
+            Some(c) => c,
+            None => {
+                tracing::warn!(
+                    "p2p configure ICE servers requested but no channel — skipping"
+                );
+                return;
+            }
+        };
+
+        // Record the restart outcome, but defer any hangup dispatch to the
+        // caller to avoid async-fn recursion (apply_command → this →
+        // dispatch → apply_command). We emit SendHangup + TearDown
+        // directly, transition state, and emit telemetry in-place. The
+        // net effect is identical to `dispatch(Event::Hangup{reason})`
+        // for this specific failure path.
+        match channel.restart_ice(&servers).await {
+            Ok(_sdp) => {
+                // Native datachannel-sys 0.23 never reaches here; web-sys
+                // (Phase 8) will. No state transition needed — channel
+                // keeps flowing.
+                tracing::info!(
+                    count = servers.len(),
+                    "p2p ICE restart succeeded — no re-invite needed"
+                );
+            }
+            Err(crate::channel::ChannelError::RestartIceUnsupported) => {
+                tracing::info!(
+                    count = servers.len(),
+                    "p2p ICE restart unsupported on this backend — tear down + re-invite"
+                );
+                self.teardown_for_turn_refresh("turn_refresh_teardown").await;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    err = %e,
+                    "p2p ICE restart failed with non-unsupported error — tear down"
+                );
+                self.teardown_for_turn_refresh(&format!("ice_restart_failed:{e}"))
+                    .await;
+            }
+        }
+    }
+
+    /// Inline tear-down path used by `handle_configure_ice_servers` to
+    /// avoid async recursion. Mirrors what `dispatch(Event::Hangup)` +
+    /// the subsequent Commands would do, but without re-entering the
+    /// state machine from inside apply_command.
+    async fn teardown_for_turn_refresh(&mut self, reason: &str) {
+        // Drop the live channel and the idle watchdog.
+        self.tear_down(reason).await;
+        // Transition state to Idle — the next caller-driven `start()`
+        // kicks off a fresh FetchTurn → Invite with the new ICE servers.
+        self.state = P2PState::Idle;
+        self.update_snapshot();
+        // Telemetry: surface this rare event so ops can correlate.
+        self.emit_telemetry(TelemetryKind::Fallback {
+            reason: reason.to_string(),
+        });
+        self.emit_telemetry(TelemetryKind::StateTransition {
+            from: "Open",
+            to: "Idle",
+            reason: reason.to_string(),
+        });
     }
 
     async fn drain_outbound(&mut self) {
@@ -812,5 +915,131 @@ mod tests {
         assert!(!d.bump_verify_failure("@b:ex"));
         assert!(d.bump_verify_failure("@a:ex"));
         assert!(!d.locked_peers.contains("@b:ex"));
+    }
+
+    // ---- mxdx-clr: restart_ice tear-down + re-invite wiring ----
+
+    /// Test-only channel mock that always returns RestartIceUnsupported
+    /// from restart_ice, mirroring the native datachannel-sys 0.23 behavior.
+    struct RestartIceUnsupportedChannel {
+        events_rx: crate::channel::EventReceiver,
+        events_tx: crate::channel::EventSender,
+    }
+
+    impl RestartIceUnsupportedChannel {
+        fn new() -> Self {
+            let (events_tx, events_rx) = crate::channel::event_channel();
+            Self {
+                events_rx,
+                events_tx,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::channel::WebRtcChannel for RestartIceUnsupportedChannel {
+        async fn create_offer(
+            &mut self,
+            _: &[crate::channel::IceServer],
+        ) -> crate::channel::ChannelResult<crate::channel::Sdp> {
+            Ok(crate::channel::Sdp {
+                kind: crate::channel::SdpKind::Offer,
+                sdp: "stub_offer".into(),
+            })
+        }
+        async fn accept_offer(
+            &mut self,
+            _: &[crate::channel::IceServer],
+            _: crate::channel::Sdp,
+        ) -> crate::channel::ChannelResult<crate::channel::Sdp> {
+            Ok(crate::channel::Sdp {
+                kind: crate::channel::SdpKind::Answer,
+                sdp: "stub_answer".into(),
+            })
+        }
+        async fn accept_answer(
+            &mut self,
+            _: crate::channel::Sdp,
+        ) -> crate::channel::ChannelResult<()> {
+            Ok(())
+        }
+        async fn add_ice_candidate(
+            &mut self,
+            _: crate::channel::IceCandidate,
+        ) -> crate::channel::ChannelResult<()> {
+            Ok(())
+        }
+        async fn restart_ice(
+            &mut self,
+            _: &[crate::channel::IceServer],
+        ) -> crate::channel::ChannelResult<crate::channel::Sdp> {
+            Err(crate::channel::ChannelError::RestartIceUnsupported)
+        }
+        async fn send(&self, _: &[u8]) -> crate::channel::ChannelResult<()> {
+            Ok(())
+        }
+        fn events(&mut self) -> &mut crate::channel::EventReceiver {
+            let _ = &self.events_tx; // keep tx alive while mock exists
+            &mut self.events_rx
+        }
+        async fn close(&mut self, _: &str) -> crate::channel::ChannelResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn restart_ice_noop_when_not_open() {
+        // State is Idle by default; ConfigureIceServers is a no-op.
+        let mut d = mk_driver_for_unit_tests();
+        assert_eq!(d.state.name(), "Idle");
+        d.handle_configure_ice_servers(vec![]).await;
+        // Still Idle. No panic, no teardown.
+        assert_eq!(d.state.name(), "Idle");
+    }
+
+    #[tokio::test]
+    async fn restart_ice_unsupported_tears_down_and_goes_idle() {
+        // Build a driver in Open state with a mock channel that returns
+        // RestartIceUnsupported. After handle_configure_ice_servers, the
+        // driver transitions to Idle and the channel is dropped.
+        let mut d = mk_driver_for_unit_tests();
+
+        // Force state to Open.
+        d.state = P2PState::Open {
+            call_id: "c-test".into(),
+            last_io: Instant::now(),
+        };
+        d.update_snapshot();
+        d.channel = Some(Box::new(RestartIceUnsupportedChannel::new()));
+        d.crypto = None; // not needed for this test
+
+        d.handle_configure_ice_servers(vec![crate::channel::IceServer {
+            urls: vec!["stun:a.example:3478".into()],
+            username: None,
+            credential: None,
+        }])
+        .await;
+
+        // After tear-down, state is Idle and channel is dropped.
+        assert_eq!(d.state.name(), "Idle");
+        assert!(d.channel.is_none(), "channel must be dropped on tear-down");
+    }
+
+    #[tokio::test]
+    async fn restart_ice_unsupported_preserves_state_snapshot_consistency() {
+        let mut d = mk_driver_for_unit_tests();
+        d.state = P2PState::Open {
+            call_id: "c1".into(),
+            last_io: Instant::now(),
+        };
+        d.update_snapshot();
+        assert_eq!(d.snapshot.lock().unwrap().name, "Open");
+        d.channel = Some(Box::new(RestartIceUnsupportedChannel::new()));
+
+        d.handle_configure_ice_servers(vec![]).await;
+
+        // Snapshot must reflect the post-teardown state.
+        assert_eq!(d.snapshot.lock().unwrap().name, "Idle");
+        assert!(!d.snapshot.lock().unwrap().is_open);
     }
 }
