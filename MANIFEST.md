@@ -561,15 +561,15 @@ _No public symbols._
 | `CallInvite` | struct | `crates/mxdx-p2p/src/signaling/events.rs` |
 | `TurnCredentials` | struct | `crates/mxdx-p2p/src/turn.rs` |
 
-#### npm shims (deprecated — Phase 8 T-83)
+#### npm P2P shims (launcher-internal — T-C2 / T-83a decision)
 
-| Symbol | Kind | File | Replacement |
+| Symbol | Kind | File | Status |
 |:---|:---|:---|:---|
-| `P2PCrypto` | class | `packages/core/p2p-crypto.js` | WASM `P2PCrypto` via `@mxdx/core` |
-| `generateSessionKey` | fn | `packages/core/p2p-crypto.js` | WASM `generateSessionKey` via `@mxdx/core` |
-| `createP2PCrypto` | fn | `packages/core/p2p-crypto.js` | WASM `createP2PCrypto` via `@mxdx/core` |
-| `P2PSignaling` | class | `packages/core/p2p-signaling.js` | Rust signaling module (pending) |
-| `P2PTransport` | class | `packages/core/p2p-transport.js` | Rust P2PTransport (pending) |
+| `P2PCrypto` | class | `packages/core/p2p-crypto.js` | Launcher-internal; web-console uses WASM `P2PCrypto` |
+| `generateSessionKey` | fn | `packages/core/p2p-crypto.js` | Launcher-internal; web-console uses WASM `generateSessionKey` |
+| `createP2PCrypto` | fn | `packages/core/p2p-crypto.js` | Launcher-internal; web-console uses WASM `createP2PCrypto` |
+| `P2PSignaling` | class | `packages/core/p2p-signaling.js` | Launcher-internal; Rust equivalent in `mxdx-p2p/src/signaling/` |
+| `P2PTransport` | class | `packages/core/p2p-transport.js` | Launcher-internal; Rust equivalent in `mxdx-p2p/src/transport/` |
 
 ### mxdx-policy
 

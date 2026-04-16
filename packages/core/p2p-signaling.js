@@ -1,10 +1,11 @@
 /**
- * @deprecated This JS shim is superseded by the Rust signaling module in
- * `crates/mxdx-p2p/src/signaling/`. WASM P2PTransport will subsume signaling
- * orchestration. Scheduled for removal in T-C2 (cleanup phase).
+ * P2P signaling via standard Matrix VoIP call events (m.call.*).
+ *
+ * **Launcher-internal.** New consumers should use WASM P2PTransport from
+ * `@mxdx/core`. This JS implementation is retained for `packages/launcher`
+ * which runs on the Node.js npm path (see T-83a decision in Phase 8 marker).
+ * The Rust equivalent lives in `crates/mxdx-p2p/src/signaling/`.
  */
-
-console.warn('[mxdx] p2p-signaling.js is deprecated — Rust P2PTransport will replace this');
 
 /** Cross-platform random hex string (works in browser + Node 19+). */
 function randomHex(byteCount) {

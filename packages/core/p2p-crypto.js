@@ -1,10 +1,10 @@
 /**
- * @deprecated Use WASM exports from `@mxdx/core` (P2PCrypto, generateSessionKey,
- * createP2PCrypto) instead. This JS shim is superseded by the Rust P2PCrypto in
- * `crates/mxdx-p2p/src/crypto.rs`, re-exported via `crates/mxdx-core-wasm`.
- * Scheduled for removal in T-C2 (cleanup phase).
- *
  * P2P session encryption using AES-256-GCM via the Web Crypto API.
+ *
+ * **Launcher-internal.** New consumers should use the WASM P2PCrypto from
+ * `@mxdx/core`. This JS implementation is retained for `packages/launcher`
+ * which runs on the Node.js npm path (see T-83a decision in Phase 8 marker).
+ * The Rust equivalent lives in `crates/mxdx-p2p/src/crypto.rs`.
  *
  * Session key is exchanged via E2EE Matrix signaling (m.call.invite/answer),
  * so it's authenticated by the Megolm layer. This means:
@@ -14,8 +14,6 @@
  *
  * Works in both browser and Node.js 22+ (both provide crypto.subtle).
  */
-
-console.warn('[mxdx] p2p-crypto.js is deprecated — use WASM P2PCrypto from @mxdx/core instead');
 
 /**
  * Generate a random 256-bit session key and return it as a base64 string.
