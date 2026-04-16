@@ -31,6 +31,54 @@ cargo test -p mxdx-p2p
 cargo check -p mxdx-p2p --target wasm32-unknown-unknown
 ```
 
+## Local development — native WebRTC build
+
+The native `WebRtcChannel` implementation (Phase 3, `src/channel/native.rs`)
+links against **libdatachannel** via the `datachannel` Rust crate. The crate
+is configured with the `vendored` feature, so libdatachannel and all of its
+transitive C/C++ dependencies (usrsctp, libjuice, libsrtp, OpenSSL glue) are
+built from source during `cargo build`. This removes any requirement for
+system packages of libdatachannel itself but does require a **C++17
+compiler and CMake** to be available locally.
+
+### Linux (Debian / Ubuntu)
+
+```sh
+sudo apt-get install -y libsqlite3-dev libssl-dev cmake g++
+```
+
+### macOS
+
+```sh
+# xcode command-line tools provide clang++; CMake comes from Homebrew.
+xcode-select --install   # if not already installed
+brew install cmake
+```
+
+### Verifying the native build
+
+```sh
+cargo build -p mxdx-p2p             # links vendored libdatachannel
+cargo test  -p mxdx-p2p --test loopback   # round-trips a frame on 127.0.0.1
+```
+
+The loopback test runs two `NativeWebRtcChannel` instances in one process,
+uses no STUN / TURN servers, and exchanges a single byte payload to confirm
+the data channel works end-to-end. No homeserver or external network
+access is required.
+
+### Wasm is unaffected
+
+The `datachannel` dependency is gated under
+`cfg(not(target_arch = "wasm32"))`, so `wasm-pack build` against
+`mxdx-core-wasm` does NOT pull in libdatachannel. The browser path will use
+`web-sys::RtcPeerConnection` — landing in Phase 8.
+
+```sh
+# Confirm: datachannel absent from the wasm dep graph
+cargo tree -p mxdx-p2p --target wasm32-unknown-unknown | grep datachannel   # empty
+```
+
 ## Manual smoke test — TURN credentials (Phase 2)
 
 `fetch_turn_credentials` talks to a real Matrix homeserver at

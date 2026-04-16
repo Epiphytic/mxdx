@@ -110,7 +110,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
       - name: Install system deps
-        run: sudo apt-get install -y libsqlite3-dev libssl-dev
+        # cmake + g++ are needed by datachannel-sys (vendored libdatachannel
+        # build). Both are preinstalled on ubuntu-latest images but listed
+        # explicitly for image-drift resilience.
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev cmake g++
       - run: cargo test -p mxdx-p2p --lib
 
   rust-p2p-loopback:
@@ -121,11 +124,39 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
       - name: Install system deps
-        run: sudo apt-get install -y libsqlite3-dev libssl-dev
-      # Loopback integration test is added in Phase 3 (T-32). Until then
-      # this is a vacuous "no tests" run; it fails only if a populated
-      # integration target later regresses.
+        # Loopback test exercises the native WebRtcChannel via vendored
+        # libdatachannel. The vendored build requires cmake and a C++17
+        # compiler; libssl-dev covers any non-vendored TLS paths.
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev cmake g++
       - run: cargo test -p mxdx-p2p --tests
+
+  # T-33: Platform matrix build-only. Confirms mxdx-p2p (which pulls in
+  # vendored libdatachannel) compiles on the production targets we expect
+  # to ship. macOS needs cmake via Homebrew (xcode command-line tools
+  # provide the C++ compiler).
+  build-only-native:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev cmake g++
+      - name: Install system deps (macOS)
+        if: runner.os == 'macOS'
+        # GitHub-hosted macOS runners ship cmake + xcode CLI tools; this
+        # is a no-op safety net. HOMEBREW_NO_AUTO_UPDATE speeds up the
+        # step when brew decides it needs to refresh.
+        run: |
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          brew list cmake >/dev/null 2>&1 || brew install cmake
+      - run: cargo build -p mxdx-p2p
 
   wasm-p2p-smoke:
     needs: preflight
