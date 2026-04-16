@@ -9,9 +9,10 @@
 //! the `WorkerP2pSession` is the object under test. A full live test
 //! against tuwunel + real encrypt_for_room lives in Phase 7's E2E suite.
 
-use mxdx_p2p::transport::SendOutcome;
+use mxdx_p2p::transport::{P2PStateSnapshot, SendOutcome};
 use mxdx_types::config::P2pConfig;
-use mxdx_worker::p2p_integration::WorkerP2pSession;
+use mxdx_worker::batched_sender::{DEFAULT_BATCH_WINDOW, P2P_OPEN_BATCH_WINDOW};
+use mxdx_worker::p2p_integration::{batch_window_for_p2p_state, WorkerP2pSession};
 
 fn disabled_config() -> P2pConfig {
     P2pConfig::default() // enabled = false
@@ -104,6 +105,38 @@ async fn feature_flag_off_is_identical_to_pre_phase_6_path() {
     );
     assert!(session.is_none());
     assert!(events_tx.is_none());
+}
+
+// ---- T-61: BatchedSender window flip rule ----
+
+#[tokio::test]
+async fn window_flip_rule_open_yields_10ms() {
+    let snap = P2PStateSnapshot {
+        name: "Open",
+        is_open: true,
+    };
+    assert_eq!(batch_window_for_p2p_state(Some(&snap)), P2P_OPEN_BATCH_WINDOW);
+}
+
+#[tokio::test]
+async fn window_flip_rule_non_open_yields_200ms() {
+    for name in &["Idle", "FetchingTurn", "Inviting", "Verifying", "Failed"] {
+        let snap = P2PStateSnapshot {
+            name,
+            is_open: false,
+        };
+        assert_eq!(
+            batch_window_for_p2p_state(Some(&snap)),
+            DEFAULT_BATCH_WINDOW,
+            "non-Open state {name} must yield 200ms"
+        );
+    }
+}
+
+#[tokio::test]
+async fn window_flip_rule_no_transport_yields_default_200ms() {
+    // Flag off → no transport → treat same as non-Open (200ms default).
+    assert_eq!(batch_window_for_p2p_state(None), DEFAULT_BATCH_WINDOW);
 }
 
 #[tokio::test]

@@ -156,6 +156,24 @@ pub async fn try_send_via_p2p_or_matrix(
     }
 }
 
+/// T-61: apply the BatchedSender window flip rule for a given P2P state
+/// snapshot. Returns the window the caller should pass to
+/// [`BatchedSender::set_batch_window`]. Called by the worker event loop
+/// after every `transport.state()` observation.
+///
+/// Storm §2.8: Open → 10ms, non-Open → 200ms.
+///
+/// When `snap` is `None` (flag off, no transport), returns
+/// `DEFAULT_BATCH_WINDOW` (200ms) — the pre-Phase-6 behavior.
+pub fn batch_window_for_p2p_state(
+    snap: Option<&P2PStateSnapshot>,
+) -> std::time::Duration {
+    match snap {
+        Some(s) if s.is_open => crate::batched_sender::P2P_OPEN_BATCH_WINDOW,
+        _ => crate::batched_sender::DEFAULT_BATCH_WINDOW,
+    }
+}
+
 async fn send_matrix(
     matrix_client: &MatrixClient,
     room_id: &RoomId,
