@@ -323,11 +323,15 @@ Worker (peer W)                     Matrix HS                     Client (peer C
    │ WebRtcChannel::create_offer(ice_servers) → sdp_offer                         │
    │                                                                              │
    │ MatrixClient::send_call_event(room, InviteEvent {                            │
-   │   call_id, party_id, version: "1", lifetime: 30s,                            │
+   │   call_id, party_id, version: "1", lifetime: 30000,  // ms; default both sides│
    │   offer: { type, sdp },                                                      │
    │   mxdx_session_key: sealed_key,      // room E2EE protects this              │
-   │   session_uuid                                                               │
-   │ })                                                                           │
+   │   session_uuid                        // Option; omitted on wire when None   │
+   │ })                                    // (npm legacy field name session_key  │
+   │                                       //  migrated to mxdx_session_key in    │
+   │                                       //  coordinated release — see ADR      │
+   │                                       //  2026-04-15-mcall-wire-format.md    │
+   │                                       //  2026-04-16 addendum.)              │
    │ ──── m.call.invite (Megolm-encrypted by room) ──────────►                   │
    │                                           ──────────────► parse, verify      │
    │                                                          P2PCrypto::from_sealed(key)

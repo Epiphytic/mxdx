@@ -315,6 +315,28 @@ Extend `crates/mxdx-matrix` sync filter to include `m.call.invite`, `m.call.answ
 **Type:** feature
 **Size:** S
 
+### T-44 — npm wire-format migration: `session_key` → `mxdx_session_key` + `lifetime` default 30000
+
+Coordinated npm side of the Phase 4 wire-format reconciliation (see ADR `2026-04-15-mcall-wire-format.md` 2026-04-16 addendum and ADR `2026-04-16-coordinated-rust-npm-releases.md`). Update npm emitters and parsers to use `mxdx_session_key` (formerly `session_key`) on `m.call.invite`. Also lower the default `lifetime` from `60000` to `30000` to match storm §4.1 and the Rust `CallInvite::DEFAULT_LIFETIME_MS`.
+
+Scope of changes:
+- `packages/core/p2p-signaling.js`: rename `content.session_key = sessionKey` → `content.mxdx_session_key = sessionKey`; default `lifetime` param 60000 → 30000.
+- `packages/launcher/src/runtime.js`: offerer at `sendInvite({ sessionKey })` call site is unchanged (parameter name is internal); answerer at read-site change `inviteContent.session_key` → `inviteContent.mxdx_session_key`.
+- `packages/web-console/src/terminal-view.js`: offerer `sendInvite({ sessionKey })` unchanged; answerer `inviteContent.session_key` → `inviteContent.mxdx_session_key`.
+- Any JS test fixtures / golden files referencing `session_key` in P2P invite content.
+- Rebuild `packages/web-console` dist bundles if they're committed.
+
+**Acceptance criteria:**
+- `grep -r 'session_key' packages/ | grep -v 'mxdx_session_key' | grep -v node_modules` returns nothing (the only remaining matches should be the new `mxdx_session_key`, or unrelated references like API-key context)
+- `grep -r 'lifetime.*60000' packages/core/p2p-signaling.js` returns nothing
+- `npm test --workspaces` passes (all JS tests)
+- Existing beta E2E tests (`packages/e2e-tests/tests/p2p-*.test.js`) pass after the rename — NONE disabled or modified to accept both names. If a test hard-codes the old name in a fixture, update the fixture to the new name.
+- Coordinated-release commit message includes the cross-language parity claim and references both the Rust T-40 commit and this task.
+
+**Dependencies:** T-40 (must land first so the Rust emitter uses the new name; this npm change matches it)
+**Type:** task
+**Size:** S
+
 ---
 
 ## Phase 5: P2PTransport State Machine
@@ -779,7 +801,8 @@ Phase 2: (T-00) → T-20 → T-21 → T-22
 Phase 3: (T-00) → T-30 → T-31 → T-32 → T-33
 Phase 4: (T-13) → T-40 → T-41
                     ├── T-42
-                    └── T-43
+                    ├── T-43
+                    └── T-44 (npm coordinated release)
                                  │
 Phase 5: (T-42, T-43, T-31) → T-50 → T-51 → T-52
                                          ├── T-53
@@ -816,7 +839,7 @@ Cleanup: (T-91) → T-C0 → T-C1 → T-C2
 | Phase 1: P2PCrypto + Vectors | 4 | 2–4 days |
 | Phase 2: TurnCredentials | 3 | 1–2 days |
 | Phase 3: WebRtcChannel + Native | 5 | 5–9 days (T-31 upgraded to XL; + T-34 musl) |
-| Phase 4: Signaling + Glare | 4 | 2–3 days |
+| Phase 4: Signaling + Glare | 5 | 2–4 days (+ T-44 coordinated npm migration) |
 | Phase 5: P2PTransport SM | 5 | 5–9 days |
 | Phase 6: Worker + Client Wiring | 5 | 3–5 days (T-63 moved earlier, now runs parallel with T-60) |
 | Phase 7: JS E2E Suite | 6 | 6–11 days (T-73 upgraded to XL) |
@@ -825,7 +848,7 @@ Cleanup: (T-91) → T-C0 → T-C1 → T-C2
 | Cleanup | 3 | 1–2 days |
 | Nurture (umbrella) | 1 | 14-day monitor window |
 | Secure (umbrella) | 1 | 1–2 days |
-| **Total** | **49** | **~32–58 dev-days** |
+| **Total** | **50** | **~33–60 dev-days** |
 
 ---
 

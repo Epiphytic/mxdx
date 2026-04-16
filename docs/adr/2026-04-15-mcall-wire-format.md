@@ -51,3 +51,30 @@ Specifically:
 - **Keep the custom `org.mxdx.session.webrtc.*` schema and update npm to match:** rejected — the npm path works today and updating it would require a coordinated release across packages that doubles implementation risk.
 - **Dual-protocol support (Rust speaks both):** rejected — adds complexity and does not eliminate the eventual cut-over. The npm peer would still need updating to the mxdx schema, which is the rejected path above.
 - **Plain Matrix message events instead of Matrix VoIP events:** rejected — Matrix VoIP gives free TURN provisioning, established glare semantics, and compatibility with existing Matrix infrastructure.
+
+## Addendum (2026-04-16) — Field-name reconciliation: `mxdx_session_key` (not `session_key`)
+
+Phase 4 grooming of the Rust P2P port surfaced a divergence between this ADR and the deployed npm code. The ADR specifies the AES-GCM session-key extension field on `m.call.invite` as **`mxdx_session_key`**. The deployed npm code in `packages/core/p2p-signaling.js:53`, `packages/launcher/src/runtime.js` (offerer + answerer), and `packages/web-console/src/terminal-view.js` (offerer + answerer) uses **`session_key`** (unprefixed). There are zero references to `mxdx_session_key` anywhere in the deployed npm packages.
+
+### Decision (2026-04-16)
+
+**Keep `mxdx_session_key` as the canonical field name.** Update the npm packages to match the Rust implementation in this phase, shipped as a coordinated Rust+npm release per ADR `2026-04-16-coordinated-rust-npm-releases.md`.
+
+### Rationale
+
+- The `mxdx_` prefix carries real value: it namespaces the mxdx extension against other Matrix VoIP implementations and against a hypothetical future standardization of a similar field with a different shape. Dropping the prefix to match npm would be a cosmetic capitulation.
+- Coordinated releases are the project's default policy (see the companion ADR). The migration cost — updating five lines across three npm files plus rebuilding dist bundles and regenerating any hard-coded JS test fixtures — is bounded and mechanical.
+- The Rust port hasn't shipped yet (branch `brains/rust-p2p-interactive`, `p2p_enabled` defaults to `false` through Phase 9). Flipping npm and Rust atomically in the same release means there is no mixed-version window.
+- Existing beta E2E tests (`packages/e2e-tests/tests/p2p-*.test.js`) need minor fixture updates for the field rename — absorbed into the Phase 4 work.
+
+### Implementation placement
+
+Added as a new task **T-44** in Phase 4 of the map plan (`docs/plans/2026-04-15-rust-p2p-interactive-map.md`): npm wire-format migration from `session_key` to `mxdx_session_key`. Scope: `packages/core/p2p-signaling.js`, `packages/launcher/src/runtime.js`, `packages/web-console/src/terminal-view.js`, any JS test fixtures referencing the old field. Acceptance: after T-44 lands, `grep -r 'session_key' packages/ | grep -v 'mxdx_session_key'` returns nothing.
+
+### Second, smaller reconciliation: `lifetime` default
+
+npm's `sendInvite` defaults `lifetime` to `60000` (ms) but every deployed call site explicitly passes `30000`. Storm §4.1 treats 30s as the invite timeout envelope. Both sides adopt `30000` as the default constant. npm change: `p2p-signaling.js:45` `lifetime = 60000` → `lifetime = 30000`. Rust change: `CallInvite::DEFAULT_LIFETIME_MS = 30_000`. Absorbed into T-40 (Rust) and T-44 (npm).
+
+### Third note: `session_uuid` on invite
+
+Storm §3.1 pseudocode shows `session_uuid` as a field on `m.call.invite`, but the deployed npm code does not populate it on invites (it's only on `session.*` events). The Rust `CallInvite` struct keeps `session_uuid: Option<String>` with `#[serde(skip_serializing_if = "Option::is_none")]` — absent on the wire when `None`, matching deployed npm behavior. No npm change needed.
