@@ -1379,6 +1379,129 @@ impl MatrixClient {
         }
         Ok(verified)
     }
+
+    // ── P2P ephemeral handshake key (ADR 2026-04-16-ephemeral-key-cross-cert) ──
+
+    /// Publish the local device's per-session ephemeral Ed25519 public key
+    /// in a Megolm-encrypted state event `m.mxdx.p2p.ephemeral_key`.
+    ///
+    /// The state_key is the publisher's device_id (not user_id) so multiple
+    /// devices on the same account can each carry their own ephemeral key.
+    /// Content is `{ ephemeral_ed25519_b64, published_at }`.
+    ///
+    /// Cardinal rule: the room MUST be E2EE (MSC4362 is enabled project-wide).
+    /// `send_state_event_raw` writes through `room.send_state_event_raw` which
+    /// picks up the room's encryption config and Megolm-encrypts the state
+    /// event in flight.
+    pub async fn publish_p2p_ephemeral_key(
+        &self,
+        room_id: &RoomId,
+        device_id: &str,
+        ephemeral_public_key: [u8; 32],
+    ) -> Result<()> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| MatrixClientError::RoomNotFound(room_id.to_string()))?;
+
+        if !room.encryption_state().is_encrypted() {
+            return Err(MatrixClientError::Other(anyhow::anyhow!(
+                "publish_p2p_ephemeral_key refused: room {} is not E2EE — cardinal rule requires encrypted rooms (MSC4362 for state events)",
+                room_id
+            )));
+        }
+
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD_NO_PAD
+            .encode(ephemeral_public_key);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let content = serde_json::json!({
+            "ephemeral_ed25519_b64": b64,
+            "published_at": now_ms,
+        });
+        self.send_state_event(room_id, "m.mxdx.p2p.ephemeral_key", device_id, content)
+            .await
+    }
+
+    /// Look up a peer device's per-session ephemeral Ed25519 public key via
+    /// the session room's cached state events.
+    ///
+    /// Returns `None` if:
+    /// - no matching state event exists
+    /// - the publishing device is not cross-signed by its owner (rejected
+    ///   per ADR 2026-04-16-ephemeral-key-cross-cert.md)
+    /// - the payload is malformed
+    ///
+    /// The cross-signing check gates acceptance: a rogue device injected
+    /// into the user's account without cross-signing is rejected even if it
+    /// publishes a valid-looking ephemeral key.
+    pub async fn get_p2p_ephemeral_key(
+        &self,
+        room_id: &RoomId,
+        peer_user_id: &UserId,
+        peer_device_id: &str,
+    ) -> Result<Option<[u8; 32]>> {
+        // Gate on cross-signing first.
+        let devices = self
+            .client
+            .encryption()
+            .get_user_devices(peer_user_id)
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+
+        let device = match devices
+            .devices()
+            .find(|d| d.device_id().as_str() == peer_device_id)
+        {
+            Some(d) => d,
+            None => {
+                tracing::debug!(
+                    user_id = %peer_user_id,
+                    device_id = peer_device_id,
+                    "get_p2p_ephemeral_key: peer device unknown — rejecting"
+                );
+                return Ok(None);
+            }
+        };
+
+        if !device.is_cross_signed_by_owner() {
+            tracing::warn!(
+                user_id = %peer_user_id,
+                device_id = peer_device_id,
+                "get_p2p_ephemeral_key: peer device not cross-signed — rejecting"
+            );
+            return Ok(None);
+        }
+
+        let events = self
+            .get_state_events_cached(room_id, "m.mxdx.p2p.ephemeral_key")
+            .await?;
+
+        for (state_key, content) in events {
+            if state_key != peer_device_id {
+                continue;
+            }
+            let b64 = match content.get("ephemeral_ed25519_b64").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => continue,
+            };
+            use base64::Engine;
+            let bytes = match base64::engine::general_purpose::STANDARD_NO_PAD.decode(b64) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            if bytes.len() != 32 {
+                continue;
+            }
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&bytes);
+            return Ok(Some(out));
+        }
+        Ok(None)
+    }
 }
 
 /// Classification of a Matrix event type for mxdx's sync receive path.

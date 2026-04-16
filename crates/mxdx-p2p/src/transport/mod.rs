@@ -19,6 +19,9 @@ pub mod idle;
 
 pub mod verify;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub mod matrix_signer;
+
 pub use state::{
     transition, Command, Event, P2PState, ScheduledEvent, SecurityEventKind, TelemetryKind,
     TransitionResult, VerifyFailureReason,
