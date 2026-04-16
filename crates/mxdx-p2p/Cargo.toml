@@ -19,7 +19,7 @@ vector-gen = []
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = "1"
-aes-gcm = "0.10"
+aes-gcm = { version = "0.10", features = ["zeroize"] }
 base64 = { workspace = true }
 rand = "0.9"
 zeroize = { version = "1", features = ["zeroize_derive"] }
