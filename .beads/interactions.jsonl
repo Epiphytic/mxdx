@@ -62,3 +62,4 @@
 {"id":"int-27aca5c9","kind":"field_change","created_at":"2026-04-16T17:02:11.828269205Z","actor":"Liam Helmer","issue_id":"mxdx-awe.24","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
 {"id":"int-d0e32f9b","kind":"field_change","created_at":"2026-04-16T17:09:44.254624688Z","actor":"Liam Helmer","issue_id":"mxdx-awe.24","extra":{"field":"status","new_value":"closed","old_value":"in_progress"}}
 {"id":"int-2c1f5101","kind":"field_change","created_at":"2026-04-16T17:09:50.475539485Z","actor":"Liam Helmer","issue_id":"mxdx-awe.25","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
+{"id":"int-ac53c679","kind":"field_change","created_at":"2026-04-16T17:12:04.709299695Z","actor":"Liam Helmer","issue_id":"mxdx-awe.25","extra":{"field":"status","new_value":"closed","old_value":"in_progress"}}
