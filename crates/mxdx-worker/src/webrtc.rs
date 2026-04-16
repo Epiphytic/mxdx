@@ -1,6 +1,40 @@
 use anyhow::Result;
-use mxdx_types::events::webrtc::{WebRtcAnswer, WebRtcIce, WebRtcOffer, WebRtcSdp};
 use serde::{Deserialize, Serialize};
+
+// NOTE: This entire module is deleted in T-02 (mxdx-awe.3) and replaced by
+// the new mxdx-p2p crate. These local stub types exist only to keep the
+// workspace compiling between T-01 (delete mxdx-types::events::webrtc) and
+// T-02 (delete this file). Do not depend on them.
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct WebRtcOffer {
+    pub session_uuid: String,
+    pub device_id: String,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct WebRtcAnswer {
+    pub session_uuid: String,
+    pub device_id: String,
+    pub timestamp: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct WebRtcSdp {
+    pub session_uuid: String,
+    pub sdp_type: String,
+    pub sdp: String,
+    pub e2ee_public_key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct WebRtcIce {
+    pub session_uuid: String,
+    pub candidate: String,
+    pub sdp_mid: Option<String>,
+    pub sdp_mline_index: Option<u32>,
+}
 
 /// TURN relay configuration, populated from the state room.
 #[derive(Debug, Clone, Serialize, Deserialize)]

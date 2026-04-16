@@ -9,5 +9,4 @@ pub mod session;
 pub mod state_room;
 pub mod telemetry;
 pub mod terminal;
-pub mod webrtc;
 pub mod worker_info;
