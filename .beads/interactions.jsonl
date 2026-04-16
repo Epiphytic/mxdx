@@ -54,3 +54,6 @@
 {"id":"int-fa811317","kind":"field_change","created_at":"2026-04-16T16:28:32.805461542Z","actor":"Liam Helmer","issue_id":"mxdx-awe.19","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-f537ae90","kind":"field_change","created_at":"2026-04-16T16:33:01.446294934Z","actor":"Liam Helmer","issue_id":"mxdx-awe.20","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-2e8ebdeb","kind":"field_change","created_at":"2026-04-16T16:45:30.874580375Z","actor":"Liam Helmer","issue_id":"mxdx-awe.21","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
+{"id":"int-258068d5","kind":"field_change","created_at":"2026-04-16T16:52:05.74002375Z","actor":"Liam Helmer","issue_id":"mxdx-awe.21","extra":{"field":"status","new_value":"closed","old_value":"in_progress"}}
+{"id":"int-1cd50fd2","kind":"field_change","created_at":"2026-04-16T16:52:12.688339501Z","actor":"Liam Helmer","issue_id":"mxdx-awe.22","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}
+{"id":"int-f0fdd1b9","kind":"field_change","created_at":"2026-04-16T17:00:06.733749435Z","actor":"Liam Helmer","issue_id":"mxdx-awe.23","extra":{"field":"status","new_value":"in_progress","old_value":"open"}}

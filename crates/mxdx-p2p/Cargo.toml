@@ -36,6 +36,14 @@ bytes = "1"
 tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Phase 5 driver + public API re-exports `Megolm<T>` from mxdx-matrix for
+# the try_send signature per ADR `2026-04-15-megolm-bytes-newtype.md`. This
+# is a native-only dep — matrix-sdk pulls sqlite + reqwest transitively and
+# is incompatible with wasm32. Phase 8 (wasm driver) will revisit with a
+# wasm-compatible shim.
+mxdx-matrix = { path = "../mxdx-matrix", version = "1.1.0" }
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "rand_core"] }
+tracing = { workspace = true }
 # Native HTTP for TURN credential fetch. Gated off wasm — real wasm HTTP is a
 # Phase 8 concern (web-sys fetch). Phase 2 only exposes a stub on wasm.
 reqwest = { workspace = true }
