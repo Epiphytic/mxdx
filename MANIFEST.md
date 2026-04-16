@@ -6,6 +6,7 @@
 |:---|:---|:---|
 | mxdx-types | crates/mxdx-types | Shared event schema types |
 | mxdx-matrix | crates/mxdx-matrix | matrix-sdk facade |
+| mxdx-p2p | crates/mxdx-p2p | P2P transport: WebRtcChannel trait, P2PTransport state machine, P2PCrypto, signaling, TURN |
 | mxdx-policy | crates/mxdx-policy | Policy Agent appservice binary |
 | mxdx-secrets | crates/mxdx-secrets | Secrets Coordinator binary |
 | mxdx-launcher | crates/mxdx-launcher | Launcher binary |

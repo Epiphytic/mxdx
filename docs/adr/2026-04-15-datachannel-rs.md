@@ -2,6 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-04-15
+**Implemented in:** Branch `brains/rust-p2p-interactive`, Phase 3 (T-31) + Phase 8 (T-80)
 **Related:** `docs/plans/2026-04-15-rust-p2p-interactive-storm.md`, `docs/adr/2026-04-15-mxdx-p2p-crate.md`
 
 ## Context

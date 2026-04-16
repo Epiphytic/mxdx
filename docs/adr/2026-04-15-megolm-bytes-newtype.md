@@ -2,6 +2,7 @@
 
 **Status:** Accepted
 **Date:** 2026-04-15
+**Implemented in:** Branch `brains/rust-p2p-interactive`, Phase 1 (T-10..T-13) + Phase 7 retrofit (T-53)
 **Related:** `docs/plans/2026-04-15-rust-p2p-interactive-storm.md`, CLAUDE.md cardinal rule
 
 ## Context
