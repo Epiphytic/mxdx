@@ -24,15 +24,25 @@ base64 = { workspace = true }
 rand = "0.9"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 url = { version = "2", default-features = false }
+# `async-trait` is used by the `WebRtcChannel` trait (Phase 3) for both
+# native and wasm targets. `?Send` is cfg-gated inside the trait definition.
+async-trait = "0.1"
+# `bytes::Bytes` carries inbound frames without copying. Needed on both
+# native and wasm. Kept at the default feature set.
+bytes = "1"
+# `tokio` provides the bounded mpsc used to surface backend events. The
+# `sync` feature is runtime-free and works on wasm; we gate the richer
+# runtime features under the non-wasm target below.
+tokio = { version = "1", default-features = false, features = ["sync"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # Native HTTP for TURN credential fetch. Gated off wasm — real wasm HTTP is a
 # Phase 8 concern (web-sys fetch). Phase 2 only exposes a stub on wasm.
 reqwest = { workspace = true }
+# Full tokio on native: the turn refresh task and the native channel impl
+# use time/rt/macros. This overrides the minimal default above via Cargo's
+# feature unification.
 tokio = { workspace = true }
-# async-trait is used on the internal TurnFetcher abstraction so the refresh
-# loop can be tested without a real homeserver.
-async-trait = "0.1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # aes-gcm 0.10 pulls rand_core 0.6 -> getrandom 0.2; enable the JS backend for
