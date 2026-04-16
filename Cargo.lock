@@ -2880,8 +2880,16 @@ dependencies = [
 name = "mxdx-p2p"
 version = "1.1.0"
 dependencies = [
+ "aes-gcm",
+ "base64 0.22.1",
+ "getrandom 0.2.17",
+ "getrandom 0.3.4",
+ "rand 0.9.2",
+ "rand_chacha 0.9.0",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
+ "zeroize",
 ]
 
 [[package]]

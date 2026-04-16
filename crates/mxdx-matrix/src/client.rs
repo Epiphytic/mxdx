@@ -480,6 +480,80 @@ impl MatrixClient {
         Ok(response.event_id.to_string())
     }
 
+    /// Package content for transport through a send surface that requires a
+    /// `Megolm<Bytes>`. Returns a sealed [`Megolm<Bytes>`] wrapping the
+    /// serialized JSON payload.
+    ///
+    /// Per ADR `2026-04-15-megolm-bytes-newtype.md` (2026-04-16 addendum —
+    /// Option B: semantic equivalence), the `Megolm<T>` wrapper is a
+    /// type-system marker that bytes have crossed the encryption boundary.
+    /// The actual Megolm ciphertext lands on the wire via:
+    ///
+    /// - **Matrix fallback**: [`Self::send_megolm`] posts through
+    ///   `room.send_raw`, which Megolm-encrypts in-flight using the existing
+    ///   room outbound session.
+    /// - **P2P path**: `P2PTransport::try_send(Megolm<Bytes>)` wraps the
+    ///   payload in an AES-GCM frame whose session key was exchanged inside
+    ///   a Megolm-encrypted `m.call.invite`.
+    ///
+    /// This function refuses to wrap content for an unencrypted room: the
+    /// cardinal rule requires every send surface to inherit E2EE, and the
+    /// type-system marker would be a lie if the downstream `send_raw` were
+    /// to post plaintext.
+    pub async fn encrypt_for_room(
+        &self,
+        room_id: &RoomId,
+        _event_type: &str,
+        content: Value,
+    ) -> Result<crate::Megolm<crate::Bytes>> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| MatrixClientError::RoomNotFound(room_id.to_string()))?;
+
+        if !room.encryption_state().is_encrypted() {
+            return Err(MatrixClientError::Other(anyhow::anyhow!(
+                "encrypt_for_room refused: room {} is not E2EE — cardinal rule requires encrypted rooms",
+                room_id
+            )));
+        }
+
+        let bytes = serde_json::to_vec(&content)
+            .map_err(|e| MatrixClientError::Other(anyhow::anyhow!("serialize content: {e}")))?;
+        Ok(crate::crypto_envelope::Megolm(bytes))
+    }
+
+    /// Send a `Megolm<Bytes>` payload via the Matrix fallback path. Posts
+    /// through `room.send_raw`, which Megolm-encrypts in-flight using the
+    /// existing room outbound session.
+    ///
+    /// Returns the Matrix event ID of the sent event.
+    pub async fn send_megolm(
+        &self,
+        room_id: &RoomId,
+        event_type: &str,
+        payload: crate::Megolm<crate::Bytes>,
+    ) -> Result<String> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| MatrixClientError::RoomNotFound(room_id.to_string()))?;
+
+        if !room.encryption_state().is_encrypted() {
+            return Err(MatrixClientError::Other(anyhow::anyhow!(
+                "send_megolm refused: room {} is not E2EE — cardinal rule requires encrypted rooms",
+                room_id
+            )));
+        }
+
+        let bytes = payload.into_ciphertext_bytes();
+        let content: Value = serde_json::from_slice(&bytes)
+            .map_err(|e| MatrixClientError::Other(anyhow::anyhow!("deserialize payload: {e}")))?;
+
+        let response = room.send_raw(event_type, content).await?;
+        Ok(response.event_id.to_string())
+    }
+
     /// Send a custom event as a thread reply to an existing event.
     /// Adds `m.relates_to` with `rel_type: "m.thread"` to the content.
     /// Returns the Matrix event ID of the sent event.
