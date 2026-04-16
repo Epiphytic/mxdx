@@ -130,6 +130,11 @@ impl SealedKey {
     /// base64 or wrong key length. Visibility is `pub(crate)` — signaling
     /// consumes incoming invites via this path and no external caller can
     /// conjure a key from arbitrary bytes.
+    ///
+    /// Consumed by `signaling::events::tests::sealed_key_roundtrips_through_invite_base64`
+    /// and by Phase 5's answerer path (not yet wired). `#[allow(dead_code)]`
+    /// keeps the wasm target clean until Phase 5 lands.
+    #[allow(dead_code)]
     pub(crate) fn from_invite_b64(b64: &str) -> Result<Self, CryptoError> {
         let raw =
             BASE64_STANDARD

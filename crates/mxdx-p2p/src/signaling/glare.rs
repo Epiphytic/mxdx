@@ -21,6 +21,17 @@
 //!   result.
 //! - Tie-break consistency: when user_ids are equal, the call_id tie-break
 //!   also satisfies the peer-agreement property.
+//!
+//! # Side-channel analysis
+//!
+//! `resolve` compares only public values — `user_id` and `call_id` are
+//! sent over the wire unencrypted (well, Megolm-encrypted for the room
+//! but visible to any joined device, including the peer). There is no
+//! secret involved; a timing side-channel on `str::cmp` would leak only
+//! information already available on the wire. The `match` arms each
+//! produce a single `GlareResult` constant, so branch-prediction-based
+//! side channels, even if they existed, would leak the public winner —
+//! which the peer trivially computes itself.
 
 /// The result of a glare resolution from the perspective of the local peer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
