@@ -480,6 +480,65 @@ impl MatrixClient {
         Ok(response.event_id.to_string())
     }
 
+    /// Send a Matrix VoIP `m.call.*` signaling event via the existing
+    /// encrypted room send path. Thin wrapper over `room.send_raw`
+    /// (matrix-sdk 0.16 encrypts in-flight using the existing outbound
+    /// Megolm session) — deliberately introduces no new encryption code.
+    ///
+    /// # Cardinal rule
+    ///
+    /// This function refuses to send into an unencrypted room. Every Matrix
+    /// event mxdx emits must be Megolm-encrypted on the wire (see
+    /// `CLAUDE.md`): signaling events that carry the `mxdx_session_key`
+    /// extension field (see `mxdx-p2p::signaling::events`) are protected
+    /// by room E2EE because session rooms are always MSC4362-encrypted.
+    /// A non-E2EE room would leak the session key in plaintext, so we
+    /// hard-fail the send instead.
+    ///
+    /// # Parameters
+    /// - `room_id` — the session room (exec room in mxdx topology).
+    /// - `event_type` — must start with `m.call.`. Unknown call event
+    ///   types (outside the five recognized in `mxdx-p2p`) are accepted
+    ///   on the send side for forward compatibility with future Matrix
+    ///   VoIP spec additions; the receive-side parser's Unknown variant
+    ///   handles the inverse case.
+    /// - `content` — the already-built event content (typically
+    ///   `serde_json::to_value(&build_invite(...))` from mxdx-p2p).
+    ///
+    /// Returns the Matrix event ID of the sent event.
+    pub async fn send_call_event(
+        &self,
+        room_id: &RoomId,
+        event_type: &str,
+        content: Value,
+    ) -> Result<String> {
+        if !event_type.starts_with("m.call.") {
+            return Err(MatrixClientError::Other(anyhow::anyhow!(
+                "send_call_event refused: event type `{}` is not an m.call.* type",
+                event_type
+            )));
+        }
+
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| MatrixClientError::RoomNotFound(room_id.to_string()))?;
+
+        if !room.encryption_state().is_encrypted() {
+            return Err(MatrixClientError::Other(anyhow::anyhow!(
+                "send_call_event refused: room {} is not E2EE — cardinal rule requires encrypted rooms",
+                room_id
+            )));
+        }
+
+        // Route through the same room.send_raw path as send_event and
+        // send_megolm — matrix-sdk Megolm-encrypts the content in-flight
+        // using the room's existing outbound session. No new encryption
+        // code, no separate keystore.
+        let response = room.send_raw(event_type, content).await?;
+        Ok(response.event_id.to_string())
+    }
+
     /// Package content for transport through a send surface that requires a
     /// `Megolm<Bytes>`. Returns a sealed [`Megolm<Bytes>`] wrapping the
     /// serialized JSON payload.
@@ -909,20 +968,13 @@ impl MatrixClient {
                 let json_str = timeline_event.raw().json().get();
                 if let Ok(json) = serde_json::from_str::<Value>(json_str) {
                     let event_type = json.get("type").and_then(|t| t.as_str());
-                    match event_type {
-                        Some("m.room.encrypted") => {
-                            // Only flag as undecryptable for non-state events
-                            // (messages, session events). MSC4362 encrypted state
-                            // events have a state_key and are handled by the SDK's
-                            // state processor — seeing them here doesn't mean we're
-                            // missing keys for timeline events.
-                            let is_state = json.get("state_key").is_some();
-                            if !is_state {
-                                saw_encrypted = true;
-                            }
+                    let is_state = json.get("state_key").is_some();
+                    match classify_sync_event(event_type, is_state) {
+                        SyncFilterDecision::Encrypted => {
+                            saw_encrypted = true;
                         }
-                        Some("m.room.encryption") | Some("m.room.member") | Some("m.room.power_levels") => {}
-                        _ => {
+                        SyncFilterDecision::InfraIgnored => {}
+                        SyncFilterDecision::Deliver => {
                             if let Some(eid) = json.get("event_id").and_then(|e| e.as_str()) {
                                 seen_ids.insert(eid.to_string());
                             }
@@ -967,13 +1019,13 @@ impl MatrixClient {
                         let json_str = event.raw().json().get();
                         if let Ok(json) = serde_json::from_str::<Value>(json_str) {
                             let event_type = json.get("type").and_then(|t| t.as_str());
-                            match event_type {
-                                Some("m.room.encrypted") => {
+                            let is_state = json.get("state_key").is_some();
+                            match classify_sync_event(event_type, is_state) {
+                                SyncFilterDecision::Encrypted => {
                                     still_encrypted += 1;
                                 }
-                                Some("m.room.encryption")
-                                | Some("m.room.member") | Some("m.room.power_levels") => {}
-                                _ => {
+                                SyncFilterDecision::InfraIgnored => {}
+                                SyncFilterDecision::Deliver => {
                                     if let Some(t) = event_type {
                                         decrypted_types.push(t.to_string());
                                     }
@@ -1329,6 +1381,52 @@ impl MatrixClient {
     }
 }
 
+/// Classification of a Matrix event type for mxdx's sync receive path.
+///
+/// `sync_and_collect_events` passes events of every type through to consumers
+/// except a small infra denylist. This enum documents the classification
+/// and makes it unit-testable — it's used internally by the sync path match
+/// arm at `sync_and_collect_events`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncFilterDecision {
+    /// The event is undecryptable room encryption metadata — drives the
+    /// saw_encrypted fallback path (for non-state events).
+    Encrypted,
+    /// Infra event that's not a consumer payload (membership, encryption
+    /// config, power levels). Silently ignored by the sync collector.
+    InfraIgnored,
+    /// Consumer payload — includes all mxdx session events (`mxdx.session.*`),
+    /// all Matrix VoIP call events (`m.call.*`), telemetry events, and any
+    /// other application-level event types.
+    Deliver,
+}
+
+/// Classify a Matrix event type for the sync receive path. Pure function,
+/// testable without a live Matrix client.
+///
+/// Recognized Matrix VoIP event types (`m.call.*`) are classified as
+/// [`SyncFilterDecision::Deliver`] so the Phase 5 state machine receives
+/// them through `sync_and_collect_events`. The function is intentionally
+/// permissive: unknown types default to `Deliver` rather than being
+/// dropped, so future event schemas don't require coordinated code changes.
+pub fn classify_sync_event(event_type: Option<&str>, is_state: bool) -> SyncFilterDecision {
+    match event_type {
+        Some("m.room.encrypted") => {
+            // MSC4362 state events are handled by the SDK's state processor;
+            // timeline-level encrypted events drive the re-sync fallback.
+            if is_state {
+                SyncFilterDecision::InfraIgnored
+            } else {
+                SyncFilterDecision::Encrypted
+            }
+        }
+        Some("m.room.encryption") | Some("m.room.member") | Some("m.room.power_levels") => {
+            SyncFilterDecision::InfraIgnored
+        }
+        _ => SyncFilterDecision::Deliver,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1435,5 +1533,113 @@ mod tests {
             let grandparent = parent.parent().unwrap();
             assert!(grandparent.ends_with(".mxdx"));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // T-43 — sync filter classifier tests. Ensure m.call.* events are NOT
+    // dropped by the sync path; the Phase 5 state machine needs them.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn classify_delivers_all_m_call_types() {
+        for ty in crate::CALL_EVENT_TYPES {
+            assert_eq!(
+                classify_sync_event(Some(ty), false),
+                SyncFilterDecision::Deliver,
+                "m.call.* event type `{ty}` must pass through sync filter"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_delivers_unknown_m_call_types_for_forward_compat() {
+        // Future Matrix call event types (m.call.reject, m.call.negotiate,
+        // etc.) must also be delivered to consumers — the Rust parser
+        // surfaces them as ParsedCallEvent::Unknown. If the sync filter
+        // were a positive-only allowlist, spec additions would silently
+        // drop until the allowlist was updated.
+        assert_eq!(
+            classify_sync_event(Some("m.call.reject"), false),
+            SyncFilterDecision::Deliver
+        );
+        assert_eq!(
+            classify_sync_event(Some("m.call.negotiate"), false),
+            SyncFilterDecision::Deliver
+        );
+    }
+
+    #[test]
+    fn classify_delivers_mxdx_session_events() {
+        assert_eq!(
+            classify_sync_event(Some("mxdx.session.start"), false),
+            SyncFilterDecision::Deliver
+        );
+        assert_eq!(
+            classify_sync_event(Some("mxdx.session.output"), false),
+            SyncFilterDecision::Deliver
+        );
+    }
+
+    #[test]
+    fn classify_infra_ignored() {
+        for ty in [
+            "m.room.encryption",
+            "m.room.member",
+            "m.room.power_levels",
+        ] {
+            assert_eq!(
+                classify_sync_event(Some(ty), false),
+                SyncFilterDecision::InfraIgnored,
+                "type {ty} should be infra-ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_timeline_encrypted_triggers_fallback() {
+        // m.room.encrypted on a timeline event (no state_key) drives the
+        // saw_encrypted retry logic.
+        assert_eq!(
+            classify_sync_event(Some("m.room.encrypted"), false),
+            SyncFilterDecision::Encrypted
+        );
+    }
+
+    #[test]
+    fn classify_state_encrypted_is_infra_ignored() {
+        // MSC4362 state events (m.room.encrypted with state_key) are
+        // handled by the SDK's state processor, not the timeline
+        // fallback — classified as InfraIgnored.
+        assert_eq!(
+            classify_sync_event(Some("m.room.encrypted"), true),
+            SyncFilterDecision::InfraIgnored
+        );
+    }
+
+    #[test]
+    fn classify_missing_type_delivers() {
+        // No `type` field — default permissive case, don't drop.
+        assert_eq!(
+            classify_sync_event(None, false),
+            SyncFilterDecision::Deliver
+        );
+    }
+
+    #[test]
+    fn call_event_types_constant_matches_mxdx_p2p() {
+        // Locks the list of recognized call event types. If this changes,
+        // crates/mxdx-p2p/src/signaling/parse.rs CALL_EVENT_TYPES must
+        // change in lockstep. Both reference the 2026-04-15 m.call
+        // wire-format ADR.
+        assert_eq!(
+            crate::CALL_EVENT_TYPES,
+            &[
+                "m.call.invite",
+                "m.call.answer",
+                "m.call.candidates",
+                "m.call.hangup",
+                "m.call.select_answer"
+            ]
+        );
     }
 }
