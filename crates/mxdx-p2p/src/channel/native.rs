@@ -30,6 +30,15 @@
 //! This preserves the cardinal rule: frames on the data channel are
 //! already-encrypted (Megolm + AES-GCM) and must never appear in logs.
 //!
+//! Note: libdatachannel's own internal logging (routed through the `log`
+//! crate by the `datachannel` crate's `ensure_logging` bridge) emits only
+//! metadata — SDP strings, ICE candidate lines, and state transitions —
+//! never the payload bytes of a DataChannel message. Operators who run at
+//! DEBUG/TRACE level will see SDP/ICE diagnostics; that is acceptable
+//! because Matrix event bodies (signaling) are themselves Megolm-
+//! encrypted and the data channel payload never transits through
+//! libdatachannel's log path.
+//!
 //! ## restart_ice
 //!
 //! `datachannel-sys` 0.23 does not expose `rtcSetConfiguration`, so the
