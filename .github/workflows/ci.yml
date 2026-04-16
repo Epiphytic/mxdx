@@ -99,6 +99,58 @@ jobs:
         run: sudo apt-get install -y libsqlite3-dev libssl-dev
       - run: cargo test -p mxdx-secrets --lib
 
+  # P2P / interactive-session test jobs. These are vacuously green during
+  # Phase 0 scaffolding; later phases populate real test bodies behind these
+  # job names. Defined now so the CI shape is stable across the rollout.
+  rust-p2p-unit:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev
+      - run: cargo test -p mxdx-p2p --lib
+
+  rust-p2p-loopback:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev
+      # Loopback integration test is added in Phase 3 (T-32). Until then
+      # this is a vacuous "no tests" run; it fails only if a populated
+      # integration target later regresses.
+      - run: cargo test -p mxdx-p2p --tests
+
+  wasm-p2p-smoke:
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # Phase 8 wires the wasm path. For now this confirms the crate
+      # cross-compiles to wasm32-unknown-unknown so any accidental
+      # native-only dep added in early phases is caught immediately.
+      - run: cargo check -p mxdx-p2p --target wasm32-unknown-unknown
+
+  security-grep:
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify no unencrypted-send patterns in mxdx-p2p
+        run: bash scripts/check-no-unencrypted-sends.sh
+      - name: Self-test the grep gate
+        run: bash scripts/check-no-unencrypted-sends.sh --self-test
+
   # Integration and federation tests require tuwunel.
   # Gated to workflow_dispatch until beta.mxdx.dev infrastructure is available.
   integration:
