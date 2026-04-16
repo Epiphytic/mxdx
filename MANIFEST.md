@@ -868,16 +868,6 @@ _No public symbols._
 | `WorkerTrust::add_trusted_device` | method | `crates/mxdx-worker/src/trust.rs` |
 | `WorkerTrust::merge_trust_list` | method | `crates/mxdx-worker/src/trust.rs` |
 | `WorkerTrust::trust_anchor` | method | `crates/mxdx-worker/src/trust.rs` |
-| `TurnConfig` | struct | `crates/mxdx-worker/src/webrtc.rs` |
-| `WebRtcManager` | struct | `crates/mxdx-worker/src/webrtc.rs` |
-| `WebRtcManager::new` | method | `crates/mxdx-worker/src/webrtc.rs` |
-| `WebRtcManager::set_turn_config` | method | `crates/mxdx-worker/src/webrtc.rs` |
-| `WebRtcManager::turn_config` | method | `crates/mxdx-worker/src/webrtc.rs` |
-| `WebRtcManager::is_available` | method | `crates/mxdx-worker/src/webrtc.rs` |
-| `WebRtcManager::create_offer` | method | `crates/mxdx-worker/src/webrtc.rs` |
-| `WebRtcManager::handle_answer` | method | `crates/mxdx-worker/src/webrtc.rs` |
-| `WebRtcManager::handle_ice` | method | `crates/mxdx-worker/src/webrtc.rs` |
-| `WebRtcManager::close` | method | `crates/mxdx-worker/src/webrtc.rs` |
 <!-- END GENERATED SYMBOL TABLES -->
 
 
