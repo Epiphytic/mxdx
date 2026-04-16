@@ -23,6 +23,13 @@ aes-gcm = { version = "0.10", features = ["zeroize"] }
 base64 = { workspace = true }
 rand = "0.9"
 zeroize = { version = "1", features = ["zeroize_derive"] }
+url = { version = "2", default-features = false }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native HTTP for TURN credential fetch. Gated off wasm — real wasm HTTP is a
+# Phase 8 concern (web-sys fetch). Phase 2 only exposes a stub on wasm.
+reqwest = { workspace = true }
+tokio = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # aes-gcm 0.10 pulls rand_core 0.6 -> getrandom 0.2; enable the JS backend for
@@ -36,3 +43,7 @@ getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] 
 [dev-dependencies]
 rand_chacha = "0.9"
 trybuild = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+mockito = "1"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
