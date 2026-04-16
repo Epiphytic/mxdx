@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "description": "Cross-language m.call.* signaling vectors. Generated with the Rust emitter (see tests/signaling_vectors.rs) and asserted byte-for-byte against the npm parser in packages/e2e-tests/tests/rust-npm-signaling-vectors.test.js. Do not edit by hand — regenerate via: cargo test -p mxdx-p2p --test signaling_vectors -- --ignored generate_vectors --exact --nocapture",
+  "invite_with_session_key": {
+    "json": "{\"call_id\":\"c1\",\"party_id\":\"p1\",\"version\":\"1\",\"lifetime\":30000,\"offer\":{\"type\":\"offer\",\"sdp\":\"v=0\\r\\no=- 1 1 IN IP4 127.0.0.1\\r\\n\"},\"mxdx_session_key\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\"}",
+    "expected_fields": {
+      "call_id": "c1",
+      "party_id": "p1",
+      "version": "1",
+      "lifetime": 30000,
+      "offer_type": "offer",
+      "offer_sdp": "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n",
+      "mxdx_session_key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+      "session_uuid_absent": true
+    }
+  },
+  "invite_without_session_key": {
+    "json": "{\"call_id\":\"c2\",\"party_id\":\"p2\",\"version\":\"1\",\"lifetime\":30000,\"offer\":{\"type\":\"offer\",\"sdp\":\"sdp-placeholder\"}}",
+    "expected_fields": {
+      "call_id": "c2",
+      "party_id": "p2",
+      "version": "1",
+      "lifetime": 30000,
+      "offer_type": "offer",
+      "offer_sdp": "sdp-placeholder",
+      "mxdx_session_key_absent": true,
+      "session_uuid_absent": true
+    }
+  },
+  "invite_with_session_uuid": {
+    "json": "{\"call_id\":\"c3\",\"party_id\":\"p3\",\"version\":\"1\",\"lifetime\":30000,\"offer\":{\"type\":\"offer\",\"sdp\":\"sdp-placeholder\"},\"mxdx_session_key\":\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"session_uuid\":\"sess-abc-123\"}",
+    "expected_fields": {
+      "call_id": "c3",
+      "session_uuid": "sess-abc-123"
+    }
+  },
+  "answer": {
+    "json": "{\"call_id\":\"c1\",\"party_id\":\"p2\",\"version\":\"1\",\"answer\":{\"type\":\"answer\",\"sdp\":\"v=0\\r\\na=answer\\r\\n\"}}",
+    "expected_fields": {
+      "call_id": "c1",
+      "party_id": "p2",
+      "version": "1",
+      "answer_type": "answer",
+      "answer_sdp": "v=0\r\na=answer\r\n"
+    }
+  },
+  "candidates_node_shape": {
+    "json": "{\"call_id\":\"c1\",\"party_id\":\"p1\",\"version\":\"1\",\"candidates\":[{\"candidate\":\"candidate:1 1 UDP 2130706431 192.168.1.100 12345 typ host\",\"sdpMid\":\"0\"},{\"candidate\":\"candidate:2 1 UDP 1694498815 203.0.113.1 54321 typ srflx\",\"sdpMid\":\"0\"}]}",
+    "expected_fields": {
+      "call_id": "c1",
+      "count": 2,
+      "candidate_0_sdpMid": "0",
+      "candidate_0_sdpMLineIndex_absent": true
+    }
+  },
+  "candidates_browser_shape": {
+    "json": "{\"call_id\":\"c1\",\"party_id\":\"p1\",\"version\":\"1\",\"candidates\":[{\"candidate\":\"candidate:3 1 UDP 1 1.2.3.4 9999 typ relay\",\"sdpMid\":\"0\",\"sdpMLineIndex\":0}]}",
+    "expected_fields": {
+      "call_id": "c1",
+      "count": 1,
+      "candidate_0_sdpMid": "0",
+      "candidate_0_sdpMLineIndex": 0
+    }
+  },
+  "hangup_with_reason": {
+    "json": "{\"call_id\":\"c1\",\"party_id\":\"p1\",\"version\":\"1\",\"reason\":\"idle_timeout\"}",
+    "expected_fields": {
+      "call_id": "c1",
+      "reason": "idle_timeout"
+    }
+  },
+  "hangup_without_reason": {
+    "json": "{\"call_id\":\"c1\",\"party_id\":\"p1\",\"version\":\"1\"}",
+    "expected_fields": {
+      "call_id": "c1",
+      "reason_absent": true
+    }
+  },
+  "select_answer": {
+    "json": "{\"call_id\":\"c1\",\"party_id\":\"p1\",\"version\":\"1\",\"selected_party_id\":\"remote-party-7\"}",
+    "expected_fields": {
+      "call_id": "c1",
+      "selected_party_id": "remote-party-7"
+    }
+  }
+}

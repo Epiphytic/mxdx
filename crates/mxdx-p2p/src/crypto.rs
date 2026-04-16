@@ -26,6 +26,8 @@ pub enum CryptoError {
     },
     #[error("invalid IV length: got {got} bytes, expected 12")]
     InvalidIvLength { got: usize },
+    #[error("invalid key length: got {got} bytes, expected 32")]
+    InvalidKeyLength { got: usize },
 }
 
 impl From<aes_gcm::Error> for CryptoError {
@@ -113,6 +115,36 @@ impl SealedKey {
         arr.as_slice()
             .try_into()
             .expect("Key<Aes256Gcm> is 32 bytes by construction")
+    }
+
+    /// Base64-encode the key for the `mxdx_session_key` field on
+    /// `m.call.invite`. Visibility is `pub(crate)` so the sibling
+    /// `signaling::events` module can call it from `build_invite`; external
+    /// callers cannot reach raw key bytes.
+    pub(crate) fn to_invite_b64(&self) -> String {
+        BASE64_STANDARD.encode(self.as_bytes())
+    }
+
+    /// Reconstruct a `SealedKey` from the base64 `mxdx_session_key` field of
+    /// a received `m.call.invite`. Returns a descriptive error on invalid
+    /// base64 or wrong key length. Visibility is `pub(crate)` — signaling
+    /// consumes incoming invites via this path and no external caller can
+    /// conjure a key from arbitrary bytes.
+    pub(crate) fn from_invite_b64(b64: &str) -> Result<Self, CryptoError> {
+        let raw =
+            BASE64_STANDARD
+                .decode(b64.as_bytes())
+                .map_err(|e| CryptoError::InvalidBase64 {
+                    field: "mxdx_session_key",
+                    source: e,
+                })?;
+        let mut bytes: [u8; 32] = raw
+            .as_slice()
+            .try_into()
+            .map_err(|_| CryptoError::InvalidKeyLength { got: raw.len() })?;
+        let sealed = SealedKey::from_bytes(bytes);
+        bytes.zeroize();
+        Ok(sealed)
     }
 }
 
