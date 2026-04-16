@@ -43,6 +43,16 @@ reqwest = { workspace = true }
 # use time/rt/macros. This overrides the minimal default above via Cargo's
 # feature unification.
 tokio = { workspace = true }
+# Native WebRTC via FFI to libdatachannel C++. The `vendored` feature on
+# datachannel-sys builds libdatachannel + its transitive C deps (usrsctp,
+# libjuice, libsrtp, OpenSSL) from source via cmake, so the only system
+# dependency is a C++17 compiler and cmake. See ADR
+# `docs/adr/2026-04-15-datachannel-rs.md` and T-33 for CI setup.
+datachannel = { version = "0.16", default-features = false, features = ["log", "vendored"] }
+# Used for the default logger wiring — datachannel's `log` feature pipes
+# libdatachannel logs through `log`. The project already uses `tracing`
+# elsewhere; `tracing-log` bridges them.
+log = "0.4"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # aes-gcm 0.10 pulls rand_core 0.6 -> getrandom 0.2; enable the JS backend for
