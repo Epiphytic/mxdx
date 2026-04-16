@@ -42,3 +42,15 @@ This project uses Rust for backend services, Rust WASM's for the client and laun
 ## Agent Execution Rules
 
 ** ALWAYS run tests or any long-running processes using subagents — never block the main conversation context **
+
+## Third-Party `testing` Features in Production
+
+When a dependency's `testing` (or similarly named) cargo feature gates an otherwise-stable API that mxdx needs for security-critical work, **prefer enabling the feature in production over vendor forks or trust-model workarounds**, subject to three preconditions:
+
+1. The gated API is fully public and stable on the upstream crate's `main` branch (verify by URL + commit hash at decision time).
+2. No non-gated public equivalent exists.
+3. The transitive dev-quality dependencies the feature pulls in are bounded and audited.
+
+Each new use of a `testing`-gated API must cite the authorizing ADR in a comment adjacent to the call site. Policy details, review triggers, and the first authorized uses (`matrix-sdk::Client::olm_machine_for_testing()` → `OlmMachine::sign` / `encrypt_room_event_raw`) are documented in `docs/adr/2026-04-16-matrix-sdk-testing-feature.md`.
+
+This exception does NOT authorize enabling `testing`-style features casually or for non-security-critical work — each crate and each use requires its own decision against the three preconditions.
