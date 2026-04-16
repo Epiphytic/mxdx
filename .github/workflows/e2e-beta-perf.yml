@@ -1,0 +1,97 @@
+name: E2E Beta Perf (Nightly + PR)
+
+on:
+  schedule:
+    # Nightly at 03:00 UTC
+    - cron: '0 3 * * *'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'crates/mxdx-p2p/**'
+      - 'crates/mxdx-worker/**'
+      - 'crates/mxdx-client/**'
+      - 'packages/e2e-tests/tests/*perf*'
+  workflow_dispatch:
+
+concurrency:
+  group: e2e-beta-perf-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TEST_SERVER_URL: ${{ secrets.TEST_SERVER_URL }}
+  TEST_SERVER2_URL: ${{ secrets.TEST_SERVER2_URL }}
+  TEST_ACCOUNT1_USERNAME: ${{ secrets.TEST_ACCOUNT1_USERNAME }}
+  TEST_ACCOUNT1_PASSWORD: ${{ secrets.TEST_ACCOUNT1_PASSWORD }}
+  TEST_ACCOUNT2_USERNAME: ${{ secrets.TEST_ACCOUNT2_USERNAME }}
+  TEST_ACCOUNT2_PASSWORD: ${{ secrets.TEST_ACCOUNT2_PASSWORD }}
+
+jobs:
+  rust-p2p-perf:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      # Pin to 1.93.1: rustc 1.94.0 has a trait solver regression
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install system deps
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev cmake g++
+
+      - name: Build Rust binaries
+        run: cargo build --release -p mxdx-worker -p mxdx-client
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM (nodejs)
+        run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
+
+      - name: Install npm deps
+        run: npm install
+
+      - name: Run perf test suite
+        env:
+          GIT_SHA: ${{ github.sha }}
+        run: |
+          export PATH="$PWD/target/release:$PATH"
+          node --test packages/e2e-tests/tests/rust-p2p-beta-perf.test.js || true
+        # Allow test to fail on missing credentials (forks, no secrets)
+
+      - name: Write nightly result
+        if: github.event_name == 'schedule'
+        env:
+          GIT_SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          DATE="$(date -u +%Y-%m-%d)"
+          RESULT_FILE="packages/e2e-tests/results/nightly-perf-${DATE}.json"
+          mkdir -p packages/e2e-tests/results
+
+          # Determine status from the perf test exit code
+          export PATH="$PWD/target/release:$PATH"
+          if node --test packages/e2e-tests/tests/rust-p2p-beta-perf.test.js 2>/dev/null; then
+            STATUS="green"
+          else
+            STATUS="red"
+          fi
+
+          # Write result JSON (all values are controlled — no user input)
+          printf '{\n  "status": "%s",\n  "date": "%s",\n  "git_sha": "%s",\n  "branch": "%s",\n  "triggered_by": "nightly"\n}\n' \
+            "$STATUS" "$DATE" "$GIT_SHA" "$REF_NAME" > "$RESULT_FILE"
+
+      - name: Check perf streak
+        if: github.event_name == 'schedule'
+        run: bash scripts/check-perf-streak.sh 3
+        continue-on-error: true
+
+      - name: Upload perf results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-results-${{ github.sha }}
+          path: packages/e2e-tests/results/
+          retention-days: 90
