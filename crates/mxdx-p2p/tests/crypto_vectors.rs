@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! Cross-language crypto vectors: decrypt the committed JSON fixture in Rust
 //! and assert the plaintexts match. The Node-side test lives at
 //! `packages/e2e-tests/tests/rust-npm-crypto-vectors.test.js` and runs the

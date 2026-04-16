@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! Property-based tests for `signaling::glare::resolve`.
 //!
 //! Three invariants locked (per plan T-42):

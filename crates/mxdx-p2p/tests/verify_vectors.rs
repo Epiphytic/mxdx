@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! Cross-runtime verify-handshake vectors (bead mxdx-fqt).
 //!
 //! Locks byte-exact transcript-layout parity between Rust

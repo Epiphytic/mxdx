@@ -1,3 +1,11 @@
+/**
+ * @deprecated This JS shim is superseded by the Rust signaling module in
+ * `crates/mxdx-p2p/src/signaling/`. WASM P2PTransport will subsume signaling
+ * orchestration. Scheduled for removal in T-C2 (cleanup phase).
+ */
+
+console.warn('[mxdx] p2p-signaling.js is deprecated — Rust P2PTransport will replace this');
+
 /** Cross-platform random hex string (works in browser + Node 19+). */
 function randomHex(byteCount) {
   const buf = new Uint8Array(byteCount);

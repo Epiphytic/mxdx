@@ -2,10 +2,18 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { TerminalSocket } from './terminal-socket.js';
 import { BrowserWebRTCChannel } from './webrtc-channel.js';
+// P2P crypto and TURN: WASM exports (Phase 8, T-82).
+// P2PSignaling and P2PTransport: JS orchestration classes, imported from
+// @mxdx/core re-exports (deprecated in T-83, replaced by Rust P2PTransport).
+import {
+  P2PCrypto,
+  generateSessionKey,
+  createP2PCrypto,
+  fetchTurnCredentials,
+  turnToIceServers,
+} from '../../core/wasm/web/mxdx_core_wasm.js';
 import { P2PSignaling } from '../../core/p2p-signaling.js';
 import { P2PTransport } from '../../core/p2p-transport.js';
-import { generateSessionKey, createP2PCrypto } from '../../core/p2p-crypto.js';
-import { fetchTurnCredentials, turnToIceServers } from '../../core/turn-credentials.js';
 
 let activeSocket = null;
 let activeTerminal = null;

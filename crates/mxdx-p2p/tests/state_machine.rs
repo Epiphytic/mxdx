@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! T-54: comprehensive state machine test suite.
 //!
 //! Covers storm §3.1–§4.5 invariants at the `transition()` + driver-flow

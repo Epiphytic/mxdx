@@ -547,7 +547,28 @@ _No public symbols._
 
 ### mxdx-p2p
 
-_No public symbols._
+| Symbol | Kind | File |
+|:---|:---|:---|
+| `WebRtcChannel` | trait | `crates/mxdx-p2p/src/channel/mod.rs` |
+| `NativeWebRtcChannel` | struct (native) | `crates/mxdx-p2p/src/channel/native.rs` |
+| `WasmWebRtcChannel` | struct (wasm) | `crates/mxdx-p2p/src/channel/wasm.rs` |
+| `P2PCrypto` | struct | `crates/mxdx-p2p/src/crypto.rs` |
+| `SealedKey` | struct | `crates/mxdx-p2p/src/crypto.rs` |
+| `EncryptedFrame` | struct | `crates/mxdx-p2p/src/crypto.rs` |
+| `P2PTransport` | struct | `crates/mxdx-p2p/src/transport/mod.rs` |
+| `P2PState` | enum | `crates/mxdx-p2p/src/transport/state.rs` |
+| `CallInvite` | struct | `crates/mxdx-p2p/src/signaling/events.rs` |
+| `TurnCredentials` | struct | `crates/mxdx-p2p/src/turn.rs` |
+
+#### npm shims (deprecated — Phase 8 T-83)
+
+| Symbol | Kind | File | Replacement |
+|:---|:---|:---|:---|
+| `P2PCrypto` | class | `packages/core/p2p-crypto.js` | WASM `P2PCrypto` via `@mxdx/core` |
+| `generateSessionKey` | fn | `packages/core/p2p-crypto.js` | WASM `generateSessionKey` via `@mxdx/core` |
+| `createP2PCrypto` | fn | `packages/core/p2p-crypto.js` | WASM `createP2PCrypto` via `@mxdx/core` |
+| `P2PSignaling` | class | `packages/core/p2p-signaling.js` | Rust signaling module (pending) |
+| `P2PTransport` | class | `packages/core/p2p-transport.js` | Rust P2PTransport (pending) |
 
 ### mxdx-policy
 

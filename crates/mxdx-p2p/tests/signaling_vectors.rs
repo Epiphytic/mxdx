@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! Cross-language signaling vectors for the Matrix VoIP `m.call.*` events.
 //!
 //! These vectors lock the wire format between the Rust emitter in

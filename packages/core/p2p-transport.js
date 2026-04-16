@@ -1,4 +1,9 @@
 /**
+ * @deprecated This JS transport class is superseded by the Rust P2PTransport
+ * state machine in `crates/mxdx-p2p/src/transport/`. The native Rust driver
+ * is functional; the WASM driver is a stub pending full Phase 8 integration.
+ * Scheduled for removal in T-C2 (cleanup phase).
+ *
  * P2PTransport — adapter between TerminalSocket/BatchedSender and WebRTC data channel.
  *
  * Implements the same sendEvent/onRoomEvent interface as the Matrix client.
@@ -14,6 +19,8 @@
  * NEVER sends unencrypted terminal data over P2P.
  * Falls back to Matrix transparently on any P2P failure.
  */
+
+console.warn('[mxdx] p2p-transport.js is deprecated — Rust P2PTransport will replace this');
 
 import {
   generateNonce,

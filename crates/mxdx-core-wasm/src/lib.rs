@@ -1661,3 +1661,190 @@ pub fn session_event_types() -> String {
     })
     .to_string()
 }
+
+// ===========================================================================
+// P2P surface (Phase 8 — T-81)
+//
+// Re-exports P2PCrypto (AES-256-GCM), signaling event helpers, and TURN
+// credential fetching from mxdx-p2p via wasm_bindgen. The browser-side
+// WebRtcChannel (web-sys) is used by P2PTransport internally but not
+// directly exported — JS callers use the higher-level P2PTransport API.
+//
+// Design note: mxdx-p2p types use Rust patterns (Result, Bytes, async-trait)
+// that don't map 1:1 to JS. These wasm_bindgen wrappers return JSON strings
+// following the project convention: "return JSON strings from WASM and
+// JSON.parse() in JS instead" (from MEMORY.md). This avoids the
+// serde_wasm_bindgen::to_value failure on serde_json::Value.
+// ===========================================================================
+
+/// WASM wrapper around `mxdx_p2p::crypto::P2PCrypto`.
+///
+/// Exposes key generation, encrypt, and decrypt — wire-compatible with the
+/// npm `P2PCrypto` class in `packages/core/p2p-crypto.js`.
+#[wasm_bindgen]
+pub struct P2PCrypto {
+    inner: mxdx_p2p::crypto::P2PCrypto,
+}
+
+#[wasm_bindgen]
+impl P2PCrypto {
+    /// Generate a new random AES-256-GCM session key.
+    /// Returns the base64-encoded key string for embedding in signaling events.
+    #[wasm_bindgen(js_name = "generate")]
+    pub fn generate() -> Result<P2PCryptoWithKey, JsValue> {
+        let (crypto, sealed) = mxdx_p2p::crypto::P2PCrypto::generate();
+        let key_b64 = sealed.to_base64();
+        Ok(P2PCryptoWithKey {
+            crypto: P2PCrypto { inner: crypto },
+            key: key_b64,
+        })
+    }
+
+    /// Create a P2PCrypto instance from a base64-encoded session key.
+    #[wasm_bindgen(js_name = "fromKey")]
+    pub fn from_key(base64_key: &str) -> Result<P2PCrypto, JsValue> {
+        let sealed = mxdx_p2p::crypto::SealedKey::from_base64(base64_key)
+            .map_err(|e| to_js_err(format!("invalid session key: {e}")))?;
+        let crypto = mxdx_p2p::crypto::P2PCrypto::from_sealed(sealed);
+        Ok(P2PCrypto { inner: crypto })
+    }
+
+    /// Encrypt a plaintext string. Returns JSON: `{"c":"<base64>","iv":"<base64>"}`.
+    #[wasm_bindgen]
+    pub fn encrypt(&self, plaintext: &str) -> Result<String, JsValue> {
+        let frame = self
+            .inner
+            .encrypt(plaintext.as_bytes())
+            .map_err(|e| to_js_err(format!("encrypt: {e}")))?;
+        serde_json::to_string(&frame).map_err(|e| to_js_err(format!("serialize: {e}")))
+    }
+
+    /// Decrypt a JSON frame string. Returns the plaintext string, or throws on failure.
+    #[wasm_bindgen]
+    pub fn decrypt(&self, ciphertext_json: &str) -> Result<String, JsValue> {
+        let frame: mxdx_p2p::crypto::EncryptedFrame =
+            serde_json::from_str(ciphertext_json)
+                .map_err(|e| to_js_err(format!("parse frame: {e}")))?;
+        let plaintext = self
+            .inner
+            .decrypt(&frame)
+            .map_err(|e| to_js_err(format!("decrypt: {e}")))?;
+        String::from_utf8(plaintext)
+            .map_err(|e| to_js_err(format!("utf8: {e}")))
+    }
+}
+
+/// Result of `P2PCrypto.generate()` — contains both the crypto instance and
+/// the base64-encoded key for signaling. JS destructures this.
+#[wasm_bindgen]
+pub struct P2PCryptoWithKey {
+    crypto: P2PCrypto,
+    key: String,
+}
+
+#[wasm_bindgen]
+impl P2PCryptoWithKey {
+    /// Get the P2PCrypto instance.
+    #[wasm_bindgen(getter)]
+    pub fn crypto(self) -> P2PCrypto {
+        self.crypto
+    }
+
+    /// Get the base64-encoded session key for embedding in m.call.invite.
+    #[wasm_bindgen(getter)]
+    pub fn key(&self) -> String {
+        self.key.clone()
+    }
+}
+
+/// Generate a random AES-256-GCM session key, returning just the base64 string.
+/// Convenience wrapper matching `generateSessionKey()` in p2p-crypto.js.
+#[wasm_bindgen(js_name = "generateSessionKey")]
+pub fn generate_session_key() -> String {
+    let (_crypto, sealed) = mxdx_p2p::crypto::P2PCrypto::generate();
+    sealed.to_base64()
+}
+
+/// Create a P2PCrypto instance from a base64 key. Convenience wrapper matching
+/// `createP2PCrypto()` in p2p-crypto.js.
+#[wasm_bindgen(js_name = "createP2PCrypto")]
+pub fn create_p2p_crypto(base64_key: &str) -> Result<P2PCrypto, JsValue> {
+    P2PCrypto::from_key(base64_key)
+}
+
+/// Fetch TURN credentials from a Matrix homeserver.
+/// Returns JSON string of the TURN response, or "null" if unavailable.
+///
+/// Uses the browser's `fetch()` via reqwest's wasm backend. Mirrors the
+/// security checks in `packages/core/turn-credentials.js`: only https or
+/// loopback http, graceful fallback to null.
+#[wasm_bindgen(js_name = "fetchTurnCredentials")]
+pub async fn fetch_turn_credentials(
+    homeserver_url: &str,
+    access_token: &str,
+) -> Result<String, JsValue> {
+    // Validate URL scheme — only https or loopback http allowed.
+    // Use reqwest::Url which is re-exported from the `url` crate.
+    let parsed = reqwest::Url::parse(homeserver_url)
+        .map_err(|e| to_js_err(format!("invalid homeserver URL: {e}")))?;
+
+    let loopback = ["localhost", "127.0.0.1", "::1", "[::1]"];
+    match parsed.scheme() {
+        "https" => {}
+        "http" if loopback.contains(&parsed.host_str().unwrap_or("")) => {}
+        _ => return Ok("null".to_string()),
+    }
+
+    let url = format!(
+        "{}/_matrix/client/v3/voip/turnServer",
+        homeserver_url.trim_end_matches('/')
+    );
+
+    let client = reqwest::Client::new();
+
+    let resp = match client
+        .get(&url)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(_) => return Ok("null".to_string()),
+    };
+
+    if !resp.status().is_success() {
+        return Ok("null".to_string());
+    }
+
+    match resp.text().await {
+        Ok(body) => {
+            // Validate it has uris
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&body) {
+                if val.get("uris").and_then(|u| u.as_array()).map(|a| a.is_empty()).unwrap_or(true) {
+                    return Ok("null".to_string());
+                }
+            }
+            Ok(body)
+        }
+        Err(_) => Ok("null".to_string()),
+    }
+}
+
+/// Convert a TURN credentials JSON response to RTCPeerConnection iceServers format.
+/// Returns JSON: `[{"urls":[...],"username":"...","credential":"..."}]`
+/// Mirrors `turnToIceServers()` in `packages/core/turn-credentials.js`.
+#[wasm_bindgen(js_name = "turnToIceServers")]
+pub fn turn_to_ice_servers(turn_response_json: &str) -> Result<String, JsValue> {
+    let val: serde_json::Value = serde_json::from_str(turn_response_json)
+        .map_err(|e| to_js_err(format!("parse TURN response: {e}")))?;
+    let uris = val.get("uris").and_then(|u| u.as_array());
+    if uris.map(|a| a.is_empty()).unwrap_or(true) {
+        return Ok("[]".to_string());
+    }
+    let result = serde_json::json!([{
+        "urls": val["uris"],
+        "username": val["username"],
+        "credential": val["password"],
+    }]);
+    serde_json::to_string(&result).map_err(|e| to_js_err(format!("serialize: {e}")))
+}

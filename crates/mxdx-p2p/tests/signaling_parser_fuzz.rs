@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! Fuzz-target compile-only stub for `signaling::parse::parse_event`.
 //!
 //! This test binary compiles but is `#[ignore]`d — its job is to ensure

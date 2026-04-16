@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! Structural E2EE invariant: constructing `SealedKey` outside
 //! `mxdx-p2p::crypto` MUST be a compile error. See ADR
 //! `2026-04-15-megolm-bytes-newtype.md`.

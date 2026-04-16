@@ -73,15 +73,41 @@ getrandom = { version = "0.2", features = ["js"] }
 # `--cfg getrandom_backend="wasm_js"`, but the 0.3 `wasm_js` feature must also
 # be enabled to expose the JS backend module.
 getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+# Phase 8 (T-80): WASM WebRtcChannel uses web-sys bindings for browser
+# RTCPeerConnection. wasm-bindgen + wasm-bindgen-futures for promise→future
+# bridging. js-sys for Array/Reflect/Uint8Array.
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "MessageEvent",
+    "RtcConfiguration",
+    "RtcDataChannel",
+    "RtcDataChannelEvent",
+    "RtcDataChannelInit",
+    "RtcDataChannelType",
+    "RtcIceCandidate",
+    "RtcIceCandidateInit",
+    "RtcIceConnectionState",
+    "RtcIceServer",
+    "RtcPeerConnection",
+    "RtcPeerConnectionIceEvent",
+    "RtcSdpType",
+    "RtcSessionDescriptionInit",
+] }
 
 [dev-dependencies]
 rand_chacha = "0.9"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 trybuild = "1"
 # Property-based testing for the glare resolver (T-42). Pure-Rust; wasm-
 # compatible by default, though the glare resolver proptests only run on
-# native targets anyway.
+# native targets anyway. Gated to native because proptest's transitive deps
+# (wait-timeout) don't compile for wasm32.
 proptest = "1"
-
-[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 mockito = "1"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

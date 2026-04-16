@@ -18,6 +18,12 @@ pub mod native;
 #[cfg(not(target_arch = "wasm32"))]
 pub use native::NativeWebRtcChannel;
 
+#[cfg(target_arch = "wasm32")]
+pub mod wasm;
+
+#[cfg(target_arch = "wasm32")]
+pub use wasm::WasmWebRtcChannel;
+
 /// Maximum size (bytes) of an inbound data-channel frame. Frames larger than
 /// this are dropped by the channel implementation with a
 /// [`ChannelEvent::Failure`]. Matches the `TerminalSocket` bomb cap and

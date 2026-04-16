@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! Loopback integration test for the native [`WebRtcChannel`] impl.
 //!
 //! Wires two [`NativeWebRtcChannel`] instances via an in-memory signaling

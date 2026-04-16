@@ -118,24 +118,16 @@ impl SealedKey {
     }
 
     /// Base64-encode the key for the `mxdx_session_key` field on
-    /// `m.call.invite`. Visibility is `pub(crate)` so the sibling
-    /// `signaling::events` module can call it from `build_invite`; external
-    /// callers cannot reach raw key bytes.
-    pub(crate) fn to_invite_b64(&self) -> String {
+    /// `m.call.invite`. Used by signaling internals (`build_invite`) and
+    /// by `mxdx-core-wasm` to return the key to JS callers.
+    pub fn to_base64(&self) -> String {
         BASE64_STANDARD.encode(self.as_bytes())
     }
 
-    /// Reconstruct a `SealedKey` from the base64 `mxdx_session_key` field of
-    /// a received `m.call.invite`. Returns a descriptive error on invalid
-    /// base64 or wrong key length. Visibility is `pub(crate)` — signaling
-    /// consumes incoming invites via this path and no external caller can
-    /// conjure a key from arbitrary bytes.
-    ///
-    /// Consumed by `signaling::events::tests::sealed_key_roundtrips_through_invite_base64`
-    /// and by Phase 5's answerer path (not yet wired). `#[allow(dead_code)]`
-    /// keeps the wasm target clean until Phase 5 lands.
-    #[allow(dead_code)]
-    pub(crate) fn from_invite_b64(b64: &str) -> Result<Self, CryptoError> {
+    /// Reconstruct a `SealedKey` from a base64-encoded key string (e.g.
+    /// the `mxdx_session_key` field on a received `m.call.invite`).
+    /// Returns a descriptive error on invalid base64 or wrong key length.
+    pub fn from_base64(b64: &str) -> Result<Self, CryptoError> {
         let raw =
             BASE64_STANDARD
                 .decode(b64.as_bytes())

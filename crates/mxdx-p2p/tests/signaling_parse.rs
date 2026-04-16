@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! Golden tests for the `signaling::parse` module, integration-test flavor.
 //!
 //! These exercise the public parse entry points end-to-end against a mix of

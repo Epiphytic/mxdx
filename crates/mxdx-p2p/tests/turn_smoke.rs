@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! Manual smoke test for `fetch_turn_credentials` against a live Matrix
 //! homeserver.
 //!

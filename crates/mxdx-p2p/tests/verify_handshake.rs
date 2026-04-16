@@ -1,3 +1,4 @@
+#![cfg(not(target_arch = "wasm32"))]
 //! T-53 integration tests: the Verifying handshake end-to-end, using the
 //! `HandshakeSigner` + `HandshakePeerKeySource` abstractions against a
 //! simulated peer. Proves the storm §3.1 transcript + Ed25519 signature

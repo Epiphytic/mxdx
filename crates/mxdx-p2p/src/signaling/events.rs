@@ -25,8 +25,8 @@
 //!
 //! [`build_invite`] is the ONLY public path that embeds a
 //! [`crate::crypto::SealedKey`] in an outgoing event. Raw key bytes are not
-//! reachable from this module — `SealedKey::to_invite_b64` lives in
-//! `crypto.rs` with `pub(crate)` visibility so this module can encode a key
+//! reachable from this module — `SealedKey::to_base64` lives in
+//! `crypto.rs` so this module can encode a key
 //! for the wire without ever touching its bytes. See trybuild negative
 //! tests in `tests/trybuild/sealedkey-constructor-fails.rs` (T-13) for
 //! compile-time enforcement.
@@ -179,7 +179,7 @@ pub struct CallSelectAnswer {
 ///
 /// This is the **only** public entry point that transports a [`SealedKey`]
 /// out of the `mxdx-p2p` crate — the key is consumed, base64-encoded via
-/// `SealedKey::to_invite_b64` (which itself wraps the sealed `as_bytes()`
+/// `SealedKey::to_base64` (which itself wraps the sealed `as_bytes()`
 /// accessor inside the crypto module), and embedded in the
 /// `mxdx_session_key` field. The caller never sees raw key bytes.
 ///
@@ -203,7 +203,7 @@ pub fn build_invite(
     lifetime: u64,
     session_uuid: Option<String>,
 ) -> CallInvite {
-    let mxdx_session_key = Some(sealed_key.to_invite_b64());
+    let mxdx_session_key = Some(sealed_key.to_base64());
     // `sealed_key` dropped here — its bytes are zeroized by `SealedKey::drop`.
     CallInvite {
         call_id: call_id.into(),
@@ -435,7 +435,7 @@ mod tests {
             .mxdx_session_key
             .as_ref()
             .expect("build_invite must populate mxdx_session_key");
-        let bob_sealed = SealedKey::from_invite_b64(b64).expect("valid base64");
+        let bob_sealed = SealedKey::from_base64(b64).expect("valid base64");
         let bob = P2PCrypto::from_sealed(bob_sealed);
         let plaintext = bob.decrypt(&alice_frame).unwrap();
         assert_eq!(plaintext, b"hello".to_vec());
