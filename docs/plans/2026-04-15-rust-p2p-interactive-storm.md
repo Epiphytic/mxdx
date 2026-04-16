@@ -392,7 +392,7 @@ P2PTransport::try_send(megolm)                          // takes Megolm<Bytes>, 
                        MatrixClient::send_megolm(room_id, megolm)  // identical payload
 ```
 
-The Megolm payload is identical regardless of transport — that's what makes fallback transparent.
+Both transports produce semantically equivalent Megolm-encrypted bytes against the same room session — fallback is transparent because the receiver's decrypt pipeline yields the same plaintext regardless of which path delivered it. (See ADR `2026-04-15-megolm-bytes-newtype.md` addendum: the ciphertexts are not byte-identical — matrix-sdk 0.16's encrypt_room_event_raw is pub(crate) — but the security invariant of "every byte on the wire is Megolm-encrypted by the same room session" holds on both paths.)
 
 ### 3.3 Steady-state inbound
 
@@ -513,7 +513,7 @@ match transport.try_send(megolm).await {
 | **No plaintext on signaling** | `MatrixClient::send_call_event` is `send_event` with call type — already Megolm-encrypted because rooms are E2EE. CI grep gate fails on any `send_raw\|skip_encryption\|unencrypted` match in `mxdx-p2p`. | `scripts/check-no-unencrypted-sends.sh` fails build on any match. |
 | **AES key never in plaintext** | `SealedKey` newtype constructible only in `crypto.rs`; `build_invite(sealed_key)` takes it; invite event field is `pub(crate)`. | Trybuild test: constructing `SealedKey` outside crate fails. |
 | **Peer verification bound to identity + call + SDP** | Verifying transcript includes `room_id + session_uuid + call_id + party_ids + sdp_fingerprint + nonces + domain_sep_tag`, signed by device Ed25519. State machine cannot reach `Open` without passing Verifying. | Integration test returns wrong signature; asserts channel never reaches `Open`, audit event emitted. |
-| **No plaintext fallback** | `FallbackToMatrix` sends the *same Megolm ciphertext* via `MatrixClient::send_megolm`. No path exists that posts original plaintext. | Mock `P2PCrypto::encrypt` to fail; assert caller still emits identical Megolm payload via Matrix. |
+| **No plaintext fallback** | `FallbackToMatrix` invokes `MatrixClient::send_megolm` which routes through `room.send_raw` → same Megolm room session encrypts in-flight. No code path posts original plaintext. Ciphertext is not byte-identical across transports (see ADR addendum) but both paths produce Megolm-encrypted bytes. | Mock `P2PCrypto::encrypt` to fail; assert caller still emits a Megolm-encrypted event against the same room session via the Matrix path (not necessarily byte-identical to what P2P would have produced). |
 | **Idle teardown releases TURN** | Idle watchdog → `hangup` → `WebRtcChannel::close` → `PeerConnection::drop` releases TURN. | Native test asserts `PeerConnection` is dropped after idle hangup. |
 | **Glare cannot deadlock** | `glare::resolve` is pure; property test asserts both peers always agree and resolution is total/deterministic. | Proptest over `(user_id, call_id)` pairs. |
 
