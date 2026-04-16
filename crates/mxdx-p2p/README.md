@@ -67,6 +67,34 @@ uses no STUN / TURN servers, and exchanges a single byte payload to confirm
 the data channel works end-to-end. No homeserver or external network
 access is required.
 
+### Cross-compiling to musl (Alpine) — informative
+
+The production deployment target is Alpine Linux (musl libc). Musl support
+for the full vendored libdatachannel dependency chain (libdatachannel
+itself, plus usrsctp / libjuice / libsrtp / OpenSSL glue) is **not
+guaranteed** and is verified by the CI job `musl-build`, which is marked
+`continue-on-error: true` — a failure there does not block merges today.
+
+Local verification (requires `musl-tools` from apt):
+
+```sh
+sudo apt-get install -y musl-tools cmake g++ pkg-config
+rustup target add x86_64-unknown-linux-musl
+CC_x86_64_unknown_linux_musl=musl-gcc \
+CXX_x86_64_unknown_linux_musl=musl-g++ \
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
+cargo build -p mxdx-p2p --target x86_64-unknown-linux-musl
+```
+
+If the build fails, the most likely culprits are:
+
+- libdatachannel's C++ codebase assumes glibc-only headers
+- usrsctp's CMake rules do not account for musl-specific network headers
+- OpenSSL linkage differences between glibc and musl
+
+Phase 6 (worker P2P wiring) will treat musl as a first-class target or
+file a scoped follow-up bead if the incompatibility is structural.
+
 ### Wasm is unaffected
 
 The `datachannel` dependency is gated under
