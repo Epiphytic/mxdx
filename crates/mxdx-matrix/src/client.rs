@@ -7,9 +7,13 @@ use matrix_sdk::{
     config::SyncSettings,
     room::MessagesOptions,
     ruma::{
-        api::client::room::create_room::v3::Request as CreateRoomRequest,
+        api::client::{
+            message::send_message_event,
+            room::create_room::v3::Request as CreateRoomRequest,
+        },
         events::{room::encryption::RoomEncryptionEventContent, EmptyStateKey, InitialStateEvent},
-        OwnedRoomId, OwnedUserId, RoomId, UserId,
+        serde::Raw,
+        OwnedRoomId, OwnedUserId, RoomId, TransactionId, UserId,
     },
     Client, SessionMeta,
 };
@@ -539,30 +543,28 @@ impl MatrixClient {
         Ok(response.event_id.to_string())
     }
 
-    /// Package content for transport through a send surface that requires a
-    /// `Megolm<Bytes>`. Returns a sealed [`Megolm<Bytes>`] wrapping the
-    /// serialized JSON payload.
+    /// Encrypt content via the room's Megolm session, returning a sealed
+    /// [`Megolm<Bytes>`] containing the already-encrypted ciphertext.
     ///
-    /// Per ADR `2026-04-15-megolm-bytes-newtype.md` (2026-04-16 addendum —
-    /// Option B: semantic equivalence), the `Megolm<T>` wrapper is a
-    /// type-system marker that bytes have crossed the encryption boundary.
-    /// The actual Megolm ciphertext lands on the wire via:
+    /// Per ADR `2026-04-15-megolm-bytes-newtype.md` (second addendum —
+    /// byte-identical ciphertext restored), the `Megolm<Bytes>` now wraps
+    /// the actual `m.room.encrypted` JSON produced by
+    /// `OlmMachine::encrypt_room_event_raw`. Both the P2P path and the
+    /// Matrix fallback path carry the same bytes:
     ///
-    /// - **Matrix fallback**: [`Self::send_megolm`] posts through
-    ///   `room.send_raw`, which Megolm-encrypts in-flight using the existing
-    ///   room outbound session.
+    /// - **Matrix fallback**: [`Self::send_megolm`] posts the already-
+    ///   encrypted content as `m.room.encrypted` without re-encrypting.
     /// - **P2P path**: `P2PTransport::try_send(Megolm<Bytes>)` wraps the
-    ///   payload in an AES-GCM frame whose session key was exchanged inside
-    ///   a Megolm-encrypted `m.call.invite`.
+    ///   ciphertext in an AES-GCM frame.
     ///
-    /// This function refuses to wrap content for an unencrypted room: the
-    /// cardinal rule requires every send surface to inherit E2EE, and the
-    /// type-system marker would be a lie if the downstream `send_raw` were
-    /// to post plaintext.
+    /// Uses `Client::olm_machine_for_testing()` per ADR
+    /// `docs/adr/2026-04-16-matrix-sdk-testing-feature.md` — the `testing`
+    /// cargo feature gates the only stable accessor for
+    /// `OlmMachine::encrypt_room_event_raw` in matrix-sdk 0.16.
     pub async fn encrypt_for_room(
         &self,
         room_id: &RoomId,
-        _event_type: &str,
+        event_type: &str,
         content: Value,
     ) -> Result<crate::Megolm<crate::Bytes>> {
         let room = self
@@ -577,20 +579,50 @@ impl MatrixClient {
             )));
         }
 
-        let bytes = serde_json::to_vec(&content)
-            .map_err(|e| MatrixClientError::Other(anyhow::anyhow!("serialize content: {e}")))?;
-        Ok(crate::crypto_envelope::Megolm(bytes))
+        // Ensure room members and keys are synced so the Megolm outbound
+        // session exists. sync_members() is public and idempotent.
+        room.sync_members()
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+
+        // ADR 2026-04-16-matrix-sdk-testing-feature.md: use olm_machine_for_testing()
+        // to access OlmMachine::encrypt_room_event_raw — the only stable accessor in
+        // matrix-sdk 0.16. The `testing` feature gates this, not the underlying primitive.
+        let olm_guard = self.client.olm_machine_for_testing().await;
+        let olm = olm_guard
+            .as_ref()
+            .ok_or_else(|| MatrixClientError::Other(anyhow::anyhow!(
+                "OlmMachine not initialized — E2EE not ready"
+            )))?;
+
+        let raw_content = Raw::from_json(
+            serde_json::value::to_raw_value(&content)
+                .map_err(|e| MatrixClientError::Other(anyhow::anyhow!("serialize content: {e}")))?
+        );
+
+        let encrypted = olm
+            .encrypt_room_event_raw(room_id, event_type, &raw_content)
+            .await
+            .map_err(|e| MatrixClientError::Other(anyhow::anyhow!("Megolm encrypt: {e}")))?;
+
+        let encrypted_bytes = serde_json::to_vec(&encrypted)
+            .map_err(|e| MatrixClientError::Other(anyhow::anyhow!("serialize encrypted: {e}")))?;
+
+        Ok(crate::crypto_envelope::Megolm(encrypted_bytes))
     }
 
-    /// Send a `Megolm<Bytes>` payload via the Matrix fallback path. Posts
-    /// through `room.send_raw`, which Megolm-encrypts in-flight using the
-    /// existing room outbound session.
+    /// Send a `Megolm<Bytes>` payload via the Matrix fallback path.
+    ///
+    /// The payload is already Megolm-encrypted (produced by
+    /// [`Self::encrypt_for_room`]). This method sends it as an
+    /// `m.room.encrypted` event without re-encrypting — both P2P and
+    /// Matrix paths carry byte-identical ciphertext.
     ///
     /// Returns the Matrix event ID of the sent event.
     pub async fn send_megolm(
         &self,
         room_id: &RoomId,
-        event_type: &str,
+        _event_type: &str,
         payload: crate::Megolm<crate::Bytes>,
     ) -> Result<String> {
         let room = self
@@ -605,11 +637,28 @@ impl MatrixClient {
             )));
         }
 
+        // The payload is already m.room.encrypted JSON from encrypt_for_room.
+        // Send directly without re-encrypting.
         let bytes = payload.into_ciphertext_bytes();
-        let content: Value = serde_json::from_slice(&bytes)
-            .map_err(|e| MatrixClientError::Other(anyhow::anyhow!("deserialize payload: {e}")))?;
+        let content: Raw<ruma::events::room::encrypted::RoomEncryptedEventContent> =
+            Raw::from_json(
+                serde_json::from_slice::<Box<serde_json::value::RawValue>>(&bytes)
+                    .map_err(|e| MatrixClientError::Other(anyhow::anyhow!("parse encrypted payload: {e}")))?,
+            );
 
-        let response = room.send_raw(event_type, content).await?;
+        let txn_id = TransactionId::new();
+        let request = send_message_event::v3::Request::new_raw(
+            room_id.to_owned(),
+            txn_id,
+            "m.room.encrypted".into(),
+            content.cast(),
+        );
+        let response = self
+            .client
+            .send(request)
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+
         Ok(response.event_id.to_string())
     }
 

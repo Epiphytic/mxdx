@@ -1,4 +1,4 @@
-//! Sealed newtype that marks bytes have crossed the Megolm encryption boundary.
+//! Sealed newtype that marks bytes as Megolm-encrypted ciphertext.
 //!
 //! `Megolm<T>` has a package-private constructor. The only way an external
 //! caller obtains a `Megolm<Bytes>` is by calling
@@ -6,41 +6,39 @@
 //!
 //! This enforces at compile time the project cardinal rule: plaintext cannot
 //! reach any send surface that accepts `Megolm<Bytes>`. See ADR
-//! `2026-04-15-megolm-bytes-newtype.md` (including the 2026-04-16 addendum on
-//! semantic equivalence vs byte-identity).
+//! `2026-04-15-megolm-bytes-newtype.md` (second addendum: byte-identical
+//! ciphertext restored via `OlmMachine::encrypt_room_event_raw`, per ADR
+//! `2026-04-16-matrix-sdk-testing-feature.md`).
 
 /// Byte alias matching the storm-spec public signature.
 pub type Bytes = Vec<u8>;
 
-/// Newtype marker: the wrapped value has crossed the Megolm encryption
-/// boundary. Constructor is package-private to `mxdx-matrix`; only
+/// Newtype marker: the wrapped value is Megolm-encrypted ciphertext.
+/// Constructor is package-private to `mxdx-matrix`; only
 /// [`MatrixClient::encrypt_for_room`](crate::MatrixClient::encrypt_for_room)
 /// may construct one for external callers.
 ///
-/// # Semantic equivalence, not byte-identity
+/// # Byte-identical ciphertext (second addendum)
 ///
-/// Per ADR `2026-04-15-megolm-bytes-newtype.md` (2026-04-16 addendum —
-/// **Option B**), the inner bytes are NOT already-Megolm-ciphertext on
-/// this side of the boundary. They are plaintext serialized event content
-/// that the receiving send surface will Megolm-encrypt on the wire:
+/// Per ADR `2026-04-15-megolm-bytes-newtype.md` (second addendum, restored
+/// by ADR `2026-04-16-matrix-sdk-testing-feature.md`), the inner bytes ARE
+/// the actual Megolm-encrypted `m.room.encrypted` JSON produced by
+/// `OlmMachine::encrypt_room_event_raw`. Both transport paths carry the
+/// same ciphertext:
 ///
-/// - [`MatrixClient::send_megolm`](crate::MatrixClient::send_megolm) posts
-///   through `room.send_raw`, which Megolm-encrypts in-flight using the
-///   existing room outbound session.
-/// - `P2PTransport::try_send` (phase 5) wraps the bytes in an AES-GCM frame
+/// - [`MatrixClient::send_megolm`](crate::MatrixClient::send_megolm) sends
+///   the already-encrypted content as `m.room.encrypted` without
+///   re-encrypting.
+/// - `P2PTransport::try_send` wraps the same bytes in an AES-GCM frame
 ///   whose session key was exchanged inside a Megolm-encrypted
 ///   `m.call.invite`.
 ///
-/// In both paths the bytes that *leave the process* are Megolm-protected
-/// against the same room session. The type-system marker enforces that
-/// bytes CAN ONLY reach those two send surfaces — there is no public
-/// constructor and no public accessor that returns raw bytes out of
-/// an external caller's control.
+/// The type-system marker enforces that these bytes CAN ONLY reach the
+/// two authorized send surfaces — there is no public constructor.
 ///
 /// **Callers: NEVER log, persist, or transmit `into_ciphertext_bytes()`
 /// output outside of the two authorized send surfaces.** The bytes are
-/// plaintext JSON; treating them as opaque ciphertext would leak event
-/// contents. The accessor exists only so the send surfaces inside
+/// ciphertext; the accessor exists only so the send surfaces inside
 /// `mxdx-matrix` and `mxdx-p2p` can forward them.
 pub struct Megolm<T>(pub(crate) T);
 

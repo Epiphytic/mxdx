@@ -93,3 +93,28 @@ All six load-bearing properties of the invariant are preserved:
 ### Storm spec cross-reference
 
 Storm spec §3.2 and §3.3 were updated in the same commit as this addendum to replace "identical Megolm ciphertext" / "same Megolm payload" language with "semantically equivalent Megolm-encrypted bytes against the same room session". No other sections of the storm spec or the other three ADRs required changes.
+
+## Second addendum (2026-04-16) — Byte-identical ciphertext restored via `testing` feature
+
+ADR `2026-04-16-matrix-sdk-testing-feature.md` authorized enabling matrix-sdk's `testing` cargo feature in production. This unblocks `OlmMachine::encrypt_room_event_raw` via `Client::olm_machine_for_testing()`, which was the original Phase 1 intent before the first addendum relaxed to semantic equivalence.
+
+### What changed
+
+`MatrixClient::encrypt_for_room` now calls `OlmMachine::encrypt_room_event_raw` directly, producing actual `m.room.encrypted` JSON in the `Megolm<Bytes>` wrapper. `MatrixClient::send_megolm` sends this already-encrypted content as `m.room.encrypted` without re-encrypting.
+
+Both transport paths now carry **byte-identical** Megolm ciphertext for a given plaintext + room + session-key state:
+
+- **P2P path:** `try_send(Megolm<Bytes>)` wraps the already-encrypted bytes in an AES-GCM frame.
+- **Matrix fallback:** `send_megolm` sends the same bytes as `m.room.encrypted`.
+
+### What stays the same
+
+All six invariants from the first addendum remain unchanged. The type-system enforcement is unchanged — `Megolm<Bytes>` still has no public constructor and trybuild tests still assert compilation failure.
+
+### Compile-time surface change
+
+`Cargo.toml` workspace dependency for `matrix-sdk` adds `"testing"` to its feature list. This pulls `wiremock`, `matrix-sdk-test`, and `assert_matches2` into the production dependency graph — accepted per ADR `2026-04-16-matrix-sdk-testing-feature.md` precondition 3.
+
+### Reversibility
+
+When matrix-sdk ships a non-`testing`-gated accessor for `olm_machine()`, revert `encrypt_for_room` to use the public API and remove `"testing"` from the feature list. The `Megolm<Bytes>` type and all external API signatures are unchanged.
