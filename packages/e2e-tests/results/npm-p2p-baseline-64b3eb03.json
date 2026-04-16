@@ -1,0 +1,65 @@
+{
+  "_comment": "npm baseline — do not delete. Captured before any Rust P2P wiring hits beta. Referenced by Phase 7 T-74 perf gate (±10% tolerance). See bead mxdx-awe.29.",
+  "git_sha": "64b3eb03851fc0ed8a8069b757172f8db8854509",
+  "captured_at": "2026-04-15T00:00:00Z",
+  "phase": 6,
+  "bead": "mxdx-awe.29",
+  "test_source": "packages/e2e-tests/tests/perf-terminal.test.js",
+  "runtime": {
+    "node_version": "v22.22.0",
+    "platform": "linux",
+    "tuwunel_version": "v1.5.0 (local)",
+    "matrix_sdk_wasm": "@mxdx/core via WasmMatrixClient"
+  },
+  "topology_local_tuwunel": {
+    "_comment": "Pure npm path against local tuwunel instance, loopback WebRTC data channel between two WasmMatrixClient instances.",
+    "p2p_single_char_rtt_ms": {
+      "min": 0.06, "avg": 0.15, "median": 0.10, "p95": 0.30, "p99": 0.77, "max": 2.59, "samples": 100
+    },
+    "p2p_burst_50_chars_ms": {
+      "total": 3.57, "throughput_chars_sec": 14012, "min": 1.78, "avg": 2.21, "median": 2.10, "p95": 2.73, "max": 3.11
+    },
+    "p2p_throughput_50x1024B": {
+      "total_ms": 5.98, "throughput_kbs": 8359.9, "throughput_mbs": 8.16
+    },
+    "matrix_only_single_event_rtt_ms": {
+      "min": 14.25, "avg": 21.47, "median": 16.04, "p95": 35.20, "max": 86.23, "samples": 20
+    },
+    "batched_sender_5ms_window_flush_ms": {
+      "min": 0.01, "avg": 0.05, "max": 0.29, "samples": 30
+    },
+    "batched_sender_200ms_window_coalesce": {
+      "total_ms": 506.48, "sends": 3, "from_pushes": 50, "coalesce_ratio": "16.7:1"
+    },
+    "aes_256_gcm_encrypt_decrypt_ms": {
+      "min": 0.027, "avg": 0.042, "p95": 0.071, "max": 0.267, "ops": 200
+    },
+    "p2p_vs_matrix_comparison_ms": {
+      "p2p_avg": 0.25, "p2p_p95": 0.42, "matrix_avg": 21.02, "matrix_p95": 29.69, "events_per_side": 20
+    }
+  },
+  "topology_single_hs_ca1_beta": {
+    "_comment": "npm path against live beta server ca1-beta.mxdx.dev. Real network RTT, not loopback.",
+    "homeserver": "ca1-beta.mxdx.dev",
+    "matrix_single_event_rtt_ms": {
+      "min": 260, "avg": 301, "median": 273, "p95": 544, "max": 544, "samples_successful": "10/10"
+    },
+    "matrix_sustained_throughput_events_sec": 1.70
+  },
+  "topology_federated_ca1_ca2": {
+    "status": "not-captured-in-phase-6",
+    "reason": "perf-terminal.test.js does not currently exercise a ca1↔ca2 federated topology. Single-HS P2P numbers above use loopback WebRTC against local tuwunel; the beta section uses ca1 only.",
+    "follow_up_bead": "to-be-filed-phase-7",
+    "follow_up_description": "Add federated (ca1↔ca2) perf topology to perf-terminal.test.js (or a sibling perf-terminal-federated.test.js). Must run on beta. Capture same 6 metrics + HS-to-HS RTT. Used by T-74 rust-p2p-beta-perf.test.js as the federated comparison baseline."
+  },
+  "six_metrics_status": {
+    "_comment": "The storm spec §5.5 defines 6 perf metrics. Mapping from this baseline:",
+    "1_keystroke_latency_p50": "topology_local_tuwunel.p2p_single_char_rtt_ms.median (0.10ms local, federated unknown)",
+    "2_keystroke_latency_p95": "topology_local_tuwunel.p2p_single_char_rtt_ms.p95 (0.30ms local, federated unknown)",
+    "3_throughput_sustained": "topology_local_tuwunel.p2p_throughput_50x1024B.throughput_mbs (8.16 MB/s local, federated unknown)",
+    "4_setup_time": "not-captured — test does not time setup phase separately",
+    "5_matrix_fallback_rtt_p50": "topology_single_hs_ca1_beta.matrix_single_event_rtt_ms.median (273ms on beta)",
+    "6_matrix_fallback_rtt_p95": "topology_single_hs_ca1_beta.matrix_single_event_rtt_ms.p95 (544ms on beta)"
+  },
+  "notes": "Captured via standard 'node --test packages/e2e-tests/tests/perf-terminal.test.js'. The test produces a single perf-terminal.html and prints metrics to stdout. The JSON above is a manual transcription of stdout + contextual annotations. Phase 7 T-74 compares Rust perf against these numbers with ±10% tolerance. A federated-topology addition and a setup-time metric are filed as Phase-7 follow-ups."
+}
