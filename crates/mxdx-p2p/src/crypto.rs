@@ -204,7 +204,7 @@ impl P2PCrypto {
     /// vector generation. Never expose publicly — reusing IVs with the same
     /// key breaks AES-GCM security.
     #[cfg(any(test, feature = "vector-gen"))]
-    pub(crate) fn encrypt_with_iv(
+    pub fn encrypt_with_iv(
         &self,
         iv: [u8; 12],
         plaintext: &[u8],
@@ -215,6 +215,18 @@ impl P2PCrypto {
             ciphertext: BASE64_STANDARD.encode(&ciphertext),
             iv: BASE64_STANDARD.encode(iv),
         })
+    }
+
+    /// Test-only helper: reconstruct a `P2PCrypto` from a caller-supplied
+    /// 32-byte key. Used exclusively to decrypt committed cross-language
+    /// vectors in `tests/crypto_vectors.rs`. Never expose publicly: this
+    /// would allow bypassing the `SealedKey` sealed-constructor invariant.
+    #[cfg(any(test, feature = "vector-gen"))]
+    pub fn from_raw_key_for_testing(key: [u8; 32]) -> Self {
+        let key_arr = *Key::<Aes256Gcm>::from_slice(&key);
+        P2PCrypto {
+            cipher: Aes256Gcm::new(&key_arr),
+        }
     }
 }
 
