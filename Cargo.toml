@@ -12,6 +12,7 @@ members = [
     "crates/mxdx-worker",
     "crates/mxdx-client",
     "crates/mxdx-coordinator",
+    "crates/mxdx-p2p",
     "xtask",
     "tests/helpers",
 ]
