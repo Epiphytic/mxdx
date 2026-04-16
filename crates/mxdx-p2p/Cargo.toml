@@ -66,6 +66,10 @@ getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] 
 [dev-dependencies]
 rand_chacha = "0.9"
 trybuild = "1"
+# Property-based testing for the glare resolver (T-42). Pure-Rust; wasm-
+# compatible by default, though the glare resolver proptests only run on
+# native targets anyway.
+proptest = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 mockito = "1"

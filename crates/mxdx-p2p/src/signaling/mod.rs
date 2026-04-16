@@ -6,4 +6,5 @@
 //! ([`glare`]).
 
 pub mod events;
+pub mod glare;
 pub mod parse;
