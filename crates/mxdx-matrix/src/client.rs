@@ -1429,7 +1429,113 @@ impl MatrixClient {
         Ok(verified)
     }
 
-    // ── P2P ephemeral handshake key (ADR 2026-04-16-ephemeral-key-cross-cert) ──
+    // ── P2P device-key signing (ADR 2026-04-16-matrix-sdk-testing-feature.md) ──
+
+    /// Sign a message string with the device's Ed25519 key via
+    /// `OlmMachine::sign`. Returns the raw 64-byte Ed25519 signature and
+    /// the 32-byte public key.
+    ///
+    /// Uses `Client::olm_machine_for_testing()` per ADR
+    /// `docs/adr/2026-04-16-matrix-sdk-testing-feature.md`.
+    pub async fn sign_with_device_key(
+        &self,
+        message: &str,
+    ) -> Result<([u8; 64], [u8; 32])> {
+        let olm_guard = self.client.olm_machine_for_testing().await;
+        let olm = olm_guard
+            .as_ref()
+            .ok_or_else(|| MatrixClientError::Other(anyhow::anyhow!(
+                "OlmMachine not initialized — E2EE not ready"
+            )))?;
+
+        let signatures = olm
+            .sign(message)
+            .await
+            .map_err(|e| MatrixClientError::Other(anyhow::anyhow!("device sign: {e}")))?;
+
+        // Extract our device's Ed25519 signature from the Signatures map.
+        let user_id = olm.user_id();
+        let device_id = olm.device_id();
+        let key_id = format!("ed25519:{}", device_id);
+        let key_id = <&matrix_sdk::ruma::DeviceKeyId>::try_from(key_id.as_str())
+            .map_err(|e| MatrixClientError::Other(anyhow::anyhow!("parse key_id: {e}")))?;
+
+        let sig = signatures
+            .get_signature(user_id, key_id)
+            .ok_or_else(|| MatrixClientError::Other(anyhow::anyhow!(
+                "device Ed25519 signature not found in OlmMachine::sign result"
+            )))?;
+        let sig_bytes: [u8; 64] = sig.to_bytes();
+
+        // Get the device's Ed25519 public key (32 bytes).
+        let pk_bytes: [u8; 32] = *olm.identity_keys().ed25519.as_bytes();
+
+        Ok((sig_bytes, pk_bytes))
+    }
+
+    /// Get a peer device's Ed25519 public key from the verified device cache.
+    /// Returns `None` if the device is unknown or not cross-signed.
+    ///
+    /// Replaces the ephemeral-key lookup from ADR
+    /// `2026-04-16-ephemeral-key-cross-cert.md` (now superseded).
+    pub async fn get_peer_device_ed25519(
+        &self,
+        peer_user_id: &UserId,
+        peer_device_id: &str,
+    ) -> Result<Option<[u8; 32]>> {
+        let devices = self
+            .client
+            .encryption()
+            .get_user_devices(peer_user_id)
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+
+        let device = match devices
+            .devices()
+            .find(|d| d.device_id().as_str() == peer_device_id)
+        {
+            Some(d) => d,
+            None => {
+                tracing::debug!(
+                    user_id = %peer_user_id,
+                    device_id = peer_device_id,
+                    "get_peer_device_ed25519: device unknown"
+                );
+                return Ok(None);
+            }
+        };
+
+        if !device.is_cross_signed_by_owner() {
+            tracing::warn!(
+                user_id = %peer_user_id,
+                device_id = peer_device_id,
+                "get_peer_device_ed25519: device not cross-signed — rejecting"
+            );
+            return Ok(None);
+        }
+
+        // Extract the Ed25519 key from the device's key set.
+        let ed25519 = device
+            .ed25519_key()
+            .map(|k| *k.as_bytes());
+
+        match ed25519 {
+            Some(bytes) => Ok(Some(bytes)),
+            None => {
+                tracing::debug!(
+                    user_id = %peer_user_id,
+                    device_id = peer_device_id,
+                    "get_peer_device_ed25519: no Ed25519 key on device"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    // ── P2P ephemeral handshake key (SUPERSEDED — ADR 2026-04-16-ephemeral-key-cross-cert) ──
+    // These methods are kept for backwards compatibility during the coordinated
+    // Rust+npm release. They will be removed once the npm side drops the
+    // m.mxdx.p2p.ephemeral_key state event.
 
     /// Publish the local device's per-session ephemeral Ed25519 public key
     /// in a Megolm-encrypted state event `m.mxdx.p2p.ephemeral_key`.

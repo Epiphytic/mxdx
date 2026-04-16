@@ -1,6 +1,6 @@
 # ADR 2026-04-16: Ephemeral Ed25519 handshake key scoped to Megolm-protected room state
 
-**Status:** Accepted
+**Status:** Superseded (by Phase 7 device-sign retrofit — see ADR `2026-04-16-matrix-sdk-testing-feature.md`)
 **Date:** 2026-04-16
 **Related:** `docs/plans/2026-04-15-rust-p2p-interactive-storm.md` §3.1, bead `mxdx-btk`, follow-up `mxdx-btk2`
 

@@ -107,6 +107,9 @@ pub enum VerifyError {
 
     #[error("malformed SDP — no DTLS fingerprint found")]
     MissingSdpFingerprint,
+
+    #[error("device signing failed: {0}")]
+    SigningFailed(String),
 }
 
 /// Verifying-handshake frame envelope. Serialized as JSON, then the JSON
