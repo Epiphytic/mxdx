@@ -121,15 +121,17 @@ impl Default for WorkerConfig {
     }
 }
 
-/// P2P transport config (storm §4.7). `enabled` defaults to **false** —
-/// flipping to true is Phase-9 T-91 after three consecutive green nightly
-/// perf runs. With `enabled = false`, worker/client behave exactly as
-/// before Phase 6 (no regression).
+/// P2P transport config (storm §4.7). `enabled` defaults to **true** —
+/// flipped from false in Phase-9 T-91 after three consecutive green
+/// nightly perf runs. With `enabled = false` (or `--no-p2p` CLI flag),
+/// worker/client behave exactly as before Phase 6 (no regression).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct P2pConfig {
-    /// Master feature flag. Default: false. When false, P2PTransport is
-    /// never constructed and all send paths use Matrix.
-    #[serde(default)]
+    /// Master feature flag. Default: true (Phase-9 T-91). When false,
+    /// P2PTransport is never constructed and all send paths use Matrix.
+    /// Override at runtime with `--no-p2p` (client) or `p2p.enabled = false`
+    /// in worker.toml / client.toml.
+    #[serde(default = "default_p2p_enabled")]
     pub enabled: bool,
     /// Optional idle timeout override (seconds). Default: 300 (5 minutes).
     #[serde(default = "default_p2p_idle_timeout_seconds")]
@@ -139,10 +141,14 @@ pub struct P2pConfig {
 impl Default for P2pConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_p2p_enabled(),
             idle_timeout_seconds: default_p2p_idle_timeout_seconds(),
         }
     }
+}
+
+fn default_p2p_enabled() -> bool {
+    true
 }
 
 fn default_p2p_idle_timeout_seconds() -> u64 {

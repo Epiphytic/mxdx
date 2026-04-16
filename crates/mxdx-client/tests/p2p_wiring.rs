@@ -12,7 +12,10 @@ use mxdx_types::config::P2pConfig;
 use std::time::Duration;
 
 fn disabled_config() -> P2pConfig {
-    P2pConfig::default() // enabled = false
+    P2pConfig {
+        enabled: false,
+        ..P2pConfig::default()
+    }
 }
 
 fn enabled_config() -> P2pConfig {

@@ -15,7 +15,10 @@ use mxdx_worker::batched_sender::{DEFAULT_BATCH_WINDOW, P2P_OPEN_BATCH_WINDOW};
 use mxdx_worker::p2p_integration::{batch_window_for_p2p_state, WorkerP2pSession};
 
 fn disabled_config() -> P2pConfig {
-    P2pConfig::default() // enabled = false
+    P2pConfig {
+        enabled: false,
+        ..P2pConfig::default()
+    }
 }
 
 fn enabled_config() -> P2pConfig {

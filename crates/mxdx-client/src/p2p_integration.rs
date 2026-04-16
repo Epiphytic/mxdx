@@ -146,7 +146,6 @@ pub fn build_p2p_session(
         Some(Arc::new(
             mxdx_p2p::transport::matrix_signer::MatrixHandshakeSigner::new(
                 matrix_client.clone(),
-                our_device_id.clone(),
             ),
         ))
     } else {

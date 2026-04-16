@@ -36,8 +36,8 @@ use mxdx_types::config::P2pConfig;
 /// the caller can use the same non-blocking send surface regardless of
 /// whether P2P is enabled.
 pub struct WorkerP2pSession {
-    /// `None` when `p2p.enabled == false` (Phase-9 default). `Some` when
-    /// the feature flag is on and a transport has been constructed.
+    /// `None` when `p2p.enabled == false`. `Some` when the feature flag is
+    /// on (the default since Phase-9 T-91) and a transport has been constructed.
     transport: Option<P2PTransport>,
 }
 
@@ -212,7 +212,6 @@ pub fn build_p2p_session(
         Some(Arc::new(
             mxdx_p2p::transport::matrix_signer::MatrixHandshakeSigner::new(
                 matrix_client.clone(),
-                our_device_id.clone(),
             ),
         ))
     } else {
