@@ -6,6 +6,7 @@ pub mod heartbeat;
 pub mod identity;
 pub mod matrix;
 pub mod output;
+pub mod p2p_integration;
 pub mod retention;
 pub mod session;
 pub mod session_mux;

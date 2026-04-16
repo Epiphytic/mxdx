@@ -3138,6 +3138,7 @@ dependencies = [
  "libc",
  "mxdx-client",
  "mxdx-matrix",
+ "mxdx-p2p",
  "mxdx-test-helpers",
  "mxdx-types",
  "reqwest",

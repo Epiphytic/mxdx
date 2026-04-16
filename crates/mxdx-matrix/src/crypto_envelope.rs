@@ -44,6 +44,21 @@ pub type Bytes = Vec<u8>;
 /// `mxdx-matrix` and `mxdx-p2p` can forward them.
 pub struct Megolm<T>(pub(crate) T);
 
+// NOTE: Clone is derived for Megolm<T: Clone> so the worker/client
+// integration layer can duplicate a sealed payload for the P2P + Matrix
+// dual-send pattern (storm §3.2: P2P attempt first, fall back to Matrix
+// on FallbackToMatrix/ChannelClosed). Duplicating a Megolm<T> does NOT
+// create a new external constructor — the only way to obtain one is still
+// `MatrixClient::encrypt_for_room`. Cloning an existing wrapper just
+// duplicates the already-boundary-crossed bytes, which remain confined to
+// authorized send surfaces by the public API surface (no plaintext
+// accessor exists for external callers).
+impl<T: Clone> Clone for Megolm<T> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
 impl<T> Megolm<T> {
     /// Consume the wrapper and return the Megolm-protected bytes.
     ///
