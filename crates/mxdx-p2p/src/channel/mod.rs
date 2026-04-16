@@ -73,7 +73,13 @@ pub struct IceCandidate {
 
 /// Event emitted by a channel backend. Backends push these via an mpsc;
 /// consumers drain with [`WebRtcChannel::events`].
-#[derive(Debug)]
+///
+/// `Clone` is required so Phase 5's state machine (which takes
+/// [`Event::ChannelEvent(ChannelEvent)`](crate::transport::Event) as an
+/// input to a pure transition function) can propagate the event alongside
+/// a clone of the current state. The underlying `Message` variant uses
+/// `bytes::Bytes` which is cheaply cloneable (refcount bump, no copy).
+#[derive(Debug, Clone)]
 pub enum ChannelEvent {
     /// A local ICE candidate was gathered and should be sent to the peer.
     LocalIce(IceCandidate),
