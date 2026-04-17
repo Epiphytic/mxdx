@@ -3,6 +3,16 @@
 export { saveIndexedDB, restoreIndexedDB } from './persistent-indexeddb.js';
 
 export * from './wasm/nodejs/mxdx_core_wasm.js';
+
+// Coerce WASM onRoomEvent 'null' string → JS null at the JS/WASM boundary.
+// The WASM layer serializes None as the string 'null'; callers expect JS null.
+import { WasmMatrixClient } from './wasm/nodejs/mxdx_core_wasm.js';
+const _origOnRoomEvent = WasmMatrixClient.prototype.onRoomEvent;
+WasmMatrixClient.prototype.onRoomEvent = async function (...args) {
+  const result = await _origOnRoomEvent.apply(this, args);
+  return result === 'null' ? null : result;
+};
+
 export { CredentialStore } from './credentials.js';
 export { connectWithSession } from './session.js';
 export { TerminalSocket } from './terminal-socket.js';
