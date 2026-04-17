@@ -180,7 +180,10 @@ describe('Terminal Performance: P2P vs Matrix', { skip: !tuwunelAvailable && 'tu
   });
 
   after(async () => {
-    // Stop Tuwunel first — killing the server connection prevents the WASM
+    // Free WASM clients before stopping the server to prevent stale crypto ops
+    if (launcherClient) launcherClient.free();
+    if (clientClient) clientClient.free();
+    // Stop Tuwunel — killing the server connection prevents the WASM
     // crypto layer from firing async operations that outlive the test.
     if (tuwunel) tuwunel.stop();
     // Let any in-flight WASM async work settle before node:test checks for leaks
