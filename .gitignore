@@ -22,3 +22,8 @@ packages/web-console/dist/
 
 # E2E test perf output (default path; override with TEST_PERF_OUTPUT)
 e2e-results.jsonl
+
+# Local test artifacts
+test-results/
+test-worker-log.txt
+.sqlhistory
