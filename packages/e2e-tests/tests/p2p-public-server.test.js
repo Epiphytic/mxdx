@@ -93,6 +93,34 @@ describe('P2P Transport: Public Server Signaling', { timeout: 180000 }, () => {
     await client2.syncOnce();
     await client1.syncOnce();
     console.log('[p2p-pub] Both clients in DM room');
+
+    // Poll-based key exchange wait: sync both sides until encryption is ready.
+    // On public servers, Megolm key exchange can take several sync cycles.
+    const keDeadline = Date.now() + 30000;
+    let keReady = false;
+    while (Date.now() < keDeadline && !keReady) {
+      await client1.syncOnce();
+      await client2.syncOnce();
+      try {
+        // Send a test event from client1 and verify client2 can decrypt it
+        await client1.sendEvent(dmRoomId, 'm.room.message', JSON.stringify({
+          msgtype: 'm.text', body: 'key-exchange-probe',
+        }));
+        await sleep(1000);
+        await client2.syncOnce();
+        const probeJson = await client2.onRoomEvent(dmRoomId, 'm.room.message', 5);
+        if (probeJson && probeJson !== 'null') {
+          keReady = true;
+          console.log('[p2p-pub] Key exchange verified — encryption ready');
+        }
+      } catch {
+        // Key exchange not yet complete, retry
+        await sleep(2000);
+      }
+    }
+    if (!keReady) {
+      console.log('[p2p-pub] WARNING: key exchange probe did not confirm — proceeding anyway');
+    }
   });
 
   after(() => {
