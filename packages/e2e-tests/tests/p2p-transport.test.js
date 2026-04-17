@@ -7,7 +7,7 @@ function mockClient() {
   return {
     sent,
     sendEvent: async (roomId, type, content) => { sent.push({ roomId, type, content }); },
-    onRoomEvent: async () => 'null',
+    onRoomEvent: async () => null,
     userId: () => '@test:example.com',
   };
 }
@@ -188,7 +188,7 @@ describe('P2PTransport', () => {
     const oversized = 'x'.repeat(65 * 1024);
     channel.simulateMessage(oversized);
     const result = await transport.onRoomEvent('!room:ex', 'org.mxdx.terminal.data', 0.1);
-    assert.equal(result, 'null', 'oversized frame should be dropped');
+    assert.equal(result, null, 'oversized frame should be dropped');
     transport.close();
   });
 
@@ -261,7 +261,7 @@ describe('P2PTransport', () => {
     }));
     await new Promise(r => setTimeout(r, 10));
     const result = await transport.onRoomEvent('!room:ex', 'org.mxdx.terminal.data', 0.1);
-    assert.equal(result, 'null', 'frame with wrong key should be dropped');
+    assert.equal(result, null, 'frame with wrong key should be dropped');
     transport.close();
   });
 });

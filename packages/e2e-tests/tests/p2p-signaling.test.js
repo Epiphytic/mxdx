@@ -9,7 +9,7 @@ describe('P2PSignaling', () => {
       sendEvent: async (roomId, type, content) => {
         sent.push({ roomId, type, content: JSON.parse(content) });
       },
-      onRoomEvent: async () => 'null',
+      onRoomEvent: async () => null,
     };
 
     const sig = new P2PSignaling(mockClient, '!dm:ex', '@me:ex');
@@ -28,7 +28,7 @@ describe('P2PSignaling', () => {
     const sent = [];
     const mockClient = {
       sendEvent: async (r, t, c) => { sent.push({ type: t, content: JSON.parse(c) }); },
-      onRoomEvent: async () => 'null',
+      onRoomEvent: async () => null,
     };
 
     const sig = new P2PSignaling(mockClient, '!dm:ex', '@me:ex');
@@ -43,7 +43,7 @@ describe('P2PSignaling', () => {
     const sent = [];
     const mockClient = {
       sendEvent: async (r, t, c) => { sent.push({ type: t, content: JSON.parse(c) }); },
-      onRoomEvent: async () => 'null',
+      onRoomEvent: async () => null,
     };
 
     const sig = new P2PSignaling(mockClient, '!dm:ex', '@me:ex');
@@ -60,7 +60,7 @@ describe('P2PSignaling', () => {
     const sent = [];
     const mockClient = {
       sendEvent: async (r, t, c) => { sent.push({ type: t, content: JSON.parse(c) }); },
-      onRoomEvent: async () => 'null',
+      onRoomEvent: async () => null,
     };
 
     const sig = new P2PSignaling(mockClient, '!dm:ex', '@me:ex');

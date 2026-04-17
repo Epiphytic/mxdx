@@ -44,7 +44,7 @@ function createMockPair() {
           return queue.shift();
         }
         // Wait with timeout
-        if (timeoutSecs <= 0) return 'null';
+        if (timeoutSecs <= 0) return null;
         return new Promise((resolve) => {
           const timer = setTimeout(() => {
             const w = myWaiters.get(type);
@@ -52,7 +52,7 @@ function createMockPair() {
               const idx = w.indexOf(resolve);
               if (idx !== -1) w.splice(idx, 1);
             }
-            resolve('null');
+            resolve(null);
           }, timeoutSecs * 1000);
 
           if (!myWaiters.has(type)) myWaiters.set(type, []);
@@ -115,7 +115,7 @@ describe('P2P E2E with loopback WebRTC', () => {
 
     // B receives invite
     const inviteJson = await clientB.onRoomEvent('!test:room', 'm.call.invite', 5);
-    assert.notEqual(inviteJson, 'null', 'B should receive invite');
+    assert.notEqual(inviteJson, null, 'B should receive invite');
     const inviteContent = JSON.parse(inviteJson);
     assert.equal(inviteContent.call_id, callId);
 
@@ -127,7 +127,7 @@ describe('P2P E2E with loopback WebRTC', () => {
 
     // A receives answer
     const answerJson = await clientA.onRoomEvent('!test:room', 'm.call.answer', 5);
-    assert.notEqual(answerJson, 'null', 'A should receive answer');
+    assert.notEqual(answerJson, null, 'A should receive answer');
     const answerContent = JSON.parse(answerJson);
 
     // A accepts answer
@@ -183,7 +183,7 @@ describe('P2P E2E with loopback WebRTC', () => {
     // B receives via P2P inbox (allow async decryption)
     await new Promise(r => setTimeout(r, 50));
     const received = await transportB.onRoomEvent('!test:room', 'org.mxdx.terminal.data', 2);
-    assert.notEqual(received, 'null', 'B should receive terminal data via P2P');
+    assert.notEqual(received, null, 'B should receive terminal data via P2P');
     const parsed = JSON.parse(received);
     assert.equal(parsed.content.seq, 0);
     assert.equal(parsed.content.data, 'aGVsbG8=');
@@ -307,7 +307,7 @@ describe('P2P E2E with loopback WebRTC', () => {
 
     // B should NOT deliver it
     const result = await transportB.onRoomEvent('!test:room', 'org.mxdx.terminal.data', 0.3);
-    assert.equal(result, 'null', 'Oversized frame should be dropped');
+    assert.equal(result, null, 'Oversized frame should be dropped');
 
     transportA.close();
     transportB.close();

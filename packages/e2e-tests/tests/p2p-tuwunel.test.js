@@ -233,7 +233,7 @@ describe('P2P Transport: Tuwunel E2E', { skip: !tuwunelAvailable && 'tuwunel bin
 
     await new Promise(r => setTimeout(r, 50));
     const received = await transportB.onRoomEvent(dmRoomId, 'org.mxdx.terminal.data', 3);
-    assert.ok(received && received !== 'null', 'Client should receive terminal data via P2P');
+    assert.ok(received != null, 'Client should receive terminal data via P2P');
     const parsed = JSON.parse(received);
     assert.equal(parsed.content.seq, 42);
     assert.equal(Buffer.from(parsed.content.data, 'base64').toString(), 'hello from pty');
