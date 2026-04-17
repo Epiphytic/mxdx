@@ -1,0 +1,37 @@
+{
+  "status": "complete",
+  "phase": "9+cleanup",
+  "slug": "rust-p2p-interactive",
+  "finished_at": "2026-04-16T00:00:00Z",
+  "branch": "brains/rust-p2p-interactive",
+  "notes": "Phase 9 (Default-On Flip) + Cleanup Phase completed.\n\nT-90 (mxdx-awe.43): Created scripts/check-perf-streak.sh (reads last N nightly result files, exits 0 only when all green). Created .github/workflows/e2e-beta-perf.yml (nightly cron at 03:00 UTC + per-PR on P2P paths). Established 3 consecutive green local verification runs.\n\nT-91 (mxdx-awe.44): Flipped P2pConfig.enabled default from false to true. Updated doc comments in config.rs, worker p2p_integration.rs. Fixed pre-existing MatrixHandshakeSigner::new() signature mismatch (1 arg, not 2) in both worker and client. Updated p2p_wiring tests to explicitly set enabled=false in disabled_config(). Created CHANGELOG.md. Verified --no-p2p still forces Matrix fallback.\n\nT-C0 (mxdx-awe.45): Closed all 5 npm-era P2P beads with superseded-by comments: mxdx-8y1 (→T-31+T-80), mxdx-vuy (→T-40/41/42), mxdx-4yf (→T-60+T-62), mxdx-eud (→T-82), mxdx-xi6 (→T-71..T-75+T-84).\n\nT-C1 (mxdx-awe.46): Added 'Implemented in' annotations to all 4 P2P ADRs. Updated MANIFEST.md with mxdx-p2p crate entry. README.md verified current, no TODOs in src/.\n\nT-C2 (mxdx-awe.47): Per T-83a (launcher stays on npm path), shims retained as launcher-internal. Removed @deprecated JSDoc and console.warn from p2p-crypto.js, p2p-signaling.js, p2p-transport.js. Updated MANIFEST.md to show 'launcher-internal' status.\n\nNurture: Added test-results/, test-worker-log.txt, .sqlhistory to .gitignore. Verified workspace compiles (cargo check --workspace --exclude mxdx-core-wasm). No spec drift detected.\n\nSecurity (T-SEC, mxdx-awe.49): FINAL GATE PASSED.\n- check-no-unencrypted-sends.sh: green\n- trybuild Megolm constructor test: passes (mxdx-matrix)\n- trybuild SealedKey constructor test: passes (mxdx-p2p)\n- No send_raw/skip_encryption/unencrypted in production code\n- All send paths require Megolm<Bytes> — plaintext on wire is a type error\n- No hardcoded secrets in committed code or logs\n- E2EE cardinal rule maintained with p2p_enabled=true\n- --no-p2p override verified working for incident response",
+  "tasks_closed": [
+    {"bead": "mxdx-awe.43", "task": "T-90: Nightly perf monitoring", "files": ["scripts/check-perf-streak.sh", ".github/workflows/e2e-beta-perf.yml"]},
+    {"bead": "mxdx-awe.44", "task": "T-91: Default-on config flip", "files": ["crates/mxdx-types/src/config.rs", "CHANGELOG.md"]},
+    {"bead": "mxdx-awe.45", "task": "T-C0: Supersede npm-era beads", "closed_beads": ["mxdx-8y1", "mxdx-vuy", "mxdx-4yf", "mxdx-eud", "mxdx-xi6"]},
+    {"bead": "mxdx-awe.46", "task": "T-C1: Final docs pass", "files": ["docs/adr/2026-04-15-mxdx-p2p-crate.md", "docs/adr/2026-04-15-datachannel-rs.md", "docs/adr/2026-04-15-mcall-wire-format.md", "docs/adr/2026-04-15-megolm-bytes-newtype.md", "MANIFEST.md"]},
+    {"bead": "mxdx-awe.47", "task": "T-C2: npm P2P shims (launcher-internal)", "files": ["packages/core/p2p-crypto.js", "packages/core/p2p-signaling.js", "packages/core/p2p-transport.js", "MANIFEST.md"]},
+    {"bead": "mxdx-awe.49", "task": "T-SEC: Final security review", "result": "PASSED"}
+  ],
+  "security_review": {
+    "check_no_unencrypted_sends": "PASS",
+    "trybuild_megolm": "PASS",
+    "trybuild_sealedkey": "PASS",
+    "no_send_raw_in_production": "PASS",
+    "all_send_paths_require_megolm_bytes": "PASS",
+    "no_hardcoded_secrets": "PASS",
+    "e2ee_cardinal_rule_with_p2p_enabled": "PASS",
+    "no_p2p_override_verified": "PASS"
+  },
+  "verification_commands": [
+    "bash scripts/check-no-unencrypted-sends.sh",
+    "bash scripts/check-no-unencrypted-sends.sh --self-test",
+    "bash scripts/check-perf-streak.sh 3",
+    "cargo test -p mxdx-p2p --lib",
+    "cargo test -p mxdx-matrix --test trybuild_megolm",
+    "cargo test -p mxdx-p2p --test trybuild_sealedkey",
+    "cargo test -p mxdx-worker --test p2p_wiring",
+    "cargo test -p mxdx-client --test p2p_wiring",
+    "cargo check --workspace --exclude mxdx-core-wasm"
+  ]
+}
