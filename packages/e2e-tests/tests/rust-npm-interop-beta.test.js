@@ -40,7 +40,7 @@ describe('Rust ↔ npm Interop Beta', {
     skip: SKIP_RUST_RUST && 'SKIP_RUST_RUST=1',
   }, async () => {
     const worker = spawnRustBinary('mxdx-worker', [
-      '--server', creds.server.url,
+      'start', '--homeserver', creds.server.url,
       '--username', creds.account1.username,
       '--password', creds.account1.password,
       '--p2p',
@@ -50,7 +50,7 @@ describe('Rust ↔ npm Interop Beta', {
       await worker.waitForOutput('worker ready', 30_000);
 
       const client = spawnRustBinary('mxdx-client', [
-        '--server', creds.server.url,
+        '--homeserver', creds.server.url,
         '--username', creds.account2.username,
         '--password', creds.account2.password,
         '--p2p',
@@ -74,7 +74,7 @@ describe('Rust ↔ npm Interop Beta', {
     skip: SKIP_RUST_RUST && 'SKIP_RUST_RUST=1',
   }, async () => {
     const worker = spawnRustBinary('mxdx-worker', [
-      '--server', creds.server2.url,
+      'start', '--homeserver', creds.server2.url,
       '--username', creds.account1.username,
       '--password', creds.account1.password,
       '--p2p',
@@ -84,7 +84,7 @@ describe('Rust ↔ npm Interop Beta', {
       await worker.waitForOutput('worker ready', 30_000);
 
       const client = spawnRustBinary('mxdx-client', [
-        '--server', creds.server.url,
+        '--homeserver', creds.server.url,
         '--username', creds.account2.username,
         '--password', creds.account2.password,
         '--p2p',
