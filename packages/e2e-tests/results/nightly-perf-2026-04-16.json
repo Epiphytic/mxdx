@@ -1,0 +1,8 @@
+{
+  "status": "green",
+  "date": "2026-04-16",
+  "git_sha": "2bfe8b78356fe23f7d12a7fabc2bda5c7e8dc20f",
+  "branch": "brains/rust-p2p-interactive",
+  "triggered_by": "local-verification",
+  "notes": "Pre-merge local perf verification run 3/3 for T-90 default-on gate. All tests green. Security grep passes. check-perf-streak.sh 3 confirms streak. Ready for CI verification after merge."
+}

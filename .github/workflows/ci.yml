@@ -6,6 +6,17 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      macos_build:
+        description: 'Include macOS builds'
+        required: false
+        default: false
+        type: boolean
+      full_e2e:
+        description: 'Run full E2E test suite (not just quick tests)'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -99,12 +110,127 @@ jobs:
         run: sudo apt-get install -y libsqlite3-dev libssl-dev
       - run: cargo test -p mxdx-secrets --lib
 
+  # P2P / interactive-session test jobs. These are vacuously green during
+  # Phase 0 scaffolding; later phases populate real test bodies behind these
+  # job names. Defined now so the CI shape is stable across the rollout.
+  rust-p2p-unit:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
+        # cmake + g++ are needed by datachannel-sys (vendored libdatachannel
+        # build). Both are preinstalled on ubuntu-latest images but listed
+        # explicitly for image-drift resilience.
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev cmake g++
+      - run: cargo test -p mxdx-p2p --lib
+
+  rust-p2p-loopback:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
+        # Loopback test exercises the native WebRtcChannel via vendored
+        # libdatachannel. The vendored build requires cmake and a C++17
+        # compiler; libssl-dev covers any non-vendored TLS paths.
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev cmake g++
+      - run: cargo test -p mxdx-p2p --tests
+
+  # T-34: Musl / Alpine cross-compile verification for mxdx-p2p. The
+  # production deployment target (see docs/plans and mxdx-hosting) is
+  # Alpine musl. datachannel-sys with the vendored feature builds
+  # libdatachannel and its transitive C/C++ deps (usrsctp, libjuice,
+  # libsrtp, OpenSSL glue) from source — musl compatibility for the
+  # full chain needs explicit verification rather than assumption.
+  #
+  # Non-blocking for Phase 3: if this job fails, the pipeline continues
+  # to collect other build signals. Phase 6 (worker p2p wiring) or a
+  # follow-up cleanup bead will address whatever breaks. For now the
+  # job's status is informative, not gating.
+  musl-build:
+    needs: preflight
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+      - name: Install musl toolchain + native build deps
+        run: |
+          sudo apt-get install -y musl-tools cmake g++ pkg-config
+      - name: Build mxdx-p2p for musl
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CXX_x86_64_unknown_linux_musl: musl-g++
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build -p mxdx-p2p --target x86_64-unknown-linux-musl
+
+  # T-33: Platform matrix build-only. Confirms mxdx-p2p (which pulls in
+  # vendored libdatachannel) compiles on the production targets we expect
+  # to ship. macOS is only included on manually triggered releases with
+  # macos_build enabled — macOS runners are paid, not free tier.
+  build-only-native:
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev cmake g++
+      - run: cargo build -p mxdx-p2p
+
+  build-only-macos:
+    needs: preflight
+    if: github.event_name == 'workflow_dispatch' && inputs.macos_build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
+        run: |
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          brew list cmake >/dev/null 2>&1 || brew install cmake
+      - run: cargo build -p mxdx-p2p
+
+  wasm-p2p-smoke:
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      # Phase 8 wires the wasm path. For now this confirms the crate
+      # cross-compiles to wasm32-unknown-unknown so any accidental
+      # native-only dep added in early phases is caught immediately.
+      - run: cargo check -p mxdx-p2p --target wasm32-unknown-unknown
+
+  security-grep:
+    needs: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify no unencrypted-send patterns in mxdx-p2p
+        run: bash scripts/check-no-unencrypted-sends.sh
+      - name: Self-test the grep gate
+        run: bash scripts/check-no-unencrypted-sends.sh --self-test
+
   # Integration and federation tests require tuwunel.
   # Gated to workflow_dispatch until beta.mxdx.dev infrastructure is available.
   integration:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.full_e2e
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.93.1
@@ -129,7 +255,7 @@ jobs:
   federation:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.full_e2e
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.93.1
@@ -232,13 +358,7 @@ jobs:
   npm-public-server:
     needs: preflight
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
-    env:
-      TEST_SERVER_URL: ${{ secrets.TEST_SERVER_URL }}
-      TEST_ACCOUNT1_USERNAME: ${{ secrets.TEST_ACCOUNT1_USERNAME }}
-      TEST_ACCOUNT1_PASSWORD: ${{ secrets.TEST_ACCOUNT1_PASSWORD }}
-      TEST_ACCOUNT2_USERNAME: ${{ secrets.TEST_ACCOUNT2_USERNAME }}
-      TEST_ACCOUNT2_PASSWORD: ${{ secrets.TEST_ACCOUNT2_PASSWORD }}
+    if: github.event_name == 'workflow_dispatch' && inputs.full_e2e
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.93.1
@@ -255,26 +375,17 @@ jobs:
       - name: Install npm dependencies
         run: npm install
       - name: Write test credentials
-        run: |
-          cat > test-credentials.toml <<TOML
-          [server]
-          url = "$TEST_SERVER_URL"
-
-          [account1]
-          username = "$TEST_ACCOUNT1_USERNAME"
-          password = "$TEST_ACCOUNT1_PASSWORD"
-
-          [account2]
-          username = "$TEST_ACCOUNT2_USERNAME"
-          password = "$TEST_ACCOUNT2_PASSWORD"
-          TOML
+        if: env.TEST_CREDENTIALS_TOML != ''
+        run: echo "$TEST_CREDENTIALS_TOML" > test-credentials.toml
+        env:
+          TEST_CREDENTIALS_TOML: ${{ secrets.TEST_CREDENTIALS_TOML }}
       - name: Run public server tests
         run: node --test packages/e2e-tests/tests/public-server.test.js
 
   e2e-release:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.full_e2e
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4

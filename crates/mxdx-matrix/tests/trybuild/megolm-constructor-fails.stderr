@@ -1,0 +1,11 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/trybuild/megolm-constructor-fails.rs:11:36
+   |
+11 |     let _leaked: Megolm<Vec<u8>> = Megolm(vec![0u8; 8]);
+   |                                    ^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/crypto_envelope.rs
+   |
+   | pub struct Megolm<T>(pub(crate) T);
+   |                      ^^^^^^^^^^^^ private field

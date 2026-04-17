@@ -6,6 +6,7 @@ pub mod heartbeat;
 pub mod identity;
 pub mod matrix;
 pub mod output;
+pub mod p2p_integration;
 pub mod retention;
 pub mod session;
 pub mod session_mux;
@@ -14,7 +15,6 @@ pub mod state_room;
 pub mod telemetry;
 pub mod tmux;
 pub mod trust;
-pub mod webrtc;
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -390,8 +390,8 @@ pub async fn run_worker(config: WorkerRuntimeConfig) -> Result<()> {
     // 7. Initialize retention sweeper
     let _retention = retention::RetentionSweeper::new(config.worker.history_retention);
 
-    // 8. Initialize WebRTC manager
-    let mut _webrtc_mgr = webrtc::WebRtcManager::new();
+    // 8. P2P transport (mxdx-p2p crate) is wired in Phase 6.
+    // Until then, interactive sessions fall back to Matrix-room E2EE only.
 
     // 9. Initialize session mux for interactive DM routing
     let mut session_mux = session_mux::SessionMux::new();

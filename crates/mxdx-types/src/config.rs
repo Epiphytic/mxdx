@@ -99,6 +99,9 @@ pub struct WorkerConfig {
     pub allowed_cwd: Vec<String>,
     #[serde(default)]
     pub authorized_users: Vec<String>,
+    /// P2P transport feature flag and tuning (Phase 6 wiring; default off per §4.7).
+    #[serde(default)]
+    pub p2p: P2pConfig,
 }
 
 impl Default for WorkerConfig {
@@ -113,8 +116,43 @@ impl Default for WorkerConfig {
             allowed_commands: Vec::new(),
             allowed_cwd: default_allowed_cwd(),
             authorized_users: Vec::new(),
+            p2p: P2pConfig::default(),
         }
     }
+}
+
+/// P2P transport config (storm §4.7). `enabled` defaults to **true** —
+/// flipped from false in Phase-9 T-91 after three consecutive green
+/// nightly perf runs. With `enabled = false` (or `--no-p2p` CLI flag),
+/// worker/client behave exactly as before Phase 6 (no regression).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct P2pConfig {
+    /// Master feature flag. Default: true (Phase-9 T-91). When false,
+    /// P2PTransport is never constructed and all send paths use Matrix.
+    /// Override at runtime with `--no-p2p` (client) or `p2p.enabled = false`
+    /// in worker.toml / client.toml.
+    #[serde(default = "default_p2p_enabled")]
+    pub enabled: bool,
+    /// Optional idle timeout override (seconds). Default: 300 (5 minutes).
+    #[serde(default = "default_p2p_idle_timeout_seconds")]
+    pub idle_timeout_seconds: u64,
+}
+
+impl Default for P2pConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_p2p_enabled(),
+            idle_timeout_seconds: default_p2p_idle_timeout_seconds(),
+        }
+    }
+}
+
+fn default_p2p_enabled() -> bool {
+    true
+}
+
+fn default_p2p_idle_timeout_seconds() -> u64 {
+    300
 }
 
 fn default_history_retention() -> u64 {
@@ -147,6 +185,9 @@ pub struct ClientConfig {
     pub session: SessionDefaults,
     #[serde(default)]
     pub daemon: DaemonConfig,
+    /// P2P transport feature flag and tuning (Phase 6 wiring; default off per §4.7).
+    #[serde(default)]
+    pub p2p: P2pConfig,
 }
 
 impl Default for ClientConfig {
@@ -156,6 +197,7 @@ impl Default for ClientConfig {
             coordinator_room: None,
             session: SessionDefaults::default(),
             daemon: DaemonConfig::default(),
+            p2p: P2pConfig::default(),
         }
     }
 }
@@ -267,9 +309,7 @@ fn default_ws_port() -> u16 {
 
 /// Get the config directory ($HOME/.mxdx/)
 pub fn config_dir() -> PathBuf {
-    dirs::home_dir()
-        .expect("no home directory")
-        .join(".mxdx")
+    dirs::home_dir().expect("no home directory").join(".mxdx")
 }
 
 /// Load config from $HOME/.mxdx/{filename}, returns default if file doesn't exist
@@ -375,7 +415,10 @@ credential = "pass"
         let cfg: DefaultsConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.accounts.len(), 2);
         assert_eq!(cfg.accounts[0].user_id, "@worker:example.com");
-        assert!(cfg.accounts[0].password.is_none(), "no password field means None");
+        assert!(
+            cfg.accounts[0].password.is_none(),
+            "no password field means None"
+        );
         assert_eq!(cfg.accounts[1].password, Some("backup-secret".into()));
         assert_eq!(cfg.trust.cross_signing_mode, CrossSigningMode::Manual);
         assert_eq!(cfg.webrtc.stun_servers, vec!["stun:custom.stun:3478"]);
@@ -517,8 +560,14 @@ password = "also-secret"
         let parsed: DefaultsConfig = toml::from_str(&result).unwrap();
 
         assert_eq!(parsed.accounts.len(), 2);
-        assert!(parsed.accounts[0].password.is_none(), "password should be stripped");
-        assert!(parsed.accounts[1].password.is_none(), "password should be stripped");
+        assert!(
+            parsed.accounts[0].password.is_none(),
+            "password should be stripped"
+        );
+        assert!(
+            parsed.accounts[1].password.is_none(),
+            "password should be stripped"
+        );
         assert_eq!(parsed.accounts[0].user_id, "@alice:example.com");
         assert_eq!(parsed.accounts[1].user_id, "@bob:example.com");
         assert_eq!(parsed.accounts[0].homeserver, "https://example.com");
@@ -603,7 +652,11 @@ password = "secret"
 
         let metadata = std::fs::metadata(&path).unwrap();
         let mode = metadata.permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "file should have 0o600 permissions, got {:o}", mode);
+        assert_eq!(
+            mode, 0o600,
+            "file should have 0o600 permissions, got {:o}",
+            mode
+        );
     }
 
     #[test]

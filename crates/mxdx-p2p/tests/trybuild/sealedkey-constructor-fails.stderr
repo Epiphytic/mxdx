@@ -1,0 +1,19 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+  --> tests/trybuild/sealedkey-constructor-fails.rs:16:19
+   |
+16 |     let _leaked = SealedKey(raw);
+   |                   ^^^^^^^^^
+   |
+note: constructor is not visible here due to private fields
+  --> src/crypto.rs
+   |
+   | pub struct SealedKey(pub(in crate::crypto) Key<Aes256Gcm>);
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private field
+help: you might have meant to use an associated function to build this type
+   |
+16 -     let _leaked = SealedKey(raw);
+16 +     let _leaked = SealedKey::random();
+   |
+16 -     let _leaked = SealedKey(raw);
+16 +     let _leaked = SealedKey::from_bytes(_);
+   |

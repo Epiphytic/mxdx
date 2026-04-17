@@ -12,6 +12,7 @@ members = [
     "crates/mxdx-worker",
     "crates/mxdx-client",
     "crates/mxdx-coordinator",
+    "crates/mxdx-p2p",
     "xtask",
     "tests/helpers",
 ]
@@ -34,7 +35,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 anyhow = "1"
 uuid = { version = "1", features = ["v4"] }
-matrix-sdk = { version = "0.16", default-features = false, features = ["e2e-encryption", "sqlite", "rustls-tls", "experimental-encrypted-state-events"] }
+# "testing" feature enables Client::olm_machine_for_testing() which gates
+# OlmMachine::sign() and OlmMachine::encrypt_room_event_raw() — both needed
+# for security-critical P2P handshake signing and byte-identical Megolm
+# fallback. See ADR docs/adr/2026-04-16-matrix-sdk-testing-feature.md.
+matrix-sdk = { version = "0.16", default-features = false, features = ["e2e-encryption", "sqlite", "rustls-tls", "experimental-encrypted-state-events", "testing"] }
 ruma = { version = "0.14", features = ["client-api-c", "events", "appservice-api-c"] }
 toml = "0.8"
 axum = "0.7"

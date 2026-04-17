@@ -1,3 +1,12 @@
+/**
+ * P2P signaling via standard Matrix VoIP call events (m.call.*).
+ *
+ * **Launcher-internal.** New consumers should use WASM P2PTransport from
+ * `@mxdx/core`. This JS implementation is retained for `packages/launcher`
+ * which runs on the Node.js npm path (see T-83a decision in Phase 8 marker).
+ * The Rust equivalent lives in `crates/mxdx-p2p/src/signaling/`.
+ */
+
 /** Cross-platform random hex string (works in browser + Node 19+). */
 function randomHex(byteCount) {
   const buf = new Uint8Array(byteCount);
@@ -40,9 +49,17 @@ export class P2PSignaling {
 
   /**
    * Send m.call.invite with SDP offer.
-   * @param {{ callId: string, partyId: string, sdp: string, lifetime?: number }} opts
+   *
+   * The `mxdx_session_key` extension field (base64 AES-256 key) is protected
+   * by room E2EE (Megolm + MSC4362). See ADR
+   * docs/adr/2026-04-15-mcall-wire-format.md (and its 2026-04-16 addendum)
+   * plus docs/adr/2026-04-16-coordinated-rust-npm-releases.md — this wire
+   * shape is locked in step with crates/mxdx-p2p/src/signaling/events.rs
+   * (Rust emitter). Default lifetime is 30000 ms on both sides.
+   *
+   * @param {{ callId: string, partyId: string, sdp: string, lifetime?: number, sessionKey?: string|null }} opts
    */
-  async sendInvite({ callId, partyId, sdp, lifetime = 60000, sessionKey = null }) {
+  async sendInvite({ callId, partyId, sdp, lifetime = 30000, sessionKey = null }) {
     const content = {
       call_id: callId,
       party_id: partyId,
@@ -50,7 +67,7 @@ export class P2PSignaling {
       lifetime,
       offer: { type: 'offer', sdp },
     };
-    if (sessionKey) content.session_key = sessionKey;
+    if (sessionKey) content.mxdx_session_key = sessionKey;
     await this.#send('m.call.invite', content);
   }
 

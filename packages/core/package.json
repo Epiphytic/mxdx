@@ -21,6 +21,7 @@
     "webrtc-channel-node.js",
     "p2p-signaling.js",
     "p2p-transport.js",
+    "p2p-verify.js",
     "p2p-crypto.js",
     "persistent-indexeddb.js",
     "multi-hs-client.js"

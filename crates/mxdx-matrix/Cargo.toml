@@ -23,6 +23,7 @@ reqwest = { workspace = true }
 dirs = "6"
 hostname = "0.4"
 urlencoding = "2"
+base64 = { workspace = true }
 
 [dev-dependencies]
 mxdx-test-helpers = { path = "../../tests/helpers" }
@@ -30,3 +31,4 @@ uuid = { workspace = true }
 toml = { workspace = true }
 mockito = "1"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+trybuild = "1"

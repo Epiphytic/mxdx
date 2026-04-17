@@ -1,0 +1,36 @@
+{
+  "status": "complete",
+  "phase": 8,
+  "slug": "rust-p2p-interactive",
+  "finished_at": "2026-04-16T00:00:00Z",
+  "branch": "brains/rust-p2p-interactive",
+  "notes": "Phase 8: WASM + web-console. Ported the P2P surface to WASM and updated the web-console to use WASM exports.\n\nT-80 (WasmWebRtcChannel): Added crates/mxdx-p2p/src/channel/wasm.rs implementing WebRtcChannel trait using web-sys::RtcPeerConnection. Translates JS callbacks to Rust futures via wasm-bindgen closures. Handles ICE candidate buffering, data channel lifecycle, and frame size limits. No libdatachannel symbols in WASM output.\n\nT-81 (mxdx-core-wasm P2P re-export): Added P2PCrypto, P2PCryptoWithKey, generateSessionKey, createP2PCrypto, fetchTurnCredentials, turnToIceServers to mxdx-core-wasm public API. SealedKey methods renamed from pub(crate) to_invite_b64/from_invite_b64 to pub to_base64/from_base64 to support cross-crate access. Both nodejs and web WASM targets build successfully.\n\nT-82 (web-console swap): Updated packages/web-console/src/terminal-view.js to import P2PCrypto, generateSessionKey, createP2PCrypto, fetchTurnCredentials, turnToIceServers from WASM module (../../core/wasm/web/mxdx_core_wasm.js). P2PSignaling and P2PTransport remain as JS imports — the WASM P2PTransport is a stub pending full driver implementation.\n\nT-83 (npm shim deprecation): Added @deprecated JSDoc and console.warn to p2p-crypto.js, p2p-signaling.js, p2p-transport.js. Updated MANIFEST.md with mxdx-p2p public symbols and deprecated shim table.\n\nT-83a (launcher audit): Launcher imports from @mxdx/core (not individual shim files). Stays on npm path: Node.js runtime, WASM P2PTransport is a stub, P2PSignaling is JS-only. No migration needed.\n\nT-84 (wasm-pack tests + Playwright): 12 WASM tests pass (7 channel + 5 crypto) via wasm-pack test --headless --firefox. All native-only integration test files cfg-gated with #![cfg(not(target_arch = \"wasm32\"))]. Moved proptest and trybuild to native-only dev-dependencies to fix wasm32 compilation. Created Playwright federated smoke test (web-console-rust-p2p-beta.test.js).\n\nSECURITY INVARIANTS VERIFIED:\n- WASM channel never logs or inspects payload bytes\n- SealedKey debug impl shows <redacted>\n- EncryptedFrame debug impl redacts ciphertext\n- P2PCrypto uses proper key zeroization on drop\n- fetchTurnCredentials validates URL scheme (https or loopback http)\n- scripts/check-no-unencrypted-sends.sh green\n- No new send_raw / skip_encryption patterns\n- No XSS surface in WASM JSON returns\n\nPRE-EXISTING ISSUE (not Phase 8 regression): web-console npm build fails because p2p-verify.js imports node:crypto which Vite Rollup can't bundle for browser. Dev server works fine.",
+  "tasks_closed": [
+    {"bead": "mxdx-awe.37", "task": "T-80: WASM WebRtcChannel implementation", "file": "crates/mxdx-p2p/src/channel/wasm.rs"},
+    {"bead": "mxdx-awe.38", "task": "T-81: mxdx-core-wasm P2P re-export", "file": "crates/mxdx-core-wasm/src/lib.rs"},
+    {"bead": "mxdx-awe.39", "task": "T-82: web-console swap to WASM exports", "file": "packages/web-console/src/terminal-view.js"},
+    {"bead": "mxdx-awe.40", "task": "T-83: Deprecate npm P2P shims", "files": ["packages/core/p2p-crypto.js", "packages/core/p2p-signaling.js", "packages/core/p2p-transport.js"]},
+    {"bead": "mxdx-awe.41", "task": "T-83a: Launcher audit (stays on npm path)", "decision": "no migration needed"},
+    {"bead": "mxdx-awe.42", "task": "T-84: wasm-pack tests + Playwright smoke", "files": ["crates/mxdx-p2p/tests/wasm_channel.rs", "crates/mxdx-p2p/tests/wasm_crypto.rs", "packages/e2e-tests/tests/web-console-rust-p2p-beta.test.js"]}
+  ],
+  "follow_ups": [
+    {
+      "title": "Fix web-console production build: p2p-verify.js node:crypto import breaks Vite Rollup",
+      "priority": "P2",
+      "labels": ["brains:cleanup"]
+    },
+    {
+      "title": "Implement WASM P2PTransport driver to replace JS P2PTransport in web-console",
+      "priority": "P2",
+      "labels": ["brains:topic:rust-p2p-interactive"]
+    }
+  ],
+  "verification_commands": [
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && cargo check -p mxdx-p2p --target wasm32-unknown-unknown",
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && cargo test -p mxdx-p2p",
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && wasm-pack test --headless --firefox crates/mxdx-p2p",
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/web-console/wasm",
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm",
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && bash scripts/check-no-unencrypted-sends.sh"
+  ]
+}

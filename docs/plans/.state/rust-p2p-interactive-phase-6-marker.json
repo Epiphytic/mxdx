@@ -1,0 +1,68 @@
+{
+  "status": "complete",
+  "phase": 6,
+  "slug": "rust-p2p-interactive",
+  "finished_at": "2026-04-16T00:00:00Z",
+  "branch": "brains/rust-p2p-interactive",
+  "notes": "Phase 6: Worker + Client Wiring. 8 tasks executed and closed (mxdx-awe.26-30, mxdx-btk, mxdx-fqt, mxdx-clr). p2p_enabled defaults to false per §4.7; the new code is a strict no-op when disabled. All previously-passing tests continue to pass (zero Phase-6 regressions).\n\nT-63 (mxdx-awe.29, commit 500a701): npm perf baseline captured at packages/e2e-tests/results/npm-p2p-baseline-64b3eb03.json against local tuwunel + ca1-beta Matrix RTT. Federated topology gap filed as mxdx-awe.51 (Phase-7 follow-up).\n\nmxdx-btk (commit b894c61): Matrix-backed HandshakeSigner + PeerKeySource via hybrid option (b') per ADR 2026-04-16-ephemeral-key-cross-cert.md. matrix-sdk 0.16 does not expose a device sign API; Phase-7 mxdx-awe.52 retrofits with matrix-sdk testing feature.\n\nT-60 (mxdx-awe.26, commit 9f03c98): P2PTransport wired into mxdx-worker via crates/mxdx-worker/src/p2p_integration.rs. WorkerP2pSession + build_p2p_session bundle + try_send_via_p2p_or_matrix helper. Megolm<T: Clone> derived for dual-path send. 6 integration tests.\n\nT-61 (mxdx-awe.27, commit 56a3259): BatchedSender::set_batch_window(Duration) + batch_window_for_p2p_state helper. Open → 10ms, non-Open → 200ms. Dynamic window via Arc<Mutex<Duration>>. 3 new tests.\n\nT-62 (mxdx-awe.28, commit 3ea7e1e): P2PTransport wired into mxdx-client daemon (symmetric to worker) with --no-p2p CLI flag for incident diagnostics. 10 integration tests.\n\nmxdx-fqt (commit 358e59e): npm Ed25519-signed Verifying handshake primitives in packages/core/p2p-verify.js. Byte-identical transcript to Rust (cross-runtime vector fixture verify-vectors.json, 6 npm + 2 Rust vector tests). Ed25519 via Node webcrypto. 11 npm unit tests. Integration into p2p-transport.js handshake flow filed as mxdx-awe.53 (Phase-7 follow-up with protocol-version negotiation).\n\nmxdx-clr (commit cfdffbf): restart_ice TURN-refresh wiring at ConfigureIceServers command handler. On RestartIceUnsupported (native datachannel-sys 0.23): tears down channel, transitions to Idle, emits Fallback telemetry. try_send during gap returns FallbackToMatrix. 3 new tests via RestartIceUnsupportedChannel mock.\n\nT-64 (mxdx-awe.30): Full regression pass. Workspace test with --no-fail-fast shows ZERO new failures compared to pre-Phase-6 baseline (64b3eb0). Pre-existing failures (keychain_chain, tombstone_room, client_ls_state_events, client_reconnect, concurrent_sessions, etc.) unchanged.\n\nSECURITY INVARIANTS VERIFIED:\n- All outbound paths route through Megolm<Bytes> — structurally impossible to send plaintext via the P2P integration.\n- scripts/check-no-unencrypted-sends.sh green.\n- publish_p2p_ephemeral_key refuses unencrypted rooms (cardinal rule).\n- get_p2p_ephemeral_key requires Device::is_cross_signed_by_owner (ADR 2026-04-16-ephemeral-key-cross-cert).\n- No new send_raw / skip_encryption patterns in any Phase 6 diff.\n\nFOLLOW-UPS FILED:\n- mxdx-awe.51 (P2): federated perf baseline ca1↔ca2 + setup-time metric\n- mxdx-awe.52 (P1): revisit device cross-signing via matrix-sdk testing feature (Phase 7 retrofit)\n- mxdx-awe.53 (P1): integrate p2p-verify.js into p2p-transport.js live handshake flow + protocol-version negotiation",
+  "tasks_closed": [
+    {"bead": "mxdx-awe.29", "task": "T-63", "commit": "500a701"},
+    {"bead": "mxdx-btk", "task": "mxdx-btk", "commit": "b894c61"},
+    {"bead": "mxdx-awe.26", "task": "T-60", "commit": "9f03c98"},
+    {"bead": "mxdx-awe.27", "task": "T-61", "commit": "56a3259"},
+    {"bead": "mxdx-awe.28", "task": "T-62", "commit": "3ea7e1e"},
+    {"bead": "mxdx-fqt", "task": "mxdx-fqt", "commit": "358e59e"},
+    {"bead": "mxdx-clr", "task": "mxdx-clr", "commit": "cfdffbf"},
+    {"bead": "mxdx-awe.30", "task": "T-64", "commit": null}
+  ],
+  "follow_ups": [
+    {
+      "bead": "mxdx-awe.51",
+      "title": "npm perf baseline: add federated (ca1↔ca2) topology + setup_time metric",
+      "priority": "P2",
+      "labels": ["brains:phase-7", "brains:topic:rust-p2p-interactive"]
+    },
+    {
+      "bead": "mxdx-awe.52",
+      "title": "Revisit true device cross-signing via matrix-sdk testing feature",
+      "priority": "P1",
+      "labels": ["brains:topic:rust-p2p-interactive", "security"]
+    },
+    {
+      "bead": "mxdx-awe.53",
+      "title": "Integrate p2p-verify.js into p2p-transport.js handshake flow + protocol-version negotiation",
+      "priority": "P1",
+      "labels": ["brains:topic:rust-p2p-interactive", "coordinated-release", "security"]
+    }
+  ],
+  "verification_commands": [
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && cargo test -p mxdx-p2p",
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && cargo test -p mxdx-worker --lib",
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && cargo test -p mxdx-worker --test p2p_wiring",
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && cargo test -p mxdx-client --lib",
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && cargo test -p mxdx-client --test p2p_wiring",
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && bash scripts/check-no-unencrypted-sends.sh",
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && node --test packages/e2e-tests/tests/rust-npm-verify-transcript-vectors.test.js",
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && node --test packages/e2e-tests/tests/npm-verify-roundtrip.test.js"
+  ],
+  "verification_results": {
+    "cargo_test_mxdx_p2p": "259 passed, 4 ignored (13 suites) — was 249 pre-Phase-6",
+    "cargo_test_mxdx_worker_lib": "169 passed (matches Phase 0 baseline) — includes 11 batched_sender",
+    "cargo_test_mxdx_worker_p2p_wiring": "9 passed (6 T-60 + 3 T-61 window flip rule)",
+    "cargo_test_mxdx_client_lib": "110 passed (no regression)",
+    "cargo_test_mxdx_client_p2p_wiring": "10 passed (flag-off/on/--no-p2p/window-flip)",
+    "security_grep_gate": "green — no forbidden patterns in crates/mxdx-p2p",
+    "npm_verify_transcript_vectors": "6/6 pass — Rust↔npm byte-identical transcripts",
+    "npm_verify_roundtrip": "11/11 pass — sign/verify/frames/end-to-end handshake"
+  },
+  "key_decisions": [
+    "matrix-sdk 0.16 option (a) unreachable for HandshakeSigner — OlmMachine is test-gated, Encryption has no sign() API. Hybrid option (b') used: ephemeral Ed25519 keypair per session, pk published as Megolm-encrypted state event m.mxdx.p2p.ephemeral_key. ADR 2026-04-16-ephemeral-key-cross-cert.md documents the security trade-off. Phase-7 retrofits with matrix-sdk testing feature per mxdx-awe.52.",
+    "Megolm<T: Clone> derived to support the dual-send pattern (P2P attempt + Matrix fallback need the same sealed bytes). No new external constructor; pub(crate) constraint preserved. Clone duplicates already-boundary-crossed bytes confined to authorized send surfaces.",
+    "BatchedSender dynamic window via Arc<Mutex<Duration>> shared between the public set_batch_window method and the spawned batch_loop. Re-read per iteration so the flip takes effect on the next coalescing cycle.",
+    "--no-p2p CLI flag on mxdx-client (global, default false) overrides config.p2p.enabled for incident response diagnostics. Effective P2P mode = cfg.enabled AND NOT no_p2p_cli.",
+    "restart_ice tear-down at ConfigureIceServers uses inline teardown_for_turn_refresh to avoid async-fn recursion (apply_command → dispatch → apply_command cycle). Net effect identical to dispatch(Event::Hangup) but breaks the re-entry cycle.",
+    "npm p2p-verify.js uses Node webcrypto.subtle Ed25519 (no new npm dep). Transcript layout byte-identical to Rust. Cross-runtime vector fixture locks parity across releases.",
+    "Integration into p2p-transport.js's live handshake flow deferred to mxdx-awe.53 (Phase-7 follow-up) because it requires protocol-version negotiation for backward compatibility with peers still speaking the nonce ping-pong."
+  ],
+  "ready_for_phase_7": true
+}

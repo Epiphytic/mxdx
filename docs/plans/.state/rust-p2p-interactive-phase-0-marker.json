@@ -1,0 +1,7 @@
+{
+  "status": "complete",
+  "phase": 0,
+  "slug": "rust-p2p-interactive",
+  "finished_at": "2026-04-16T05:11:15Z",
+  "notes": "All 4 phase-0 tasks (mxdx-awe.1 through mxdx-awe.4) executed and closed. Created crates/mxdx-p2p workspace skeleton with stub modules (crypto, turn, signaling/, channel/, transport/) matching ADR 2026-04-15-mxdx-p2p-crate.md. Deleted divergent npm-era WebRTC schema (crates/mxdx-types/src/events/webrtc.rs, 174 lines) and the always-bails worker stub (crates/mxdx-worker/src/webrtc.rs, 212 lines), clearing the path for the new mxdx-p2p crate to own real implementations in later phases. Added 4 new CI jobs (rust-p2p-unit, rust-p2p-loopback, wasm-p2p-smoke, security-grep) plus scripts/check-no-unencrypted-sends.sh which enforces the project's E2EE cardinal rule via grep gate with a built-in self-test. Workspace compiles cleanly: cargo check --workspace --exclude mxdx-core-wasm passes; cargo check -p mxdx-p2p --target wasm32-unknown-unknown passes; cargo test -p mxdx-worker --lib passes (169 tests); MANIFEST.md regenerated and verified via cargo xtask manifest --check. Phase 1 (P2PCrypto + Megolm<T> newtype, mxdx-awe.5+) is unblocked and ready for the next teammate. No P0 security findings; cardinal-rule grep gate is now active for all future phases. Caveat: pre-existing test failure in crates/mxdx-types/src/keychain_chain.rs (test_chained_keychain_set_only_writes_primary_on_success) reproduces on main and is unrelated to phase 0 changes."
+}

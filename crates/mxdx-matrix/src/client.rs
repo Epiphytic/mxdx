@@ -7,9 +7,13 @@ use matrix_sdk::{
     config::SyncSettings,
     room::MessagesOptions,
     ruma::{
-        api::client::room::create_room::v3::Request as CreateRoomRequest,
+        api::client::{
+            message::send_message_event,
+            room::create_room::v3::Request as CreateRoomRequest,
+        },
         events::{room::encryption::RoomEncryptionEventContent, EmptyStateKey, InitialStateEvent},
-        OwnedRoomId, OwnedUserId, RoomId, UserId,
+        serde::Raw,
+        OwnedRoomId, OwnedUserId, RoomId, TransactionId, UserId,
     },
     Client, SessionMeta,
 };
@@ -480,6 +484,184 @@ impl MatrixClient {
         Ok(response.event_id.to_string())
     }
 
+    /// Send a Matrix VoIP `m.call.*` signaling event via the existing
+    /// encrypted room send path. Thin wrapper over `room.send_raw`
+    /// (matrix-sdk 0.16 encrypts in-flight using the existing outbound
+    /// Megolm session) — deliberately introduces no new encryption code.
+    ///
+    /// # Cardinal rule
+    ///
+    /// This function refuses to send into an unencrypted room. Every Matrix
+    /// event mxdx emits must be Megolm-encrypted on the wire (see
+    /// `CLAUDE.md`): signaling events that carry the `mxdx_session_key`
+    /// extension field (see `mxdx-p2p::signaling::events`) are protected
+    /// by room E2EE because session rooms are always MSC4362-encrypted.
+    /// A non-E2EE room would leak the session key in plaintext, so we
+    /// hard-fail the send instead.
+    ///
+    /// # Parameters
+    /// - `room_id` — the session room (exec room in mxdx topology).
+    /// - `event_type` — must start with `m.call.`. Unknown call event
+    ///   types (outside the five recognized in `mxdx-p2p`) are accepted
+    ///   on the send side for forward compatibility with future Matrix
+    ///   VoIP spec additions; the receive-side parser's Unknown variant
+    ///   handles the inverse case.
+    /// - `content` — the already-built event content (typically
+    ///   `serde_json::to_value(&build_invite(...))` from mxdx-p2p).
+    ///
+    /// Returns the Matrix event ID of the sent event.
+    pub async fn send_call_event(
+        &self,
+        room_id: &RoomId,
+        event_type: &str,
+        content: Value,
+    ) -> Result<String> {
+        if !event_type.starts_with("m.call.") {
+            return Err(MatrixClientError::Other(anyhow::anyhow!(
+                "send_call_event refused: event type `{}` is not an m.call.* type",
+                event_type
+            )));
+        }
+
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| MatrixClientError::RoomNotFound(room_id.to_string()))?;
+
+        if !room.encryption_state().is_encrypted() {
+            return Err(MatrixClientError::Other(anyhow::anyhow!(
+                "send_call_event refused: room {} is not E2EE — cardinal rule requires encrypted rooms",
+                room_id
+            )));
+        }
+
+        // Route through the same room.send_raw path as send_event and
+        // send_megolm — matrix-sdk Megolm-encrypts the content in-flight
+        // using the room's existing outbound session. No new encryption
+        // code, no separate keystore.
+        let response = room.send_raw(event_type, content).await?;
+        Ok(response.event_id.to_string())
+    }
+
+    /// Encrypt content via the room's Megolm session, returning a sealed
+    /// [`Megolm<Bytes>`] containing the already-encrypted ciphertext.
+    ///
+    /// Per ADR `2026-04-15-megolm-bytes-newtype.md` (second addendum —
+    /// byte-identical ciphertext restored), the `Megolm<Bytes>` now wraps
+    /// the actual `m.room.encrypted` JSON produced by
+    /// `OlmMachine::encrypt_room_event_raw`. Both the P2P path and the
+    /// Matrix fallback path carry the same bytes:
+    ///
+    /// - **Matrix fallback**: [`Self::send_megolm`] posts the already-
+    ///   encrypted content as `m.room.encrypted` without re-encrypting.
+    /// - **P2P path**: `P2PTransport::try_send(Megolm<Bytes>)` wraps the
+    ///   ciphertext in an AES-GCM frame.
+    ///
+    /// Uses `Client::olm_machine_for_testing()` per ADR
+    /// `docs/adr/2026-04-16-matrix-sdk-testing-feature.md` — the `testing`
+    /// cargo feature gates the only stable accessor for
+    /// `OlmMachine::encrypt_room_event_raw` in matrix-sdk 0.16.
+    pub async fn encrypt_for_room(
+        &self,
+        room_id: &RoomId,
+        event_type: &str,
+        content: Value,
+    ) -> Result<crate::Megolm<crate::Bytes>> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| MatrixClientError::RoomNotFound(room_id.to_string()))?;
+
+        if !room.encryption_state().is_encrypted() {
+            return Err(MatrixClientError::Other(anyhow::anyhow!(
+                "encrypt_for_room refused: room {} is not E2EE — cardinal rule requires encrypted rooms",
+                room_id
+            )));
+        }
+
+        // Ensure room members and keys are synced so the Megolm outbound
+        // session exists. sync_members() is public and idempotent.
+        room.sync_members()
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+
+        // ADR 2026-04-16-matrix-sdk-testing-feature.md: use olm_machine_for_testing()
+        // to access OlmMachine::encrypt_room_event_raw — the only stable accessor in
+        // matrix-sdk 0.16. The `testing` feature gates this, not the underlying primitive.
+        let olm_guard = self.client.olm_machine_for_testing().await;
+        let olm = olm_guard
+            .as_ref()
+            .ok_or_else(|| MatrixClientError::Other(anyhow::anyhow!(
+                "OlmMachine not initialized — E2EE not ready"
+            )))?;
+
+        let raw_content = Raw::from_json(
+            serde_json::value::to_raw_value(&content)
+                .map_err(|e| MatrixClientError::Other(anyhow::anyhow!("serialize content: {e}")))?
+        );
+
+        let encrypted = olm
+            .encrypt_room_event_raw(room_id, event_type, &raw_content)
+            .await
+            .map_err(|e| MatrixClientError::Other(anyhow::anyhow!("Megolm encrypt: {e}")))?;
+
+        let encrypted_bytes = serde_json::to_vec(&encrypted)
+            .map_err(|e| MatrixClientError::Other(anyhow::anyhow!("serialize encrypted: {e}")))?;
+
+        Ok(crate::crypto_envelope::Megolm(encrypted_bytes))
+    }
+
+    /// Send a `Megolm<Bytes>` payload via the Matrix fallback path.
+    ///
+    /// The payload is already Megolm-encrypted (produced by
+    /// [`Self::encrypt_for_room`]). This method sends it as an
+    /// `m.room.encrypted` event without re-encrypting — both P2P and
+    /// Matrix paths carry byte-identical ciphertext.
+    ///
+    /// Returns the Matrix event ID of the sent event.
+    pub async fn send_megolm(
+        &self,
+        room_id: &RoomId,
+        _event_type: &str,
+        payload: crate::Megolm<crate::Bytes>,
+    ) -> Result<String> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| MatrixClientError::RoomNotFound(room_id.to_string()))?;
+
+        if !room.encryption_state().is_encrypted() {
+            return Err(MatrixClientError::Other(anyhow::anyhow!(
+                "send_megolm refused: room {} is not E2EE — cardinal rule requires encrypted rooms",
+                room_id
+            )));
+        }
+
+        // The payload is already m.room.encrypted JSON from encrypt_for_room.
+        // Send directly without re-encrypting.
+        let bytes = payload.into_ciphertext_bytes();
+        let content: Raw<ruma::events::room::encrypted::RoomEncryptedEventContent> =
+            Raw::from_json(
+                serde_json::from_slice::<Box<serde_json::value::RawValue>>(&bytes)
+                    .map_err(|e| MatrixClientError::Other(anyhow::anyhow!("parse encrypted payload: {e}")))?,
+            );
+
+        let txn_id = TransactionId::new();
+        let request = send_message_event::v3::Request::new_raw(
+            room_id.to_owned(),
+            txn_id,
+            "m.room.encrypted".into(),
+            content.cast(),
+        );
+        let response = self
+            .client
+            .send(request)
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+
+        Ok(response.event_id.to_string())
+    }
+
     /// Send a custom event as a thread reply to an existing event.
     /// Adds `m.relates_to` with `rel_type: "m.thread"` to the content.
     /// Returns the Matrix event ID of the sent event.
@@ -835,20 +1017,13 @@ impl MatrixClient {
                 let json_str = timeline_event.raw().json().get();
                 if let Ok(json) = serde_json::from_str::<Value>(json_str) {
                     let event_type = json.get("type").and_then(|t| t.as_str());
-                    match event_type {
-                        Some("m.room.encrypted") => {
-                            // Only flag as undecryptable for non-state events
-                            // (messages, session events). MSC4362 encrypted state
-                            // events have a state_key and are handled by the SDK's
-                            // state processor — seeing them here doesn't mean we're
-                            // missing keys for timeline events.
-                            let is_state = json.get("state_key").is_some();
-                            if !is_state {
-                                saw_encrypted = true;
-                            }
+                    let is_state = json.get("state_key").is_some();
+                    match classify_sync_event(event_type, is_state) {
+                        SyncFilterDecision::Encrypted => {
+                            saw_encrypted = true;
                         }
-                        Some("m.room.encryption") | Some("m.room.member") | Some("m.room.power_levels") => {}
-                        _ => {
+                        SyncFilterDecision::InfraIgnored => {}
+                        SyncFilterDecision::Deliver => {
                             if let Some(eid) = json.get("event_id").and_then(|e| e.as_str()) {
                                 seen_ids.insert(eid.to_string());
                             }
@@ -893,13 +1068,13 @@ impl MatrixClient {
                         let json_str = event.raw().json().get();
                         if let Ok(json) = serde_json::from_str::<Value>(json_str) {
                             let event_type = json.get("type").and_then(|t| t.as_str());
-                            match event_type {
-                                Some("m.room.encrypted") => {
+                            let is_state = json.get("state_key").is_some();
+                            match classify_sync_event(event_type, is_state) {
+                                SyncFilterDecision::Encrypted => {
                                     still_encrypted += 1;
                                 }
-                                Some("m.room.encryption")
-                                | Some("m.room.member") | Some("m.room.power_levels") => {}
-                                _ => {
+                                SyncFilterDecision::InfraIgnored => {}
+                                SyncFilterDecision::Deliver => {
                                     if let Some(t) = event_type {
                                         decrypted_types.push(t.to_string());
                                     }
@@ -1253,6 +1428,281 @@ impl MatrixClient {
         }
         Ok(verified)
     }
+
+    // ── P2P device-key signing (ADR 2026-04-16-matrix-sdk-testing-feature.md) ──
+
+    /// Sign a message string with the device's Ed25519 key via
+    /// `OlmMachine::sign`. Returns the raw 64-byte Ed25519 signature and
+    /// the 32-byte public key.
+    ///
+    /// Uses `Client::olm_machine_for_testing()` per ADR
+    /// `docs/adr/2026-04-16-matrix-sdk-testing-feature.md`.
+    pub async fn sign_with_device_key(
+        &self,
+        message: &str,
+    ) -> Result<([u8; 64], [u8; 32])> {
+        let olm_guard = self.client.olm_machine_for_testing().await;
+        let olm = olm_guard
+            .as_ref()
+            .ok_or_else(|| MatrixClientError::Other(anyhow::anyhow!(
+                "OlmMachine not initialized — E2EE not ready"
+            )))?;
+
+        let signatures = olm
+            .sign(message)
+            .await
+            .map_err(|e| MatrixClientError::Other(anyhow::anyhow!("device sign: {e}")))?;
+
+        // Extract our device's Ed25519 signature from the Signatures map.
+        let user_id = olm.user_id();
+        let device_id = olm.device_id();
+        let key_id = format!("ed25519:{}", device_id);
+        let key_id = <&matrix_sdk::ruma::DeviceKeyId>::try_from(key_id.as_str())
+            .map_err(|e| MatrixClientError::Other(anyhow::anyhow!("parse key_id: {e}")))?;
+
+        let sig = signatures
+            .get_signature(user_id, key_id)
+            .ok_or_else(|| MatrixClientError::Other(anyhow::anyhow!(
+                "device Ed25519 signature not found in OlmMachine::sign result"
+            )))?;
+        let sig_bytes: [u8; 64] = sig.to_bytes();
+
+        // Get the device's Ed25519 public key (32 bytes).
+        let pk_bytes: [u8; 32] = *olm.identity_keys().ed25519.as_bytes();
+
+        Ok((sig_bytes, pk_bytes))
+    }
+
+    /// Get a peer device's Ed25519 public key from the verified device cache.
+    /// Returns `None` if the device is unknown or not cross-signed.
+    ///
+    /// Replaces the ephemeral-key lookup from ADR
+    /// `2026-04-16-ephemeral-key-cross-cert.md` (now superseded).
+    pub async fn get_peer_device_ed25519(
+        &self,
+        peer_user_id: &UserId,
+        peer_device_id: &str,
+    ) -> Result<Option<[u8; 32]>> {
+        let devices = self
+            .client
+            .encryption()
+            .get_user_devices(peer_user_id)
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+
+        let device = match devices
+            .devices()
+            .find(|d| d.device_id().as_str() == peer_device_id)
+        {
+            Some(d) => d,
+            None => {
+                tracing::debug!(
+                    user_id = %peer_user_id,
+                    device_id = peer_device_id,
+                    "get_peer_device_ed25519: device unknown"
+                );
+                return Ok(None);
+            }
+        };
+
+        if !device.is_cross_signed_by_owner() {
+            tracing::warn!(
+                user_id = %peer_user_id,
+                device_id = peer_device_id,
+                "get_peer_device_ed25519: device not cross-signed — rejecting"
+            );
+            return Ok(None);
+        }
+
+        // Extract the Ed25519 key from the device's key set.
+        let ed25519 = device
+            .ed25519_key()
+            .map(|k| *k.as_bytes());
+
+        match ed25519 {
+            Some(bytes) => Ok(Some(bytes)),
+            None => {
+                tracing::debug!(
+                    user_id = %peer_user_id,
+                    device_id = peer_device_id,
+                    "get_peer_device_ed25519: no Ed25519 key on device"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    // ── P2P ephemeral handshake key (SUPERSEDED — ADR 2026-04-16-ephemeral-key-cross-cert) ──
+    // These methods are kept for backwards compatibility during the coordinated
+    // Rust+npm release. They will be removed once the npm side drops the
+    // m.mxdx.p2p.ephemeral_key state event.
+
+    /// Publish the local device's per-session ephemeral Ed25519 public key
+    /// in a Megolm-encrypted state event `m.mxdx.p2p.ephemeral_key`.
+    ///
+    /// The state_key is the publisher's device_id (not user_id) so multiple
+    /// devices on the same account can each carry their own ephemeral key.
+    /// Content is `{ ephemeral_ed25519_b64, published_at }`.
+    ///
+    /// Cardinal rule: the room MUST be E2EE (MSC4362 is enabled project-wide).
+    /// `send_state_event_raw` writes through `room.send_state_event_raw` which
+    /// picks up the room's encryption config and Megolm-encrypts the state
+    /// event in flight.
+    pub async fn publish_p2p_ephemeral_key(
+        &self,
+        room_id: &RoomId,
+        device_id: &str,
+        ephemeral_public_key: [u8; 32],
+    ) -> Result<()> {
+        let room = self
+            .client
+            .get_room(room_id)
+            .ok_or_else(|| MatrixClientError::RoomNotFound(room_id.to_string()))?;
+
+        if !room.encryption_state().is_encrypted() {
+            return Err(MatrixClientError::Other(anyhow::anyhow!(
+                "publish_p2p_ephemeral_key refused: room {} is not E2EE — cardinal rule requires encrypted rooms (MSC4362 for state events)",
+                room_id
+            )));
+        }
+
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD_NO_PAD
+            .encode(ephemeral_public_key);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let content = serde_json::json!({
+            "ephemeral_ed25519_b64": b64,
+            "published_at": now_ms,
+        });
+        self.send_state_event(room_id, "m.mxdx.p2p.ephemeral_key", device_id, content)
+            .await
+    }
+
+    /// Look up a peer device's per-session ephemeral Ed25519 public key via
+    /// the session room's cached state events.
+    ///
+    /// Returns `None` if:
+    /// - no matching state event exists
+    /// - the publishing device is not cross-signed by its owner (rejected
+    ///   per ADR 2026-04-16-ephemeral-key-cross-cert.md)
+    /// - the payload is malformed
+    ///
+    /// The cross-signing check gates acceptance: a rogue device injected
+    /// into the user's account without cross-signing is rejected even if it
+    /// publishes a valid-looking ephemeral key.
+    pub async fn get_p2p_ephemeral_key(
+        &self,
+        room_id: &RoomId,
+        peer_user_id: &UserId,
+        peer_device_id: &str,
+    ) -> Result<Option<[u8; 32]>> {
+        // Gate on cross-signing first.
+        let devices = self
+            .client
+            .encryption()
+            .get_user_devices(peer_user_id)
+            .await
+            .map_err(|e| MatrixClientError::Other(e.into()))?;
+
+        let device = match devices
+            .devices()
+            .find(|d| d.device_id().as_str() == peer_device_id)
+        {
+            Some(d) => d,
+            None => {
+                tracing::debug!(
+                    user_id = %peer_user_id,
+                    device_id = peer_device_id,
+                    "get_p2p_ephemeral_key: peer device unknown — rejecting"
+                );
+                return Ok(None);
+            }
+        };
+
+        if !device.is_cross_signed_by_owner() {
+            tracing::warn!(
+                user_id = %peer_user_id,
+                device_id = peer_device_id,
+                "get_p2p_ephemeral_key: peer device not cross-signed — rejecting"
+            );
+            return Ok(None);
+        }
+
+        let events = self
+            .get_state_events_cached(room_id, "m.mxdx.p2p.ephemeral_key")
+            .await?;
+
+        for (state_key, content) in events {
+            if state_key != peer_device_id {
+                continue;
+            }
+            let b64 = match content.get("ephemeral_ed25519_b64").and_then(|v| v.as_str()) {
+                Some(s) => s,
+                None => continue,
+            };
+            use base64::Engine;
+            let bytes = match base64::engine::general_purpose::STANDARD_NO_PAD.decode(b64) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            if bytes.len() != 32 {
+                continue;
+            }
+            let mut out = [0u8; 32];
+            out.copy_from_slice(&bytes);
+            return Ok(Some(out));
+        }
+        Ok(None)
+    }
+}
+
+/// Classification of a Matrix event type for mxdx's sync receive path.
+///
+/// `sync_and_collect_events` passes events of every type through to consumers
+/// except a small infra denylist. This enum documents the classification
+/// and makes it unit-testable — it's used internally by the sync path match
+/// arm at `sync_and_collect_events`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SyncFilterDecision {
+    /// The event is undecryptable room encryption metadata — drives the
+    /// saw_encrypted fallback path (for non-state events).
+    Encrypted,
+    /// Infra event that's not a consumer payload (membership, encryption
+    /// config, power levels). Silently ignored by the sync collector.
+    InfraIgnored,
+    /// Consumer payload — includes all mxdx session events (`mxdx.session.*`),
+    /// all Matrix VoIP call events (`m.call.*`), telemetry events, and any
+    /// other application-level event types.
+    Deliver,
+}
+
+/// Classify a Matrix event type for the sync receive path. Pure function,
+/// testable without a live Matrix client.
+///
+/// Recognized Matrix VoIP event types (`m.call.*`) are classified as
+/// [`SyncFilterDecision::Deliver`] so the Phase 5 state machine receives
+/// them through `sync_and_collect_events`. The function is intentionally
+/// permissive: unknown types default to `Deliver` rather than being
+/// dropped, so future event schemas don't require coordinated code changes.
+pub fn classify_sync_event(event_type: Option<&str>, is_state: bool) -> SyncFilterDecision {
+    match event_type {
+        Some("m.room.encrypted") => {
+            // MSC4362 state events are handled by the SDK's state processor;
+            // timeline-level encrypted events drive the re-sync fallback.
+            if is_state {
+                SyncFilterDecision::InfraIgnored
+            } else {
+                SyncFilterDecision::Encrypted
+            }
+        }
+        Some("m.room.encryption") | Some("m.room.member") | Some("m.room.power_levels") => {
+            SyncFilterDecision::InfraIgnored
+        }
+        _ => SyncFilterDecision::Deliver,
+    }
 }
 
 #[cfg(test)]
@@ -1361,5 +1811,113 @@ mod tests {
             let grandparent = parent.parent().unwrap();
             assert!(grandparent.ends_with(".mxdx"));
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // T-43 — sync filter classifier tests. Ensure m.call.* events are NOT
+    // dropped by the sync path; the Phase 5 state machine needs them.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn classify_delivers_all_m_call_types() {
+        for ty in crate::CALL_EVENT_TYPES {
+            assert_eq!(
+                classify_sync_event(Some(ty), false),
+                SyncFilterDecision::Deliver,
+                "m.call.* event type `{ty}` must pass through sync filter"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_delivers_unknown_m_call_types_for_forward_compat() {
+        // Future Matrix call event types (m.call.reject, m.call.negotiate,
+        // etc.) must also be delivered to consumers — the Rust parser
+        // surfaces them as ParsedCallEvent::Unknown. If the sync filter
+        // were a positive-only allowlist, spec additions would silently
+        // drop until the allowlist was updated.
+        assert_eq!(
+            classify_sync_event(Some("m.call.reject"), false),
+            SyncFilterDecision::Deliver
+        );
+        assert_eq!(
+            classify_sync_event(Some("m.call.negotiate"), false),
+            SyncFilterDecision::Deliver
+        );
+    }
+
+    #[test]
+    fn classify_delivers_mxdx_session_events() {
+        assert_eq!(
+            classify_sync_event(Some("mxdx.session.start"), false),
+            SyncFilterDecision::Deliver
+        );
+        assert_eq!(
+            classify_sync_event(Some("mxdx.session.output"), false),
+            SyncFilterDecision::Deliver
+        );
+    }
+
+    #[test]
+    fn classify_infra_ignored() {
+        for ty in [
+            "m.room.encryption",
+            "m.room.member",
+            "m.room.power_levels",
+        ] {
+            assert_eq!(
+                classify_sync_event(Some(ty), false),
+                SyncFilterDecision::InfraIgnored,
+                "type {ty} should be infra-ignored"
+            );
+        }
+    }
+
+    #[test]
+    fn classify_timeline_encrypted_triggers_fallback() {
+        // m.room.encrypted on a timeline event (no state_key) drives the
+        // saw_encrypted retry logic.
+        assert_eq!(
+            classify_sync_event(Some("m.room.encrypted"), false),
+            SyncFilterDecision::Encrypted
+        );
+    }
+
+    #[test]
+    fn classify_state_encrypted_is_infra_ignored() {
+        // MSC4362 state events (m.room.encrypted with state_key) are
+        // handled by the SDK's state processor, not the timeline
+        // fallback — classified as InfraIgnored.
+        assert_eq!(
+            classify_sync_event(Some("m.room.encrypted"), true),
+            SyncFilterDecision::InfraIgnored
+        );
+    }
+
+    #[test]
+    fn classify_missing_type_delivers() {
+        // No `type` field — default permissive case, don't drop.
+        assert_eq!(
+            classify_sync_event(None, false),
+            SyncFilterDecision::Deliver
+        );
+    }
+
+    #[test]
+    fn call_event_types_constant_matches_mxdx_p2p() {
+        // Locks the list of recognized call event types. If this changes,
+        // crates/mxdx-p2p/src/signaling/parse.rs CALL_EVENT_TYPES must
+        // change in lockstep. Both reference the 2026-04-15 m.call
+        // wire-format ADR.
+        assert_eq!(
+            crate::CALL_EVENT_TYPES,
+            &[
+                "m.call.invite",
+                "m.call.answer",
+                "m.call.candidates",
+                "m.call.hangup",
+                "m.call.select_answer"
+            ]
+        );
     }
 }

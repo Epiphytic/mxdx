@@ -1,0 +1,113 @@
+[package]
+name = "mxdx-p2p"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Platform-agnostic P2P transport, AES-GCM crypto, m.call.* signaling, and TURN client for mxdx interactive sessions"
+
+[features]
+# Expose `P2PCrypto::encrypt_with_iv` to the vector-generation binary at
+# `tests/bin/gen-vectors.rs`. Never enable in production — deterministic IVs
+# with AES-GCM is catastrophically insecure.
+vector-gen = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = "1"
+aes-gcm = { version = "0.10", features = ["zeroize"] }
+base64 = { workspace = true }
+rand = "0.9"
+zeroize = { version = "1", features = ["zeroize_derive"] }
+url = { version = "2", default-features = false }
+# `async-trait` is used by the `WebRtcChannel` trait (Phase 3) for both
+# native and wasm targets. `?Send` is cfg-gated inside the trait definition.
+async-trait = "0.1"
+# `bytes::Bytes` carries inbound frames without copying. Needed on both
+# native and wasm. Kept at the default feature set.
+bytes = "1"
+# `tokio` provides the bounded mpsc used to surface backend events. The
+# `sync` feature is runtime-free and works on wasm; we gate the richer
+# runtime features under the non-wasm target below.
+tokio = { version = "1", default-features = false, features = ["sync"] }
+# Phase 5 T-53 Verifying handshake uses Ed25519 signatures. Pure-Rust,
+# wasm-compatible. No `rand_core` feature needed here (we use
+# `aes_gcm::aead::OsRng` directly for key and nonce generation).
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Phase 5 driver + public API re-exports `Megolm<T>` from mxdx-matrix for
+# the try_send signature per ADR `2026-04-15-megolm-bytes-newtype.md`. This
+# is a native-only dep — matrix-sdk pulls sqlite + reqwest transitively and
+# is incompatible with wasm32. Phase 8 (wasm driver) will revisit with a
+# wasm-compatible shim.
+mxdx-matrix = { path = "../mxdx-matrix", version = "1.1.0" }
+tracing = { workspace = true }
+# Native HTTP for TURN credential fetch. Gated off wasm — real wasm HTTP is a
+# Phase 8 concern (web-sys fetch). Phase 2 only exposes a stub on wasm.
+reqwest = { workspace = true }
+# Full tokio on native: the turn refresh task and the native channel impl
+# use time/rt/macros. This overrides the minimal default above via Cargo's
+# feature unification.
+tokio = { workspace = true }
+# Native WebRTC via FFI to libdatachannel C++. The `vendored` feature on
+# datachannel-sys builds libdatachannel + its transitive C deps (usrsctp,
+# libjuice, libsrtp, OpenSSL) from source via cmake, so the only system
+# dependency is a C++17 compiler and cmake. See ADR
+# `docs/adr/2026-04-15-datachannel-rs.md` and T-33 for CI setup.
+datachannel = { version = "0.16", default-features = false, features = ["log", "vendored"] }
+# Used for the default logger wiring — datachannel's `log` feature pipes
+# libdatachannel logs through `log`. The project already uses `tracing`
+# elsewhere; `tracing-log` bridges them.
+log = "0.4"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# aes-gcm 0.10 pulls rand_core 0.6 -> getrandom 0.2; enable the JS backend for
+# wasm32 browser builds.
+getrandom = { version = "0.2", features = ["js"] }
+# rand 0.9 pulls getrandom 0.3; the workspace .cargo/config.toml sets
+# `--cfg getrandom_backend="wasm_js"`, but the 0.3 `wasm_js` feature must also
+# be enabled to expose the JS backend module.
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+# Phase 8 (T-80): WASM WebRtcChannel uses web-sys bindings for browser
+# RTCPeerConnection. wasm-bindgen + wasm-bindgen-futures for promise→future
+# bridging. js-sys for Array/Reflect/Uint8Array.
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "MessageEvent",
+    "RtcConfiguration",
+    "RtcDataChannel",
+    "RtcDataChannelEvent",
+    "RtcDataChannelInit",
+    "RtcDataChannelType",
+    "RtcIceCandidate",
+    "RtcIceCandidateInit",
+    "RtcIceConnectionState",
+    "RtcIceServer",
+    "RtcPeerConnection",
+    "RtcPeerConnectionIceEvent",
+    "RtcSdpType",
+    "RtcSessionDescriptionInit",
+] }
+
+[dev-dependencies]
+rand_chacha = "0.9"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+trybuild = "1"
+# Property-based testing for the glare resolver (T-42). Pure-Rust; wasm-
+# compatible by default, though the glare resolver proptests only run on
+# native targets anyway. Gated to native because proptest's transitive deps
+# (wait-timeout) don't compile for wasm32.
+proptest = "1"
+mockito = "1"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
+
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"

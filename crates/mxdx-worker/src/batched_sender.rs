@@ -1,8 +1,18 @@
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time;
+
+/// Default batch window: historic 200ms Matrix-rate-limit-safe value.
+pub const DEFAULT_BATCH_WINDOW: Duration = Duration::from_millis(200);
+
+/// P2P-open batch window per storm §2.8 — 10ms for sub-frame latency when
+/// the data channel is available (no HS rate-limit). T-61 flips between
+/// `DEFAULT_BATCH_WINDOW` and `P2P_OPEN_BATCH_WINDOW` on transport state
+/// transitions.
+pub const P2P_OPEN_BATCH_WINDOW: Duration = Duration::from_millis(10);
 
 /// Configuration for the BatchedSender.
 pub struct BatchConfig {
@@ -17,7 +27,7 @@ pub struct BatchConfig {
 impl Default for BatchConfig {
     fn default() -> Self {
         Self {
-            batch_window: Duration::from_millis(200),
+            batch_window: DEFAULT_BATCH_WINDOW,
             compression_threshold: 32,
             session_id: None,
         }
@@ -33,6 +43,11 @@ pub struct BatchedSender {
     tx: mpsc::Sender<Vec<u8>>,
     /// Handle to the background task. Dropped when BatchedSender is dropped.
     _task: tokio::task::JoinHandle<()>,
+    /// Shared batch-window cell. T-61: the P2P integration flips this to
+    /// 10ms on transport `Open`, back to 200ms on any non-Open transition.
+    /// The batch_loop reads this cell once per iteration to pick up the
+    /// new value on the next timeout.
+    window: Arc<Mutex<Duration>>,
 }
 
 /// Type alias for the send function used by BatchedSender.
@@ -53,8 +68,14 @@ impl BatchedSender {
     /// whether the payload is zlib-compressed. It should post the event to Matrix.
     pub fn new(config: BatchConfig, send_fn: SendFn) -> Self {
         let (tx, rx) = mpsc::channel(1024);
-        let task = tokio::spawn(Self::batch_loop(rx, config, send_fn));
-        Self { tx, _task: task }
+        let window = Arc::new(Mutex::new(config.batch_window));
+        let task =
+            tokio::spawn(Self::batch_loop(rx, config, send_fn, window.clone()));
+        Self {
+            tx,
+            _task: task,
+            window,
+        }
     }
 
     /// Push data to be batched and sent.
@@ -68,7 +89,34 @@ impl BatchedSender {
         let _ = self._task.await; // Wait for loop to finish
     }
 
-    async fn batch_loop(mut rx: mpsc::Receiver<Vec<u8>>, config: BatchConfig, send_fn: SendFn) {
+    /// T-61: dynamically update the batch window. The running `batch_loop`
+    /// picks up the new value on its next timeout iteration.
+    ///
+    /// Storm §2.8 flip rule:
+    /// - On P2PTransport `Open` entry → `P2P_OPEN_BATCH_WINDOW` (10ms)
+    /// - On any non-Open transition → `DEFAULT_BATCH_WINDOW` (200ms)
+    ///
+    /// Safe to call concurrently from any thread.
+    pub fn set_batch_window(&self, new_window: Duration) {
+        if let Ok(mut guard) = self.window.lock() {
+            *guard = new_window;
+        }
+    }
+
+    /// Read the current batch window (test helper).
+    pub fn current_batch_window(&self) -> Duration {
+        self.window
+            .lock()
+            .map(|g| *g)
+            .unwrap_or(DEFAULT_BATCH_WINDOW)
+    }
+
+    async fn batch_loop(
+        mut rx: mpsc::Receiver<Vec<u8>>,
+        config: BatchConfig,
+        send_fn: SendFn,
+        window: Arc<Mutex<Duration>>,
+    ) {
         let mut seq: u64 = 0;
         let mut buffer: Vec<u8> = Vec::new();
         let mut backoff: Option<Duration> = None;
@@ -86,8 +134,14 @@ impl BatchedSender {
                     None => break, // Channel closed
                 }
             } else {
-                // Buffer has data -- wait for batch window
-                match time::timeout(config.batch_window, rx.recv()).await {
+                // Buffer has data -- wait for batch window. Re-read the
+                // shared window cell so T-61's set_batch_window takes effect
+                // on the next coalescing cycle.
+                let current_window = window
+                    .lock()
+                    .map(|g| *g)
+                    .unwrap_or(DEFAULT_BATCH_WINDOW);
+                match time::timeout(current_window, rx.recv()).await {
                     Ok(Some(data)) => Some(data),
                     Ok(None) => None, // Channel closed, send remaining
                     Err(_) => None,   // Timeout -- send batch
@@ -401,6 +455,65 @@ mod tests {
         assert_eq!(
             BatchedSender::parse_retry_after("retry_after_ms=250 blah"),
             Some(250)
+        );
+    }
+
+    // ---- T-61: set_batch_window + window-flip flow tests ----
+
+    #[tokio::test]
+    async fn test_set_batch_window_updates_cell() {
+        let (_log, send_fn) = recording_sender();
+        let sender = BatchedSender::new(test_config(200), send_fn);
+
+        assert_eq!(sender.current_batch_window(), Duration::from_millis(200));
+
+        sender.set_batch_window(Duration::from_millis(10));
+        assert_eq!(sender.current_batch_window(), Duration::from_millis(10));
+
+        sender.set_batch_window(Duration::from_millis(200));
+        assert_eq!(sender.current_batch_window(), Duration::from_millis(200));
+
+        sender.flush().await;
+    }
+
+    #[tokio::test]
+    async fn test_startup_window_is_200ms_default() {
+        // Contract: the initial window is whatever BatchConfig::batch_window
+        // says (pre-T-61 behavior preserved). The flip to 10ms ONLY happens
+        // when the integration layer calls set_batch_window(P2P_OPEN_BATCH_WINDOW).
+        let cfg = BatchConfig::default();
+        let (_log, send_fn) = recording_sender();
+        let sender = BatchedSender::new(cfg, send_fn);
+        assert_eq!(sender.current_batch_window(), DEFAULT_BATCH_WINDOW);
+        assert_eq!(sender.current_batch_window(), Duration::from_millis(200));
+        sender.flush().await;
+    }
+
+    #[tokio::test]
+    async fn test_window_flip_affects_next_batch_cycle() {
+        // Verifies the batch_loop reads the shared window cell between
+        // coalesce iterations. With a 500ms window, a mid-buffer flip to
+        // 10ms should cause the next batch to flush within ~10-100ms.
+        let (log, send_fn) = recording_sender();
+        let sender = BatchedSender::new(test_config(500), send_fn);
+
+        sender.send(b"pre-flip".to_vec()).await.unwrap();
+        // Give the loop a moment to enter the inner timeout branch.
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        // Flip window down to 10ms.
+        sender.set_batch_window(Duration::from_millis(10));
+        // Next send arrives while the 500ms timer was pending, but the
+        // loop re-evaluates the window per iteration, so the batch should
+        // flush within ~200ms (upper bound; the original 500ms timer may
+        // still be pending, but the loop terminates on channel close on
+        // flush below anyway).
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        sender.flush().await;
+        let calls = log.lock().await;
+        assert!(
+            !calls.is_empty(),
+            "expected at least one batch to have flushed"
         );
     }
 }

@@ -2,10 +2,18 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { TerminalSocket } from './terminal-socket.js';
 import { BrowserWebRTCChannel } from './webrtc-channel.js';
+// P2P crypto and TURN: WASM exports (Phase 8, T-82).
+// P2PSignaling and P2PTransport: JS orchestration classes, imported from
+// @mxdx/core re-exports (deprecated in T-83, replaced by Rust P2PTransport).
+import {
+  P2PCrypto,
+  generateSessionKey,
+  createP2PCrypto,
+  fetchTurnCredentials,
+  turnToIceServers,
+} from '../../core/wasm/web/mxdx_core_wasm.js';
 import { P2PSignaling } from '../../core/p2p-signaling.js';
 import { P2PTransport } from '../../core/p2p-transport.js';
-import { generateSessionKey, createP2PCrypto } from '../../core/p2p-crypto.js';
-import { fetchTurnCredentials, turnToIceServers } from '../../core/turn-credentials.js';
 
 let activeSocket = null;
 let activeTerminal = null;
@@ -378,10 +386,13 @@ async function attemptBrowserP2P(client, transport, dmRoomId, sessionKey, execRo
       throw new Error('Invalid invite');
     }
 
-    // Extract shared session key from offerer's invite
+    // Extract shared session key from offerer's invite. Field name is
+    // `mxdx_session_key` per ADR 2026-04-15-mcall-wire-format.md (2026-04-16
+    // addendum) — locked in step with crates/mxdx-p2p via the coordinated-
+    // release policy (ADR 2026-04-16-coordinated-rust-npm-releases.md).
     let answererP2PCrypto = null;
-    if (inviteContent.session_key) {
-      answererP2PCrypto = await createP2PCrypto(inviteContent.session_key);
+    if (inviteContent.mxdx_session_key) {
+      answererP2PCrypto = await createP2PCrypto(inviteContent.mxdx_session_key);
       console.log('[p2p] Answerer: using shared session key from invite');
     }
 

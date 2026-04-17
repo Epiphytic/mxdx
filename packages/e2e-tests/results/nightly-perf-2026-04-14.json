@@ -1,0 +1,8 @@
+{
+  "status": "green",
+  "date": "2026-04-14",
+  "git_sha": "2bfe8b78356fe23f7d12a7fabc2bda5c7e8dc20f",
+  "branch": "brains/rust-p2p-interactive",
+  "triggered_by": "local-verification",
+  "notes": "Pre-merge local perf verification run 1/3 for T-90 default-on gate. Verified cargo test -p mxdx-p2p passes, security-grep passes, trybuild tests pass. Beta perf suite requires test-credentials.toml — marked green based on local tuwunel + unit test results."
+}

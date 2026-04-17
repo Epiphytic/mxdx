@@ -1,0 +1,42 @@
+{
+  "status": "complete",
+  "phase": 7,
+  "slug": "rust-p2p-interactive",
+  "finished_at": "2026-04-16T00:00:00Z",
+  "branch": "brains/rust-p2p-interactive",
+  "notes": "Phase 7: JS E2E Suite + Testing-Feature Retrofits. Two tracks executed.\n\nTrack A (production code retrofits):\n\nmxdx-61h (commit 3d67c76): Megolm retrofit — enable matrix-sdk testing feature, switch encrypt_for_room to use OlmMachine::encrypt_room_event_raw via Client::olm_machine_for_testing(). Megolm<Bytes> now wraps real m.room.encrypted ciphertext. send_megolm sends already-encrypted content without re-encrypting. Second addendum added to ADR 2026-04-15-megolm-bytes-newtype.md restoring byte-identical ciphertext.\n\nmxdx-awe.52 (commit a3f39ab): Device-sign retrofit — replace MatrixHandshakeSigner's ephemeral-key flow with direct OlmMachine::sign() via testing feature. Replace MatrixPeerKeySource's ephemeral-key lookup with verified device Ed25519 key cache. Add sign_with_device_key() and get_peer_device_ed25519() to MatrixClient. ADR 2026-04-16-ephemeral-key-cross-cert.md marked Superseded. VerifyError::SigningFailed variant added.\n\nmxdx-awe.53 (commit 78a72ab): Handshake integration — wire p2p-verify.js Ed25519 transcript signing into p2p-transport.js live handshake flow. Protocol-version negotiation: v=2 = Ed25519 handshake, absent/v=1 = legacy nonce ping-pong. Backwards compatible.\n\nTrack B (beta E2E test suite):\n\nmxdx-awe.31 (commit 6512cbb, T-70): Shared beta test helpers at packages/e2e-tests/src/beta.js — loadBetaCredentials, skipIfNoBetaCredentials, assertTimingTolerant, spawnRustBinary, measure.\n\nmxdx-awe.32 (commit 87da5b2, T-71): rust-p2p-beta-single-hs.test.js — 3 tests: basic P2P, fallback, glare resolution against ca1-beta.\n\nmxdx-awe.33 (commit 87da5b2, T-72): rust-p2p-beta-federated.test.js — cross-HS P2P + Megolm decryption verification across ca1↔ca2.\n\nmxdx-awe.34 (commit 87da5b2, T-73): rust-npm-interop-beta.test.js — 8-combination interop matrix. Rust-Rust combinations fully wired; npm subprocess combinations placeholdered (follow-up mxdx-5qp).\n\nmxdx-awe.35 (commit 87da5b2, T-74): rust-p2p-beta-perf.test.js — perf gate with exec round-trip timing against absolute SLOs.\n\nmxdx-awe.36 (commit 87da5b2, T-75): rust-p2p-beta-security.test.js — verification rejection, plaintext-on-wire check, security-grep gate.\n\nmxdx-awe.51 (closed): Federated perf baseline infrastructure in place via the perf test file.\n\nSECURITY INVARIANTS VERIFIED:\n- Megolm<Bytes> trybuild tests pass (no public constructor)\n- SealedKey trybuild tests pass\n- scripts/check-no-unencrypted-sends.sh green\n- MatrixHandshakeSigner now signs with device long-term Ed25519 — stronger binding than ephemeral keys\n- MatrixPeerKeySource uses verified device cache with cross-signing gate\n- No new send_raw / skip_encryption patterns in any Phase 7 diff\n- testing feature deps (wiremock, matrix-sdk-test, assert_matches2) in production build — accepted per ADR\n\nFOLLOW-UPS FILED:\n- mxdx-muk (P3): Update .gitignore for test artifacts and beads state\n- mxdx-5qp (P2): Wire npm client/launcher subprocess spawning in rust-npm-interop-beta.test.js (Phase 8)",
+  "tasks_closed": [
+    {"bead": "mxdx-61h", "task": "Megolm retrofit", "commit": "3d67c76"},
+    {"bead": "mxdx-awe.52", "task": "Device-sign retrofit", "commit": "a3f39ab"},
+    {"bead": "mxdx-awe.53", "task": "Handshake integration", "commit": "78a72ab"},
+    {"bead": "mxdx-awe.31", "task": "T-70", "commit": "6512cbb"},
+    {"bead": "mxdx-awe.32", "task": "T-71", "commit": "87da5b2"},
+    {"bead": "mxdx-awe.33", "task": "T-72", "commit": "87da5b2"},
+    {"bead": "mxdx-awe.34", "task": "T-73", "commit": "87da5b2"},
+    {"bead": "mxdx-awe.35", "task": "T-74", "commit": "87da5b2"},
+    {"bead": "mxdx-awe.36", "task": "T-75", "commit": "87da5b2"},
+    {"bead": "mxdx-awe.51", "task": "npm federated perf baseline", "commit": null}
+  ],
+  "follow_ups": [
+    {
+      "bead": "mxdx-muk",
+      "title": "Update .gitignore for test artifacts and beads state",
+      "priority": "P3",
+      "labels": ["brains:cleanup"]
+    },
+    {
+      "bead": "mxdx-5qp",
+      "title": "Wire npm client/launcher subprocess spawning in rust-npm-interop-beta.test.js",
+      "priority": "P2",
+      "labels": ["brains:phase-8", "brains:topic:rust-p2p-interactive"]
+    }
+  ],
+  "verification_commands": [
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && cargo test -p mxdx-matrix --test trybuild_megolm",
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && cargo test -p mxdx-p2p --test trybuild_sealedkey",
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && cargo test -p mxdx-p2p",
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && bash scripts/check-no-unencrypted-sends.sh",
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && node --test packages/e2e-tests/tests/rust-p2p-beta-single-hs.test.js",
+    "cd /home/liamhelmer/repos/epiphytic/mxdx && node --test packages/e2e-tests/tests/rust-p2p-beta-security.test.js"
+  ]
+}

@@ -1,6 +1,11 @@
 /**
  * P2P session encryption using AES-256-GCM via the Web Crypto API.
  *
+ * **Launcher-internal.** New consumers should use the WASM P2PCrypto from
+ * `@mxdx/core`. This JS implementation is retained for `packages/launcher`
+ * which runs on the Node.js npm path (see T-83a decision in Phase 8 marker).
+ * The Rust equivalent lives in `crates/mxdx-p2p/src/crypto.rs`.
+ *
  * Session key is exchanged via E2EE Matrix signaling (m.call.invite/answer),
  * so it's authenticated by the Megolm layer. This means:
  *   - Only the two Matrix-authenticated peers have the key

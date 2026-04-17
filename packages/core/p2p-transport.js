@@ -1,14 +1,38 @@
 /**
  * P2PTransport — adapter between TerminalSocket/BatchedSender and WebRTC data channel.
  *
+ * **Launcher-internal.** New consumers should use WASM P2PTransport from
+ * `@mxdx/core`. This JS implementation is retained for `packages/launcher`
+ * which runs on the Node.js npm path (see T-83a decision in Phase 8 marker).
+ * The Rust equivalent lives in `crates/mxdx-p2p/src/transport/`.
+ *
  * Implements the same sendEvent/onRoomEvent interface as the Matrix client.
  * All terminal data is AES-256-GCM encrypted (via P2PCrypto) before placement
  * on the data channel. The session key is exchanged via E2EE Matrix signaling,
  * so peer identity is authenticated by the Megolm layer.
  *
+ * Handshake protocol (v=2, storm §3.1):
+ *   Step 1: Both sides exchange verify_challenge frames with nonces + device_id
+ *   Step 2: Both sides sign the full transcript (Ed25519) and exchange signatures
+ *   If peer sends v=1 (legacy), falls back to simple nonce ping-pong
+ *
  * NEVER sends unencrypted terminal data over P2P.
  * Falls back to Matrix transparently on any P2P failure.
  */
+
+import {
+  generateNonce,
+  generateEphemeralKeypair,
+  buildTranscript,
+  buildChallengeFrame,
+  buildResponseFrame,
+  parseChallengeFrame,
+  parseResponseFrame,
+  canonicalOrdering,
+  canonicalSdpFingerprints,
+  verifyTranscript,
+  b64encode,
+} from './p2p-verify.js';
 
 /** Cross-platform random hex string (works in browser + Node 19+). */
 function randomHex(byteCount) {
@@ -16,6 +40,9 @@ function randomHex(byteCount) {
   globalThis.crypto.getRandomValues(buf);
   return Array.from(buf, b => b.toString(16).padStart(2, '0')).join('');
 }
+
+/** Current handshake protocol version. */
+const VERIFY_PROTOCOL_VERSION = 2;
 
 const MAX_FRAME_SIZE = 64 * 1024; // 64KB
 const INITIAL_BACKOFF_MS = 10_000;
@@ -37,16 +64,28 @@ export class P2PTransport {
   #onReconnectNeeded;
   #onHangup;
 
+  // Handshake context (v=2 Ed25519, storm §3.1)
+  #roomId;
+  #sessionUuid;
+  #callId;
+  #offerSdp;
+  #answerSdp;
+  #weAreOfferer;
+  #peerDeviceEd25519Lookup;  // async (userId, deviceId) => Uint8Array|null
+  #ephemeralKeypair = null;  // { privateKey, publicKey, publicKeyBytes }
+
   #dataChannel = null;
   #peerVerified = false;
   #status = 'matrix';
   #closed = false;
 
   // Peer verification state
-  #localNonce = null;
+  #localNonce = null;          // Uint8Array (32 bytes) for v=2, hex string for v=1
   #remoteNonce = null;
+  #peerDeviceId = null;
   #localVerified = false;   // Remote acknowledged our challenge
   #verifyTimer = null;
+  #peerProtocolVersion = null; // null until first frame received
 
   // P2P inbox: Map<eventType, Array<resolvedJson>>
   #p2pInbox = new Map();
@@ -72,6 +111,14 @@ export class P2PTransport {
     onStatusChange = null,
     onReconnectNeeded = null,
     onHangup = null,
+    // v=2 handshake context (optional for backwards compat)
+    roomId = null,
+    sessionUuid = null,
+    callId = null,
+    offerSdp = null,
+    answerSdp = null,
+    weAreOfferer = false,
+    peerDeviceEd25519Lookup = null,
   }) {
     this.#matrixClient = matrixClient;
     this.#p2pCrypto = p2pCrypto;
@@ -80,6 +127,13 @@ export class P2PTransport {
     this.#onStatusChange = onStatusChange;
     this.#onReconnectNeeded = onReconnectNeeded;
     this.#onHangup = onHangup;
+    this.#roomId = roomId;
+    this.#sessionUuid = sessionUuid;
+    this.#callId = callId;
+    this.#offerSdp = offerSdp;
+    this.#answerSdp = answerSdp;
+    this.#weAreOfferer = weAreOfferer;
+    this.#peerDeviceEd25519Lookup = peerDeviceEd25519Lookup;
   }
 
   /**
@@ -102,6 +156,19 @@ export class P2PTransport {
   }
 
   /**
+   * Update handshake context for v=2 Ed25519 verification. Call after
+   * signaling completes (offer/answer SDPs known) but before setDataChannel.
+   */
+  setHandshakeContext({ roomId, sessionUuid, callId, offerSdp, answerSdp, weAreOfferer }) {
+    this.#roomId = roomId;
+    this.#sessionUuid = sessionUuid;
+    this.#callId = callId;
+    this.#offerSdp = offerSdp;
+    this.#answerSdp = answerSdp;
+    this.#weAreOfferer = weAreOfferer;
+  }
+
+  /**
    * Attach a WebRTC data channel. Registers message/close handlers.
    * Automatically initiates peer verification handshake.
    * The channel is NOT used for terminal data until both sides verify.
@@ -118,6 +185,9 @@ export class P2PTransport {
     this.#localVerified = false;
     this.#localNonce = null;
     this.#remoteNonce = null;
+    this.#peerDeviceId = null;
+    this.#peerProtocolVersion = null;
+    this.#ephemeralKeypair = null;
 
     this.#log('[p2p-transport] setDataChannel called, isOpen:', channel.isOpen);
 
@@ -135,8 +205,11 @@ export class P2PTransport {
       this.#handleChannelClose();
     });
 
-    // Start peer verification automatically
-    this.#startVerification();
+    // Start peer verification automatically (fire-and-forget; errors are
+    // handled inside by falling back to Matrix)
+    this.#startVerification().catch((err) => {
+      this.#log('[p2p-transport] startVerification failed:', err.message || err);
+    });
   }
 
   #log(...args) {
@@ -236,18 +309,39 @@ export class P2PTransport {
     }
   }
 
-  // --- Peer Verification ---
-  // The session key (exchanged via E2EE Matrix signaling) provides authentication.
-  // This handshake just confirms both sides are connected and ready.
+  // --- Peer Verification (v=2: Ed25519 transcript per storm §3.1) ---
+  //
+  // Protocol negotiation:
+  // - v=2: Ed25519-signed transcript. Both sides exchange verify_challenge
+  //   frames (with nonce + device_id + v=2 tag), then verify_response
+  //   frames (with signature + public key).
+  // - v=1 (legacy): simple nonce ping-pong via peer_verify/peer_verify_response.
+  //   Accepted when peer sends a v=1 frame (no `v` field = v=1).
 
-  #startVerification() {
-    this.#localNonce = randomHex(32);
-    this.#log('[p2p-transport] sending peer_verify, channel isOpen:', this.#dataChannel?.isOpen);
-    this.#sendControlFrame({
-      type: 'peer_verify',
-      nonce: this.#localNonce,
-      device_id: this.#localDeviceId,
-    });
+  /** Whether we have the context needed for v=2 handshake. */
+  #canDoV2() {
+    return this.#roomId && this.#callId && this.#offerSdp && this.#answerSdp;
+  }
+
+  async #startVerification() {
+    if (this.#canDoV2()) {
+      // v=2: Ed25519 handshake
+      this.#ephemeralKeypair = await generateEphemeralKeypair();
+      this.#localNonce = generateNonce(); // Uint8Array(32)
+      const challenge = buildChallengeFrame(this.#localNonce, this.#localDeviceId);
+      challenge.v = VERIFY_PROTOCOL_VERSION;
+      this.#log('[p2p-transport] sending verify_challenge (v=2)');
+      this.#sendControlFrame(challenge);
+    } else {
+      // v=1 fallback: legacy nonce ping-pong
+      this.#localNonce = randomHex(32);
+      this.#log('[p2p-transport] sending peer_verify (v=1 legacy)');
+      this.#sendControlFrame({
+        type: 'peer_verify',
+        nonce: this.#localNonce,
+        device_id: this.#localDeviceId,
+      });
+    }
 
     // Verification timeout — 10 seconds
     this.#verifyTimer = setTimeout(() => {
@@ -263,13 +357,147 @@ export class P2PTransport {
     }, VERIFY_TIMEOUT_MS);
   }
 
-  #handlePeerVerify(frame) {
-    this.#log('[p2p-transport] received peer_verify from device:', frame.device_id);
-    this.#remoteNonce = frame.nonce;
-    const remoteDeviceId = frame.device_id;
-    if (!this.#remoteNonce || !remoteDeviceId) return;
+  async #handleVerifyChallenge(frame) {
+    // v=2 Ed25519 challenge received
+    this.#peerProtocolVersion = frame.v || 1;
+    this.#log('[p2p-transport] received verify_challenge v=', this.#peerProtocolVersion);
 
-    // Acknowledge the remote's challenge
+    const { nonce: peerNonce, deviceId: peerDeviceIdFromFrame } = parseChallengeFrame(frame);
+    this.#remoteNonce = peerNonce;
+    this.#peerDeviceId = peerDeviceIdFromFrame;
+
+    if (!this.#ephemeralKeypair) {
+      this.#ephemeralKeypair = await generateEphemeralKeypair();
+    }
+    if (!this.#localNonce) {
+      this.#localNonce = generateNonce();
+      // Send our challenge too
+      const ourChallenge = buildChallengeFrame(this.#localNonce, this.#localDeviceId);
+      ourChallenge.v = VERIFY_PROTOCOL_VERSION;
+      this.#sendControlFrame(ourChallenge);
+    }
+
+    // Now build and send our response (we have both nonces)
+    await this.#sendVerifyResponse();
+  }
+
+  async #sendVerifyResponse() {
+    if (!this.#localNonce || !this.#remoteNonce || !this.#ephemeralKeypair) return;
+    if (!this.#canDoV2()) return;
+
+    try {
+      const [offererSdpFp, answererSdpFp] = canonicalSdpFingerprints(
+        this.#offerSdp, this.#answerSdp,
+      );
+      const [offNonce, ansNonce] = canonicalOrdering(
+        this.#localNonce, this.#remoteNonce, this.#weAreOfferer,
+      );
+      const [offParty, ansParty] = canonicalOrdering(
+        this.#localDeviceId, this.#peerDeviceId || '', this.#weAreOfferer,
+      );
+
+      const transcript = buildTranscript({
+        roomId: this.#roomId,
+        sessionUuid: this.#sessionUuid || '',
+        callId: this.#callId,
+        offererNonce: offNonce,
+        answererNonce: ansNonce,
+        offererPartyId: offParty,
+        answererPartyId: ansParty,
+        offererSdpFingerprint: offererSdpFp,
+        answererSdpFingerprint: answererSdpFp,
+      });
+
+      // OlmMachine::sign takes base64-encoded transcript (matching Rust)
+      const transcriptB64 = b64encode(transcript);
+      const response = await buildResponseFrame({
+        privateKey: this.#ephemeralKeypair.privateKey,
+        publicKeyBytes: this.#ephemeralKeypair.publicKeyBytes,
+        transcript: new TextEncoder().encode(transcriptB64),
+        ourDeviceId: this.#localDeviceId,
+      });
+      response.v = VERIFY_PROTOCOL_VERSION;
+      this.#sendControlFrame(response);
+    } catch (err) {
+      this.#log('[p2p-transport] verify response build failed:', err.message);
+    }
+  }
+
+  async #handleVerifyResponse(frame) {
+    this.#log('[p2p-transport] received verify_response');
+    if (!this.#localNonce || !this.#remoteNonce) return;
+
+    try {
+      const { signature, signerPk, deviceId } = parseResponseFrame(frame);
+
+      // Look up peer's known Ed25519 key from Matrix crypto store
+      let knownPk = null;
+      if (this.#peerDeviceEd25519Lookup) {
+        knownPk = await this.#peerDeviceEd25519Lookup(
+          null, // user_id — the lookup impl knows which user
+          deviceId,
+        );
+      }
+
+      // If we can verify against a known key, do so
+      if (knownPk) {
+        // Compare wire pk against Matrix-known pk
+        if (knownPk.length !== signerPk.length ||
+            !knownPk.every((b, i) => b === signerPk[i])) {
+          this.#log('[p2p-transport] SECURITY: peer public key mismatch — aborting');
+          this.#handleChannelClose();
+          return;
+        }
+      }
+
+      // Rebuild transcript and verify signature
+      const [offererSdpFp, answererSdpFp] = canonicalSdpFingerprints(
+        this.#offerSdp, this.#answerSdp,
+      );
+      const [offNonce, ansNonce] = canonicalOrdering(
+        this.#localNonce, this.#remoteNonce, this.#weAreOfferer,
+      );
+      const [offParty, ansParty] = canonicalOrdering(
+        this.#localDeviceId, this.#peerDeviceId || deviceId, this.#weAreOfferer,
+      );
+
+      const transcript = buildTranscript({
+        roomId: this.#roomId,
+        sessionUuid: this.#sessionUuid || '',
+        callId: this.#callId,
+        offererNonce: offNonce,
+        answererNonce: ansNonce,
+        offererPartyId: offParty,
+        answererPartyId: ansParty,
+        offererSdpFingerprint: offererSdpFp,
+        answererSdpFingerprint: answererSdpFp,
+      });
+
+      const transcriptB64 = b64encode(transcript);
+      const valid = await verifyTranscript(
+        signerPk, signature, new TextEncoder().encode(transcriptB64),
+      );
+      if (!valid) {
+        this.#log('[p2p-transport] SECURITY: signature verification failed — aborting');
+        this.#handleChannelClose();
+        return;
+      }
+
+      this.#localVerified = true;
+      this.#checkVerificationComplete();
+    } catch (err) {
+      this.#log('[p2p-transport] verify response handling failed:', err.message);
+    }
+  }
+
+  // v=1 legacy handlers
+  #handlePeerVerify(frame) {
+    this.#log('[p2p-transport] received peer_verify (v=1 legacy) from device:', frame.device_id);
+    this.#peerProtocolVersion = 1;
+    this.#remoteNonce = frame.nonce;
+    this.#peerDeviceId = frame.device_id;
+    if (!this.#remoteNonce || !this.#peerDeviceId) return;
+
     this.#sendControlFrame({
       type: 'peer_verify_response',
       nonce: this.#remoteNonce,
@@ -280,19 +508,16 @@ export class P2PTransport {
   }
 
   #handlePeerVerifyResponse(frame) {
-    this.#log('[p2p-transport] received peer_verify_response, nonce match:', frame.nonce === this.#localNonce);
+    this.#log('[p2p-transport] received peer_verify_response (v=1 legacy)');
     if (!frame.nonce || !frame.device_id) return;
     if (frame.nonce !== this.#localNonce) return;
 
-    // Remote acknowledged our challenge
     this.#localVerified = true;
     this.#checkVerificationComplete();
   }
 
   #checkVerificationComplete() {
     this.#log('[p2p-transport] checkVerification: localVerified=', this.#localVerified, 'remoteNonce=', !!this.#remoteNonce);
-    // Both sides must have exchanged: we got their response (localVerified)
-    // AND they got our challenge (remoteNonce is set, meaning we responded)
     if (this.#localVerified && this.#remoteNonce) {
       this.#peerVerified = true;
       this.#clearVerifyTimer();
@@ -348,6 +573,14 @@ export class P2PTransport {
         break;
       case 'pong':
         break;
+      // v=2 Ed25519 handshake frames
+      case 'verify_challenge':
+        this.#handleVerifyChallenge(frame);
+        break;
+      case 'verify_response':
+        this.#handleVerifyResponse(frame);
+        break;
+      // v=1 legacy nonce ping-pong
       case 'peer_verify':
         this.#handlePeerVerify(frame);
         break;
