@@ -333,7 +333,7 @@ async function attemptBrowserP2P(client, transport, dmRoomId, sessionKey, execRo
     for (let i = 0; i < 30; i++) {
       if (settled && i > 5) return; // After settle, poll a few more for stragglers
       const candJson = await client.onRoomEvent(signalingRoomId, 'm.call.candidates', 1);
-      if (!candJson || candJson === 'null') continue;
+      if (candJson == null) continue;
       try {
         const candEvent = JSON.parse(candJson);
         const candContent = candEvent.content || candEvent;
@@ -362,7 +362,7 @@ async function attemptBrowserP2P(client, transport, dmRoomId, sessionKey, execRo
     const answererDeadline = Date.now() + 20_000; // 20s to receive launcher invite
     while (Date.now() < answererDeadline && !settled) {
       const json = await client.onRoomEvent(signalingRoomId, 'm.call.invite', 3);
-      if (!json || json === 'null') continue;
+      if (json == null) continue;
       try {
         const evt = JSON.parse(json);
         const evtContent = evt.content || evt;
@@ -467,7 +467,7 @@ async function attemptBrowserP2P(client, transport, dmRoomId, sessionKey, execRo
     const offerDeadline = Date.now() + 30_000;
     while (Date.now() < offerDeadline && !settled) {
       const answerJson = await client.onRoomEvent(signalingRoomId, 'm.call.answer', 5);
-      if (!answerJson || answerJson === 'null') continue;
+      if (answerJson == null) continue;
       try {
         const answerEvent = JSON.parse(answerJson);
         const content = answerEvent.content || answerEvent;
@@ -584,7 +584,7 @@ export async function setupTerminalView(client, launcher, { onClose, onSessionSt
       30,
     );
 
-    if (!responseJson || responseJson === 'null') {
+    if (responseJson == null) {
       term.writeln('\r\nTimeout: launcher did not respond within 30 seconds.');
       term.writeln('Check that the launcher is running and can decrypt messages.');
       return;
@@ -721,7 +721,7 @@ export async function reconnectTerminalView(client, launcher, session, { onClose
       launcher.exec_room_id, 'org.mxdx.terminal.session', 30,
     );
 
-    if (!responseJson || responseJson === 'null') {
+    if (responseJson == null) {
       term.writeln('\r\nTimeout: launcher did not respond.');
       if (onReconnectFailed) onReconnectFailed();
       return;

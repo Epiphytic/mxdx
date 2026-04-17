@@ -117,7 +117,7 @@ class SessionMux {
         const dataJson = await this.#transport.onRoomEvent(
           this.#roomId, 'org.mxdx.terminal.data', 1,
         );
-        if (dataJson && dataJson !== 'null') {
+        if (dataJson != null) {
           const event = JSON.parse(dataJson);
           const content = event.content || event;
           const sender = event.sender;
@@ -145,7 +145,7 @@ class SessionMux {
         const resizeJson = await this.#transport.onRoomEvent(
           this.#roomId, 'org.mxdx.terminal.resize', 2,
         );
-        if (resizeJson && resizeJson !== 'null') {
+        if (resizeJson != null) {
           const event = JSON.parse(resizeJson);
           const content = event.content || event;
           const sessionId = content.session_id;
@@ -1493,7 +1493,7 @@ export class LauncherRuntime {
       for (let i = 0; i < 30; i++) {
         if (settled && i > 5) return; // After settle, poll a few more for stragglers
         const candJson = await this.#client.onRoomEvent(signalingRoomId, 'm.call.candidates', 1);
-        if (!candJson || candJson === 'null') continue;
+        if (candJson == null) continue;
         try {
           const candEvent = JSON.parse(candJson);
           const candContent = candEvent.content || candEvent;
@@ -1559,7 +1559,7 @@ export class LauncherRuntime {
       const offerDeadline = Date.now() + 30_000;
       while (!answerContent && Date.now() < offerDeadline && !settled && !isStale()) {
         const answerJson = await this.#client.onRoomEvent(signalingRoomId, 'm.call.answer', 5);
-        if (!answerJson || answerJson === 'null') {
+        if (answerJson == null) {
           this.#log.debug('P2P offerer: poll returned null, retrying...', { call_id: callId });
           continue;
         }
@@ -1602,7 +1602,7 @@ export class LauncherRuntime {
       const answererDeadline = Date.now() + 35_000;
       while (Date.now() < answererDeadline && !settled && !isStale()) {
         const json = await this.#client.onRoomEvent(signalingRoomId, 'm.call.invite', 5);
-        if (!json || json === 'null') continue;
+        if (json == null) continue;
         const evt = JSON.parse(json);
         const evtContent = evt.content || evt;
         if (evtContent.call_id === offererCallId) continue; // Skip our own invite
