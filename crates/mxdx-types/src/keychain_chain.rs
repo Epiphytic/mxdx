@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn test_chained_keychain_set_only_writes_primary_on_success() {
+    fn test_chained_keychain_set_writes_both_for_durability() {
         let primary = SharedKeychain::new();
         let fallback = SharedKeychain::new();
 
@@ -173,16 +173,17 @@ mod tests {
         let chain = ChainedKeychain::new(Box::new(primary), Box::new(fallback));
         chain.set("k", b"secret").unwrap();
 
-        // Primary should have the value
+        // Both should have the value — set() always writes to both backends
+        // for durability (OS keychain may silently fail to persist on Linux).
         assert_eq!(
             primary_clone.get_value("k"),
             Some(b"secret".to_vec()),
             "primary should have the value"
         );
-        // Fallback should NOT have the value (primary succeeded, no disk write)
-        assert!(
-            !fallback_clone.contains("k"),
-            "fallback should NOT receive writes when primary succeeds"
+        assert_eq!(
+            fallback_clone.get_value("k"),
+            Some(b"secret".to_vec()),
+            "fallback should also have the value for durability"
         );
     }
 

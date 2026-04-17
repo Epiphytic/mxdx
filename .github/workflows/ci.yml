@@ -6,6 +6,17 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      macos_build:
+        description: 'Include macOS builds'
+        required: false
+        default: false
+        type: boolean
+      full_e2e:
+        description: 'Run full E2E test suite (not just quick tests)'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -163,27 +174,28 @@ jobs:
 
   # T-33: Platform matrix build-only. Confirms mxdx-p2p (which pulls in
   # vendored libdatachannel) compiles on the production targets we expect
-  # to ship. macOS needs cmake via Homebrew (xcode command-line tools
-  # provide the C++ compiler).
+  # to ship. macOS is only included on manually triggered releases with
+  # macos_build enabled — macOS runners are paid, not free tier.
   build-only-native:
     needs: preflight
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.93.1
       - uses: Swatinem/rust-cache@v2
-      - name: Install system deps (Linux)
-        if: runner.os == 'Linux'
+      - name: Install system deps
         run: sudo apt-get install -y libsqlite3-dev libssl-dev cmake g++
-      - name: Install system deps (macOS)
-        if: runner.os == 'macOS'
-        # GitHub-hosted macOS runners ship cmake + xcode CLI tools; this
-        # is a no-op safety net. HOMEBREW_NO_AUTO_UPDATE speeds up the
-        # step when brew decides it needs to refresh.
+      - run: cargo build -p mxdx-p2p
+
+  build-only-macos:
+    needs: preflight
+    if: github.event_name == 'workflow_dispatch' && inputs.macos_build
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system deps
         run: |
           export HOMEBREW_NO_AUTO_UPDATE=1
           brew list cmake >/dev/null 2>&1 || brew install cmake
@@ -218,7 +230,7 @@ jobs:
   integration:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.full_e2e
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.93.1
@@ -243,7 +255,7 @@ jobs:
   federation:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.full_e2e
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.93.1
@@ -346,13 +358,7 @@ jobs:
   npm-public-server:
     needs: preflight
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
-    env:
-      TEST_SERVER_URL: ${{ secrets.TEST_SERVER_URL }}
-      TEST_ACCOUNT1_USERNAME: ${{ secrets.TEST_ACCOUNT1_USERNAME }}
-      TEST_ACCOUNT1_PASSWORD: ${{ secrets.TEST_ACCOUNT1_PASSWORD }}
-      TEST_ACCOUNT2_USERNAME: ${{ secrets.TEST_ACCOUNT2_USERNAME }}
-      TEST_ACCOUNT2_PASSWORD: ${{ secrets.TEST_ACCOUNT2_PASSWORD }}
+    if: github.event_name == 'workflow_dispatch' && inputs.full_e2e
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.93.1
@@ -369,26 +375,17 @@ jobs:
       - name: Install npm dependencies
         run: npm install
       - name: Write test credentials
-        run: |
-          cat > test-credentials.toml <<TOML
-          [server]
-          url = "$TEST_SERVER_URL"
-
-          [account1]
-          username = "$TEST_ACCOUNT1_USERNAME"
-          password = "$TEST_ACCOUNT1_PASSWORD"
-
-          [account2]
-          username = "$TEST_ACCOUNT2_USERNAME"
-          password = "$TEST_ACCOUNT2_PASSWORD"
-          TOML
+        if: env.TEST_CREDENTIALS_TOML != ''
+        run: echo "$TEST_CREDENTIALS_TOML" > test-credentials.toml
+        env:
+          TEST_CREDENTIALS_TOML: ${{ secrets.TEST_CREDENTIALS_TOML }}
       - name: Run public server tests
         run: node --test packages/e2e-tests/tests/public-server.test.js
 
   e2e-release:
     needs: build
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && inputs.full_e2e
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4

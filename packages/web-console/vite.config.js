@@ -7,6 +7,11 @@ export default defineConfig({
     target: 'esnext',
     rollupOptions: {
       input: 'index.html',
+      // p2p-verify.js and batched-sender.js import node:crypto and node:zlib
+      // for the npm launcher path. Web-console uses WASM crypto instead —
+      // these imports are dead code in the browser bundle but Rollup fails
+      // without explicit externalization.
+      external: ['node:crypto', 'node:zlib'],
     },
   },
   optimizeDeps: {
