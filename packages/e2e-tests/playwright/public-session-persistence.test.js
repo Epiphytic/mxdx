@@ -43,7 +43,7 @@ function writePerfEntry(name, transport, durationMs, exitCode, stdoutLines) {
   fs.appendFileSync(perfPath, entry + '\n');
 }
 
-const ROOT = path.resolve(import.meta.dirname, '..', '..', '..');
+const ROOT = path.resolve(import.meta.dirname, '..', '..', '..', '..');
 const LAUNCHER_BIN = path.join(ROOT, 'packages', 'launcher', 'bin', 'mxdx-launcher.js');
 const WEB_CONSOLE_DIR = path.join(ROOT, 'packages', 'web-console');
 const CREDENTIALS_PATH = path.join(ROOT, 'test-credentials.toml');
