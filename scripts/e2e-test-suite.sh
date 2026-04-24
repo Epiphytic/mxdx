@@ -41,8 +41,12 @@ if [[ "$SKIP_BUILD" == "false" ]]; then
   wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/core/wasm/web
 
   echo "--- Cleaning wasm-pack artifacts ---"
-  rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/nodejs/package.json \
-        packages/core/wasm/web/.gitignore packages/core/wasm/web/package.json
+  # Remove .gitignore files (they interfere with npm pack) but preserve
+  # package.json — wasm/nodejs needs {"type":"commonjs"} for Node.js to
+  # recognize the CommonJS exports when the parent has "type":"module".
+  rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/web/.gitignore
+  # Restore the committed commonjs marker if wasm-pack overwrote it
+  echo '{"type": "commonjs"}' > packages/core/wasm/nodejs/package.json
 
   echo "--- Installing npm dependencies ---"
   npm install

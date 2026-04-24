@@ -68,8 +68,8 @@ jobs:
           cargo build --release -p mxdx-worker -p mxdx-client
           wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
           wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/core/wasm/web
-          rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/nodejs/package.json \
-                packages/core/wasm/web/.gitignore packages/core/wasm/web/package.json
+          rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/web/.gitignore
+          echo '{"type": "commonjs"}' > packages/core/wasm/nodejs/package.json
           npm install
         env:
           TEST_CREDENTIALS_TOML: ${{ secrets.TEST_CREDENTIALS_TOML }}
@@ -155,7 +155,10 @@ jobs:
         run: wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/core/wasm/web
 
       - name: Clean wasm-pack artifacts
-        run: rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/nodejs/package.json packages/core/wasm/web/.gitignore packages/core/wasm/web/package.json
+        # Remove .gitignore only; preserve package.json for commonjs marker
+        run: |
+          rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/web/.gitignore
+          echo '{"type": "commonjs"}' > packages/core/wasm/nodejs/package.json
 
       - name: Install npm deps
         run: npm install
