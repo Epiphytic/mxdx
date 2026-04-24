@@ -1,4 +1,9 @@
-import { WasmMatrixClient } from './wasm/nodejs/mxdx_core_wasm.js';
+// Use createRequire to load the CommonJS WASM module — same approach as
+// index.js. Direct import avoids circular dependency (index.js re-exports
+// connectWithSession from this file).
+import { createRequire } from 'node:module';
+const _require = createRequire(import.meta.url);
+const { WasmMatrixClient } = _require('./wasm/nodejs/mxdx_core_wasm.js');
 import { CredentialStore } from './credentials.js';
 import { saveIndexedDB, restoreIndexedDB } from './persistent-indexeddb.js';
 

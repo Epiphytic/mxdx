@@ -2,11 +2,30 @@
 // In browser environments this module is not used (browser has real IndexedDB).
 export { saveIndexedDB, restoreIndexedDB } from './persistent-indexeddb.js';
 
-export * from './wasm/nodejs/mxdx_core_wasm.js';
+// wasm-pack --target nodejs emits CommonJS (exports.X = X). When the parent
+// package has "type":"module", Node.js can't ESM-import a CommonJS .js file
+// without a local package.json marking it as commonjs. Use createRequire to
+// load the WASM module reliably regardless of package.json state.
+import { createRequire } from 'node:module';
+const _require = createRequire(import.meta.url);
+const _wasm = _require('./wasm/nodejs/mxdx_core_wasm.js');
+
+// Re-export WASM bindings. Callers import from '@mxdx/core'.
+export const {
+  ShieldStateCode,
+  WasmMatrixClient,
+  create_session_task,
+  init,
+  parse_active_session,
+  parse_completed_session,
+  parse_session_result,
+  parse_worker_info,
+  sdk_version,
+  session_event_types,
+} = _wasm;
 
 // Coerce WASM onRoomEvent 'null' string → JS null at the JS/WASM boundary.
 // The WASM layer serializes None as the string 'null'; callers expect JS null.
-import { WasmMatrixClient } from './wasm/nodejs/mxdx_core_wasm.js';
 const _origOnRoomEvent = WasmMatrixClient.prototype.onRoomEvent;
 WasmMatrixClient.prototype.onRoomEvent = async function (...args) {
   const result = await _origOnRoomEvent.apply(this, args);
