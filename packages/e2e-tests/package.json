@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test tests/"
+    "test": "node --test tests/",
+    "test:playwright": "npx playwright test playwright/"
   },
   "dependencies": {
     "@mxdx/core": "*"

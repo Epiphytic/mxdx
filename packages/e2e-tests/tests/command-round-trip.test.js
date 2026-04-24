@@ -93,7 +93,7 @@ describe('E2E: Command Round-Trip', { skip: !tuwunelAvailable && 'tuwunel binary
     const requestId = crypto.randomUUID();
     await client.sendEvent(
       topology.exec_room_id,
-      'org.mxdx.command',
+      'org.mxdx.session.task',
       JSON.stringify({
         request_id: requestId,
         command: 'echo',
@@ -112,7 +112,7 @@ describe('E2E: Command Round-Trip', { skip: !tuwunelAvailable && 'tuwunel binary
       const events = JSON.parse(eventsJson);
       if (events && Array.isArray(events)) {
         for (const event of events) {
-          if (event.type === 'org.mxdx.result' && event.content?.request_id === requestId) {
+          if (event.type === 'org.mxdx.session.result' && event.content?.request_id === requestId) {
             console.log(`[e2e] Got result:`, event.content);
             assert.strictEqual(event.content.exit_code, 0, 'Exit code should be 0');
             resultFound = true;
@@ -121,7 +121,7 @@ describe('E2E: Command Round-Trip', { skip: !tuwunelAvailable && 'tuwunel binary
       }
     }
 
-    assert.ok(resultFound, 'Should receive org.mxdx.result event');
+    assert.ok(resultFound, 'Should receive org.mxdx.session.result event');
     client.free();
   });
 });

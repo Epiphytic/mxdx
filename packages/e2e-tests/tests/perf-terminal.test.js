@@ -180,7 +180,10 @@ describe('Terminal Performance: P2P vs Matrix', { skip: !tuwunelAvailable && 'tu
   });
 
   after(async () => {
-    // Stop Tuwunel first — killing the server connection prevents the WASM
+    // Free WASM clients before stopping the server to prevent stale crypto ops
+    if (launcherClient) launcherClient.free();
+    if (clientClient) clientClient.free();
+    // Stop Tuwunel — killing the server connection prevents the WASM
     // crypto layer from firing async operations that outlive the test.
     if (tuwunel) tuwunel.stop();
     // Let any in-flight WASM async work settle before node:test checks for leaks
@@ -211,7 +214,7 @@ describe('Terminal Performance: P2P vs Matrix', { skip: !tuwunelAvailable && 'tu
       const received = await transportB.onRoomEvent(dmRoomId, 'org.mxdx.terminal.data', 5);
       const t1 = performance.now();
 
-      assert.ok(received && received !== 'null', `Should receive char ${i}`);
+      assert.ok(received && received != null, `Should receive char ${i}`);
       latencies.push(t1 - t0);
     }
 
@@ -258,7 +261,7 @@ describe('Terminal Performance: P2P vs Matrix', { skip: !tuwunelAvailable && 'tu
     for (let i = 0; i < N; i++) {
       const received = await transportB.onRoomEvent(dmRoomId, 'org.mxdx.terminal.data', 10);
       receiveTimes.push(performance.now());
-      assert.ok(received && received !== 'null', `Should receive burst char ${i}`);
+      assert.ok(received && received != null, `Should receive burst char ${i}`);
     }
 
     const totalMs = performance.now() - t0;
@@ -305,7 +308,7 @@ describe('Terminal Performance: P2P vs Matrix', { skip: !tuwunelAvailable && 'tu
 
     for (let i = 0; i < N; i++) {
       const received = await transportB.onRoomEvent(dmRoomId, 'org.mxdx.terminal.data', 10);
-      assert.ok(received && received !== 'null', `Should receive payload ${i}`);
+      assert.ok(received && received != null, `Should receive payload ${i}`);
     }
 
     const totalMs = performance.now() - t0;
@@ -350,7 +353,7 @@ describe('Terminal Performance: P2P vs Matrix', { skip: !tuwunelAvailable && 'tu
       const received = await receivePromise;
       const t1 = performance.now();
 
-      assert.ok(received && received !== 'null', `Should receive Matrix event ${i}`);
+      assert.ok(received && received != null, `Should receive Matrix event ${i}`);
       latencies.push(t1 - t0);
     }
 
@@ -481,7 +484,7 @@ describe('Terminal Performance: P2P vs Matrix', { skip: !tuwunelAvailable && 'tu
       await transportA.sendEvent(dmRoomId, 'org.mxdx.terminal.data', payload);
       const received = await transportB.onRoomEvent(dmRoomId, 'org.mxdx.terminal.data', 5);
       p2pLatencies.push(performance.now() - t0);
-      assert.ok(received && received !== 'null');
+      assert.ok(received && received != null);
     }
 
     transportA.close();
@@ -505,7 +508,7 @@ describe('Terminal Performance: P2P vs Matrix', { skip: !tuwunelAvailable && 'tu
       await launcherClient.sendEvent(dmRoomId, 'org.mxdx.terminal.data', payload);
       const received = await receivePromise;
       matrixLatencies.push(performance.now() - t0);
-      assert.ok(received && received !== 'null');
+      assert.ok(received && received != null);
     }
 
     const p2pStats = stats(p2pLatencies);
@@ -618,7 +621,7 @@ describe('Terminal Performance: Public Server', { skip: !tuwunelAvailable && 'tu
       const received = await receivePromise;
       const t1 = performance.now();
 
-      if (received && received !== 'null') {
+      if (received && received != null) {
         latencies.push(t1 - t0);
       }
 

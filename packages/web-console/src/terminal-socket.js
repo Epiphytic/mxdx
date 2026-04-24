@@ -99,7 +99,7 @@ export class TerminalSocket {
           'org.mxdx.terminal.data',
           1,
         );
-        if (eventJson && eventJson !== 'null') {
+        if (eventJson != null) {
           gotData = true;
           const event = JSON.parse(eventJson);
           const content = event.content || event;

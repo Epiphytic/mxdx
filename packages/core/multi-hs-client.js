@@ -169,7 +169,7 @@ export class MultiHsClient {
 
         entry.client.onRoomEvent(roomId, type, timeoutSecs)
           .then((eventJson) => {
-            if (resolved || !eventJson || eventJson === 'null') return;
+            if (resolved || eventJson == null) return;
             try {
               const event = JSON.parse(eventJson);
               const eventId = event?.event_id;

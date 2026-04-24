@@ -152,6 +152,8 @@ jobs:
   # to collect other build signals. Phase 6 (worker p2p wiring) or a
   # follow-up cleanup bead will address whatever breaks. For now the
   # job's status is informative, not gating.
+  # Musl / Alpine cross-compile via `cross` tool.
+  # See docs/adr/2026-04-17-ci-e2e-test-fixes.md for rationale.
   musl-build:
     needs: preflight
     runs-on: ubuntu-latest
@@ -162,15 +164,10 @@ jobs:
         with:
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
-      - name: Install musl toolchain + native build deps
-        run: |
-          sudo apt-get install -y musl-tools cmake g++ pkg-config
+      - name: Install cross
+        run: cargo install cross --locked
       - name: Build mxdx-p2p for musl
-        env:
-          CC_x86_64_unknown_linux_musl: musl-gcc
-          CXX_x86_64_unknown_linux_musl: musl-g++
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-        run: cargo build -p mxdx-p2p --target x86_64-unknown-linux-musl
+        run: cross build -p mxdx-p2p --target x86_64-unknown-linux-musl
 
   # T-33: Platform matrix build-only. Confirms mxdx-p2p (which pulls in
   # vendored libdatachannel) compiles on the production targets we expect
@@ -311,6 +308,10 @@ jobs:
         run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
       - name: Build WASM (web)
         run: wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/core/wasm/web
+      - name: Fix WASM module type markers
+        run: |
+          rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/web/.gitignore
+          echo '{"type": "commonjs"}' > packages/core/wasm/nodejs/package.json
       - name: Install npm dependencies
         run: npm install
       - name: Run launcher unit tests
@@ -338,6 +339,10 @@ jobs:
         run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
       - name: Build WASM (web)
         run: wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/core/wasm/web
+      - name: Fix WASM module type markers
+        run: |
+          rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/web/.gitignore
+          echo '{"type": "commonjs"}' > packages/core/wasm/nodejs/package.json
       - name: Install npm deps
         run: npm install
       - name: Build web-console
@@ -372,6 +377,10 @@ jobs:
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
       - name: Build WASM (nodejs)
         run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
+      - name: Fix WASM module type marker
+        run: |
+          rm -f packages/core/wasm/nodejs/.gitignore
+          echo '{"type": "commonjs"}' > packages/core/wasm/nodejs/package.json
       - name: Install npm dependencies
         run: npm install
       - name: Write test credentials

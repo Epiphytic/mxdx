@@ -30,7 +30,7 @@ describe('Rust P2P Beta: Federated (ca1 <-> ca2)', {
   it('P2P establishes across federated homeservers', async () => {
     // Worker on ca2-beta (server2)
     const worker = spawnRustBinary('mxdx-worker', [
-      '--server', creds.server2.url,
+      'start', '--homeserver', creds.server2.url,
       '--username', creds.account1.username,
       '--password', creds.account1.password,
       '--p2p',
@@ -43,7 +43,7 @@ describe('Rust P2P Beta: Federated (ca1 <-> ca2)', {
 
       // Client on ca1-beta (server)
       const client = spawnRustBinary('mxdx-client', [
-        '--server', creds.server.url,
+        '--homeserver', creds.server.url,
         '--username', creds.account2.username,
         '--password', creds.account2.password,
         '--p2p',
@@ -72,7 +72,7 @@ describe('Rust P2P Beta: Federated (ca1 <-> ca2)', {
   it('Megolm decryption works on both sides of federation', async () => {
     // Worker on ca2-beta
     const worker = spawnRustBinary('mxdx-worker', [
-      '--server', creds.server2.url,
+      'start', '--homeserver', creds.server2.url,
       '--username', creds.account1.username,
       '--password', creds.account1.password,
       '--p2p',
@@ -85,7 +85,7 @@ describe('Rust P2P Beta: Federated (ca1 <-> ca2)', {
 
       // Run a multi-output command to verify bidirectional E2EE
       const client = spawnRustBinary('mxdx-client', [
-        '--server', creds.server.url,
+        '--homeserver', creds.server.url,
         '--username', creds.account2.username,
         '--password', creds.account2.password,
         '--p2p',

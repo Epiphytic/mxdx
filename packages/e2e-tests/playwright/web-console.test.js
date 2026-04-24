@@ -13,7 +13,7 @@
  * using node:test. They verify the full browser WASM + Matrix E2EE path.
  */
 import { test, expect } from '@playwright/test';
-import { TuwunelInstance } from '../src/tuwunel.js';
+import { TuwunelInstance } from '../../src/tuwunel.js';
 import { WasmMatrixClient } from '@mxdx/core';
 
 const tuwunelAvailable = TuwunelInstance.isAvailable();

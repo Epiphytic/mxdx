@@ -1,4 +1,13 @@
 import init, { WasmMatrixClient } from '../../core/wasm/web/mxdx_core_wasm.js';
+
+// Coerce WASM onRoomEvent 'null' string → JS null at the JS/WASM boundary.
+// The WASM layer serializes None as the string 'null'; callers expect JS null.
+const _origOnRoomEvent = WasmMatrixClient.prototype.onRoomEvent;
+WasmMatrixClient.prototype.onRoomEvent = async function (...args) {
+  const result = await _origOnRoomEvent.apply(this, args);
+  return result === 'null' ? null : result;
+};
+
 import { setupAuth } from './auth.js';
 import { setupDashboard, stopDashboardRefresh } from './dashboard.js';
 import { setupTerminalView, reconnectTerminalView } from './terminal-view.js';

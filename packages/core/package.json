@@ -6,7 +6,7 @@
   "main": "index.js",
   "scripts": {
     "build:wasm": "wasm-pack build ../../crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs && wasm-pack build ../../crates/mxdx-core-wasm --target web --out-dir ../../packages/core/wasm/web",
-    "prepack": "[ -f wasm/nodejs/mxdx_core_wasm.js ] || npm run build:wasm; rm -f wasm/nodejs/.gitignore wasm/nodejs/package.json wasm/web/.gitignore wasm/web/package.json"
+    "prepack": "[ -f wasm/nodejs/mxdx_core_wasm.js ] || npm run build:wasm; rm -f wasm/nodejs/.gitignore wasm/web/.gitignore wasm/web/package.json; echo '{\"type\": \"commonjs\"}' > wasm/nodejs/package.json"
   },
   "files": [
     "wasm/",

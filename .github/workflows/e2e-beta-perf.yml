@@ -42,6 +42,11 @@ jobs:
       - name: Build WASM (nodejs)
         run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
 
+      - name: Fix WASM module type marker
+        run: |
+          rm -f packages/core/wasm/nodejs/.gitignore
+          echo '{"type": "commonjs"}' > packages/core/wasm/nodejs/package.json
+
       - name: Install npm deps
         run: npm install
 

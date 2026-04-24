@@ -79,7 +79,7 @@ describe('Rust P2P Beta: Performance Gate', {
     // Measure a simple exec command latency as a proxy for handshake + keystroke RTT
     const { durationMs } = await measure(async () => {
       const worker = spawnRustBinary('mxdx-worker', [
-        '--server', creds.server.url,
+        'start', '--homeserver', creds.server.url,
         '--username', creds.account1.username,
         '--password', creds.account1.password,
         '--p2p',
@@ -89,7 +89,7 @@ describe('Rust P2P Beta: Performance Gate', {
         await worker.waitForOutput('worker ready', 30_000);
 
         const client = spawnRustBinary('mxdx-client', [
-          '--server', creds.server.url,
+          '--homeserver', creds.server.url,
           '--username', creds.account2.username,
           '--password', creds.account2.password,
           '--p2p',
@@ -126,7 +126,7 @@ describe('Rust P2P Beta: Performance Gate', {
   }, async () => {
     const { durationMs } = await measure(async () => {
       const worker = spawnRustBinary('mxdx-worker', [
-        '--server', creds.server2.url,
+        'start', '--homeserver', creds.server2.url,
         '--username', creds.account1.username,
         '--password', creds.account1.password,
         '--p2p',
@@ -136,7 +136,7 @@ describe('Rust P2P Beta: Performance Gate', {
         await worker.waitForOutput('worker ready', 30_000);
 
         const client = spawnRustBinary('mxdx-client', [
-          '--server', creds.server.url,
+          '--homeserver', creds.server.url,
           '--username', creds.account2.username,
           '--password', creds.account2.password,
           '--p2p',

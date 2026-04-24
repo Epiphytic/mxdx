@@ -50,7 +50,7 @@ export async function startInteractiveSession(client, topology, options = {}) {
     30,
   );
 
-  if (!responseJson || responseJson === 'null') {
+  if (responseJson == null) {
     throw new Error('Timed out waiting for interactive session response');
   }
 

@@ -106,7 +106,7 @@ describe('Interactive Session: DM Room & Terminal I/O', { skip: !tuwunelAvailabl
       10,
     );
 
-    assert.ok(eventJson && eventJson !== 'null', 'Should receive the event');
+    assert.ok(eventJson && eventJson != null, 'Should receive the event');
     const event = JSON.parse(eventJson);
     assert.strictEqual(event.content.status, 'started');
     assert.strictEqual(event.content.room_id, '!fake:localhost');
@@ -164,7 +164,7 @@ describe('Interactive Session: DM Room & Terminal I/O', { skip: !tuwunelAvailabl
       15,
     );
 
-    assert.ok(eventJson && eventJson !== 'null', 'Should receive terminal data event');
+    assert.ok(eventJson && eventJson != null, 'Should receive terminal data event');
     const event = JSON.parse(eventJson);
     const decoded = Buffer.from(event.content.data, 'base64').toString();
     assert.strictEqual(decoded, 'Hello from terminal!');
@@ -194,7 +194,7 @@ describe('Interactive Session: DM Room & Terminal I/O', { skip: !tuwunelAvailabl
       15,
     );
 
-    assert.ok(eventJson && eventJson !== 'null', 'Should receive resize event');
+    assert.ok(eventJson && eventJson != null, 'Should receive resize event');
     const event = JSON.parse(eventJson);
     assert.strictEqual(event.content.cols, 120);
     assert.strictEqual(event.content.rows, 40);

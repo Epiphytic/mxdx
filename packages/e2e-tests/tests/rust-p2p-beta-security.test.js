@@ -35,7 +35,7 @@ describe('Rust P2P Beta: Security Suite', {
   it('worker rejects connections without proper verification', async () => {
     // Start worker with P2P enabled
     const worker = spawnRustBinary('mxdx-worker', [
-      '--server', creds.server.url,
+      'start', '--homeserver', creds.server.url,
       '--username', creds.account1.username,
       '--password', creds.account1.password,
       '--p2p',
@@ -48,7 +48,7 @@ describe('Rust P2P Beta: Security Suite', {
 
       // Run a normal client to verify the worker works at all
       const client = spawnRustBinary('mxdx-client', [
-        '--server', creds.server.url,
+        '--homeserver', creds.server.url,
         '--username', creds.account2.username,
         '--password', creds.account2.password,
         '--p2p',
@@ -72,7 +72,7 @@ describe('Rust P2P Beta: Security Suite', {
   it('no plaintext events visible in room timeline', async () => {
     // Start worker and client, then check room events for plaintext leaks
     const worker = spawnRustBinary('mxdx-worker', [
-      '--server', creds.server.url,
+      'start', '--homeserver', creds.server.url,
       '--username', creds.account1.username,
       '--password', creds.account1.password,
       '--p2p',
@@ -86,7 +86,7 @@ describe('Rust P2P Beta: Security Suite', {
       // Send a unique payload that we'll look for in cleartext
       const marker = `SECURITY_MARKER_${Date.now()}`;
       const client = spawnRustBinary('mxdx-client', [
-        '--server', creds.server.url,
+        '--homeserver', creds.server.url,
         '--username', creds.account2.username,
         '--password', creds.account2.password,
         '--p2p',

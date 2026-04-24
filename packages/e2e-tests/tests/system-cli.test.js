@@ -295,7 +295,7 @@ describe('G.2T: CLI Interactive Full System E2E', { skip: !tuwunelAvailable && '
       'org.mxdx.terminal.session',
       15,
     );
-    assert.ok(responseJson && responseJson !== 'null', 'Should receive session response');
+    assert.ok(responseJson && responseJson != null, 'Should receive session response');
     const response = JSON.parse(responseJson);
     assert.strictEqual(response.content.status, 'started');
     assert.strictEqual(response.content.room_id, dmRoomId);
@@ -334,7 +334,7 @@ describe('G.2T: CLI Interactive Full System E2E', { skip: !tuwunelAvailable && '
       'org.mxdx.terminal.data',
       15,
     );
-    assert.ok(clientDataJson && clientDataJson !== 'null', 'Launcher should receive client data');
+    assert.ok(clientDataJson && clientDataJson != null, 'Launcher should receive client data');
     const clientData = JSON.parse(clientDataJson);
     const decoded = Buffer.from(clientData.content.data, 'base64').toString();
     assert.strictEqual(decoded, 'ls\n');
@@ -358,7 +358,7 @@ describe('G.2T: CLI Interactive Full System E2E', { skip: !tuwunelAvailable && '
       'org.mxdx.terminal.data',
       15,
     );
-    assert.ok(launcherDataJson && launcherDataJson !== 'null', 'Client should receive PTY output');
+    assert.ok(launcherDataJson && launcherDataJson != null, 'Client should receive PTY output');
     const launcherData = JSON.parse(launcherDataJson);
     const ptyDecoded = Buffer.from(launcherData.content.data, 'base64').toString();
     assert.strictEqual(ptyDecoded, ptyOutput);
@@ -386,7 +386,7 @@ describe('G.2T: CLI Interactive Full System E2E', { skip: !tuwunelAvailable && '
       'org.mxdx.terminal.resize',
       15,
     );
-    assert.ok(resizeJson && resizeJson !== 'null', 'Launcher should receive resize');
+    assert.ok(resizeJson && resizeJson != null, 'Launcher should receive resize');
     const resize = JSON.parse(resizeJson);
     assert.strictEqual(resize.content.cols, 200);
     assert.strictEqual(resize.content.rows, 50);
@@ -428,7 +428,7 @@ describe('G.2T: CLI Interactive Full System E2E', { skip: !tuwunelAvailable && '
       'org.mxdx.terminal.session',
       15,
     );
-    assert.ok(endJson && endJson !== 'null', 'Should receive session end event');
+    assert.ok(endJson && endJson != null, 'Should receive session end event');
     const end = JSON.parse(endJson);
     assert.strictEqual(end.content.status, 'ended');
     console.log(`[interactive-sys] Session end event verified`);

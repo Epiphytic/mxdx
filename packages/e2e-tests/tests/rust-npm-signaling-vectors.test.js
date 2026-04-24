@@ -136,7 +136,7 @@ function mockSignaling() {
           // does `JSON.stringify(content)` before calling sendEvent).
           sent.push({ type, contentJson });
         },
-        onRoomEvent: async () => 'null',
+        onRoomEvent: async () => null,
       },
       '!dm:ex',
       '@me:ex',

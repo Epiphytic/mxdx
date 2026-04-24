@@ -93,6 +93,34 @@ describe('P2P Transport: Public Server Signaling', { timeout: 180000 }, () => {
     await client2.syncOnce();
     await client1.syncOnce();
     console.log('[p2p-pub] Both clients in DM room');
+
+    // Poll-based key exchange wait: sync both sides until encryption is ready.
+    // On public servers, Megolm key exchange can take several sync cycles.
+    const keDeadline = Date.now() + 30000;
+    let keReady = false;
+    while (Date.now() < keDeadline && !keReady) {
+      await client1.syncOnce();
+      await client2.syncOnce();
+      try {
+        // Send a test event from client1 and verify client2 can decrypt it
+        await client1.sendEvent(dmRoomId, 'm.room.message', JSON.stringify({
+          msgtype: 'm.text', body: 'key-exchange-probe',
+        }));
+        await sleep(1000);
+        await client2.syncOnce();
+        const probeJson = await client2.onRoomEvent(dmRoomId, 'm.room.message', 5);
+        if (probeJson != null) {
+          keReady = true;
+          console.log('[p2p-pub] Key exchange verified — encryption ready');
+        }
+      } catch {
+        // Key exchange not yet complete, retry
+        await sleep(2000);
+      }
+    }
+    if (!keReady) {
+      console.log('[p2p-pub] WARNING: key exchange probe did not confirm — proceeding anyway');
+    }
   });
 
   after(() => {
@@ -132,7 +160,7 @@ describe('P2P Transport: Public Server Signaling', { timeout: 180000 }, () => {
     await sleep(2000);
     await client2.syncOnce();
     const inviteJson = await client2.onRoomEvent(dmRoomId, 'm.call.invite', 30);
-    assert.ok(inviteJson && inviteJson !== 'null', 'Account2 should receive m.call.invite');
+    assert.ok(inviteJson != null, 'Account2 should receive m.call.invite');
 
     const invite = JSON.parse(inviteJson);
     const inviteContent = invite.content || invite;
@@ -149,7 +177,7 @@ describe('P2P Transport: Public Server Signaling', { timeout: 180000 }, () => {
     await sleep(2000);
     await client1.syncOnce();
     const answerJson = await client1.onRoomEvent(dmRoomId, 'm.call.answer', 30);
-    assert.ok(answerJson && answerJson !== 'null', 'Account1 should receive m.call.answer');
+    assert.ok(answerJson != null, 'Account1 should receive m.call.answer');
 
     const answer = JSON.parse(answerJson);
     const answerContent = answer.content || answer;
@@ -185,7 +213,7 @@ describe('P2P Transport: Public Server Signaling', { timeout: 180000 }, () => {
     await sleep(2000);
     await client2.syncOnce();
     const candJson = await client2.onRoomEvent(dmRoomId, 'm.call.candidates', 30);
-    assert.ok(candJson && candJson !== 'null', 'Account2 should receive m.call.candidates');
+    assert.ok(candJson != null, 'Account2 should receive m.call.candidates');
 
     const candEvent = JSON.parse(candJson);
     const candContent = candEvent.content || candEvent;
@@ -215,7 +243,7 @@ describe('P2P Transport: Public Server Signaling', { timeout: 180000 }, () => {
     await sleep(2000);
     await client2.syncOnce();
     const hangupJson = await client2.onRoomEvent(dmRoomId, 'm.call.hangup', 30);
-    assert.ok(hangupJson && hangupJson !== 'null', 'Account2 should receive m.call.hangup');
+    assert.ok(hangupJson != null, 'Account2 should receive m.call.hangup');
 
     const hangup = JSON.parse(hangupJson);
     const hangupContent = hangup.content || hangup;

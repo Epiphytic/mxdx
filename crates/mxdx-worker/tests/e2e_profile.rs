@@ -1733,11 +1733,12 @@ async fn phase_6(creds: &TestCreds) -> Result<()> {
         let config_b_dir = persistent_test_config_dir("t42-b");
         write_test_config(&config_b_dir, creds, explicit_room);
 
+        let log_offset = std::fs::metadata(worker_log_path()).map(|m| m.len()).unwrap_or(0);
         let mut worker_b = start_worker_with_room(
             &creds.server_url, &creds.worker_user, &creds.worker_pass, explicit_room, &auth_user,
             &store_b, &kc_b,
         );
-        tokio::time::sleep(Duration::from_secs(20)).await;
+        wait_worker_ready(Duration::from_secs(120), log_offset).await.expect("t42: second worker startup timed out");
 
         let out_b = run_client_daemon(
             &config_b_dir,

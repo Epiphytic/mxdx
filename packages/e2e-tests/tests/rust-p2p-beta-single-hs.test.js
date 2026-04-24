@@ -31,7 +31,7 @@ describe('Rust P2P Beta: Single-HS (ca1)', {
   it('worker and client establish P2P connection on ca1-beta', async () => {
     // Spawn worker with P2P enabled
     const worker = spawnRustBinary('mxdx-worker', [
-      '--server', creds.server.url,
+      'start', '--homeserver', creds.server.url,
       '--username', creds.account1.username,
       '--password', creds.account1.password,
       '--p2p',
@@ -45,7 +45,7 @@ describe('Rust P2P Beta: Single-HS (ca1)', {
 
       // Spawn client
       const client = spawnRustBinary('mxdx-client', [
-        '--server', creds.server.url,
+        '--homeserver', creds.server.url,
         '--username', creds.account2.username,
         '--password', creds.account2.password,
         '--p2p',
@@ -82,7 +82,7 @@ describe('Rust P2P Beta: Single-HS (ca1)', {
   it('falls back to Matrix when P2P channel is unavailable', async () => {
     // Run client without --p2p to verify Matrix fallback works
     const worker = spawnRustBinary('mxdx-worker', [
-      '--server', creds.server.url,
+      'start', '--homeserver', creds.server.url,
       '--username', creds.account1.username,
       '--password', creds.account1.password,
     ]);
@@ -91,7 +91,7 @@ describe('Rust P2P Beta: Single-HS (ca1)', {
       await worker.waitForOutput('worker ready', 30_000);
 
       const client = spawnRustBinary('mxdx-client', [
-        '--server', creds.server.url,
+        '--homeserver', creds.server.url,
         '--username', creds.account2.username,
         '--password', creds.account2.password,
         'exec', 'echo', 'matrix-fallback-test',
@@ -115,7 +115,7 @@ describe('Rust P2P Beta: Single-HS (ca1)', {
   it('glare resolution: both sides can initiate without deadlock', async () => {
     // Start two workers on the same server to test glare
     const worker1 = spawnRustBinary('mxdx-worker', [
-      '--server', creds.server.url,
+      'start', '--homeserver', creds.server.url,
       '--username', creds.account1.username,
       '--password', creds.account1.password,
       '--p2p',
@@ -128,7 +128,7 @@ describe('Rust P2P Beta: Single-HS (ca1)', {
 
       // Run a command that will exercise the P2P path
       const client = spawnRustBinary('mxdx-client', [
-        '--server', creds.server.url,
+        '--homeserver', creds.server.url,
         '--username', creds.account2.username,
         '--password', creds.account2.password,
         '--p2p',

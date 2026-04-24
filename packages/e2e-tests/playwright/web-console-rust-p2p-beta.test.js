@@ -20,7 +20,7 @@ import { spawn } from 'node:child_process';
 import path from 'node:path';
 import fs from 'node:fs';
 
-const ROOT = path.resolve(import.meta.dirname, '..', '..', '..');
+const ROOT = path.resolve(import.meta.dirname, '..', '..', '..', '..');
 const CREDS_FILE = path.join(ROOT, 'test-credentials.toml');
 const WEB_CONSOLE_DIR = path.join(ROOT, 'packages', 'web-console');
 

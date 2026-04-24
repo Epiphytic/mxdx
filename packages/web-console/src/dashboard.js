@@ -160,7 +160,7 @@ async function fetchSessions(client, launcher) {
     const sessionsJson = await client.onRoomEvent(
       launcher.exec_room_id, 'org.mxdx.terminal.sessions', 5,
     );
-    if (sessionsJson && sessionsJson !== 'null') {
+    if (sessionsJson != null) {
       const sessionsResponse = JSON.parse(sessionsJson);
       const sessionsContent = sessionsResponse.content || sessionsResponse;
       const sessions = sessionsContent.sessions || [];
