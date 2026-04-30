@@ -4,8 +4,14 @@
  * {rust|npm client} × {rust worker|npm launcher} × {same-hs|federated}
  *
  * Parameterized via combinations.forEach to prevent N×M drift.
- * Per ADR 2026-04-29 Pillar 2, req 7/10: all 8 combinations must run;
- * 6 are skipped pending Phase 2 wiring (T-2.3, T-2.4, T-2.5, T-2.6).
+ * Per ADR 2026-04-29 Pillar 2, req 7/10: all 8 combinations must run.
+ *
+ * MSC4362 traceability: every Matrix event in these tests (exec commands,
+ * session output) MUST be encrypted on the wire under the
+ * experimental-encrypted-state-events extension. Both Rust (matrix-sdk
+ * with msrv 0.16 + experimental-encrypted-state-events feature) and npm
+ * (WasmMatrixClient via mxdx-core-wasm with MSC4362 enabled) enforce this.
+ * See: docs/adr/2026-04-29-rust-npm-binary-parity.md Pillar 2 + CLAUDE.md.
  */
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -13,6 +19,7 @@ import {
   loadBetaCredentials,
   skipIfNoFederatedCredentials,
   spawnRustBinary,
+  spawnNpmBinary,
 } from '../src/beta.js';
 
 const skipReason = skipIfNoFederatedCredentials();
@@ -25,8 +32,10 @@ const COMBINATIONS = [
   { id: 't2b', client_runtime: 'npm', worker_runtime: 'rust', hs_topology: 'federated' },
   { id: 't3a', client_runtime: 'rust', worker_runtime: 'npm', hs_topology: 'same-hs' },
   { id: 't3b', client_runtime: 'rust', worker_runtime: 'npm', hs_topology: 'federated' },
-  { id: 't4a', client_runtime: 'npm', worker_runtime: 'npm', hs_topology: 'same-hs' },
-  { id: 't4b', client_runtime: 'npm', worker_runtime: 'npm', hs_topology: 'federated' },
+  // advisory: not yet blocking (P2P quarantine — see wire-format-parity-gate-policy.md)
+  // Security doc: docs/reviews/security/2026-04-29-p2p-cross-runtime-dtls-verification.md
+  { id: 't4a', client_runtime: 'npm', worker_runtime: 'npm', hs_topology: 'same-hs', advisory: true },
+  { id: 't4b', client_runtime: 'npm', worker_runtime: 'npm', hs_topology: 'federated', advisory: true },
 ];
 
 // Per-combination env-var overrides for debugging
@@ -35,16 +44,8 @@ function isEnvSkipped({ client_runtime, worker_runtime }) {
   return process.env[key] === '1' ? `${key}=1` : null;
 }
 
-// npm subprocess wiring is pending T-2.4 (Phase 2)
-function npmNotWired({ worker_runtime, client_runtime }) {
-  if (worker_runtime === 'npm' || client_runtime === 'npm') {
-    return 'npm launcher/client subprocess not yet wired (pending T-2.4)';
-  }
-  return null;
-}
-
 function skipFor(combo) {
-  return isEnvSkipped(combo) ?? npmNotWired(combo) ?? (skipReason || undefined);
+  return isEnvSkipped(combo) ?? (skipReason || undefined);
 }
 
 describe('Rust ↔ npm Interop Beta', {
@@ -57,17 +58,17 @@ describe('Rust ↔ npm Interop Beta', {
     creds = loadBetaCredentials();
   });
 
-  COMBINATIONS.forEach(({ id, client_runtime, worker_runtime, hs_topology }) => {
-    const label = `${id}: ${client_runtime} client → ${worker_runtime} worker (${hs_topology})`;
+  COMBINATIONS.forEach(({ id, client_runtime, worker_runtime, hs_topology, advisory }) => {
+    const label = `${id}: ${client_runtime} client → ${worker_runtime} worker (${hs_topology})${advisory ? ' [advisory]' : ''}`;
     const skipMsg = skipFor({ client_runtime, worker_runtime });
 
     it(label, { skip: skipMsg }, async () => {
+      const workerServer = hs_topology === 'federated' ? creds.server2.url : creds.server.url;
+      const clientServer = creds.server.url;
+      const timeout = hs_topology === 'federated' ? 90_000 : 60_000;
+
       // -- Rust worker, Rust client (t1a / t1b) --
       if (worker_runtime === 'rust' && client_runtime === 'rust') {
-        const workerServer = hs_topology === 'federated' ? creds.server2.url : creds.server.url;
-        const clientServer = creds.server.url;
-
-        // --p2p flag removed pending T-2.3 (fix clap-parse bug on mxdx-worker)
         const worker = spawnRustBinary('mxdx-worker', [
           'start', '--homeserver', workerServer,
           '--username', creds.account1.username,
@@ -85,9 +86,7 @@ describe('Rust ↔ npm Interop Beta', {
           ]);
 
           try {
-            const { code, stdout } = await client.waitForExit(
-              hs_topology === 'federated' ? 90_000 : 60_000,
-            );
+            const { code, stdout } = await client.waitForExit(timeout);
             assert.equal(code, 0);
             assert.ok(stdout.includes(`interop-${id}`));
           } finally {
@@ -99,9 +98,102 @@ describe('Rust ↔ npm Interop Beta', {
         return;
       }
 
-      // npm combinations are skipped via skipFor() above; this body is unreachable
-      // until T-2.4/T-2.5/T-2.6 wire subprocess spawning in Phase 2.
-      assert.fail(`Combination ${id} reached implementation body without npm wiring`);
+      // -- npm client → Rust worker (t2a / t2b) --
+      if (worker_runtime === 'rust' && client_runtime === 'npm') {
+        const worker = spawnRustBinary('mxdx-worker', [
+          'start', '--homeserver', workerServer,
+          '--username', creds.account1.username,
+          '--password', creds.account1.password,
+        ]);
+
+        try {
+          await worker.waitForOutput('worker ready', 30_000);
+
+          const client = spawnNpmBinary('client', [
+            '--server', clientServer,
+            '--username', creds.account2.username,
+            '--password', creds.account2.password,
+            'exec', creds.account1.username, 'echo', `interop-${id}`,
+          ]);
+
+          try {
+            const { code, stdout } = await client.waitForExit(timeout);
+            assert.equal(code, 0, `npm client should exit 0, got ${code}\nstdout: ${stdout}\nstderr: ${client.stderr}`);
+            assert.ok(stdout.includes(`interop-${id}`), `stdout should contain interop-${id}, got: ${stdout}`);
+          } finally {
+            client.kill();
+          }
+        } finally {
+          worker.kill();
+        }
+        return;
+      }
+
+      // -- Rust client → npm launcher (t3a / t3b) --
+      if (worker_runtime === 'npm' && client_runtime === 'rust') {
+        const launcher = spawnNpmBinary('launcher', [
+          '--servers', workerServer,
+          '--username', creds.account1.username,
+          '--password', creds.account1.password,
+        ]);
+
+        try {
+          await launcher.waitForOutput('worker ready', 30_000);
+
+          const client = spawnRustBinary('mxdx-client', [
+            '--homeserver', clientServer,
+            '--username', creds.account2.username,
+            '--password', creds.account2.password,
+            'exec', 'echo', `interop-${id}`,
+          ]);
+
+          try {
+            const { code, stdout } = await client.waitForExit(timeout);
+            assert.equal(code, 0, `Rust client should exit 0, got ${code}\nstdout: ${stdout}\nstderr: ${client.stderr}`);
+            assert.ok(stdout.includes(`interop-${id}`), `stdout should contain interop-${id}, got: ${stdout}`);
+          } finally {
+            client.kill();
+          }
+        } finally {
+          launcher.kill();
+        }
+        return;
+      }
+
+      // -- npm client → npm launcher (t4a / t4b) --
+      // advisory: not yet blocking — P2P combinations pending security verification
+      // Security doc: docs/reviews/security/2026-04-29-p2p-cross-runtime-dtls-verification.md
+      if (worker_runtime === 'npm' && client_runtime === 'npm') {
+        const launcher = spawnNpmBinary('launcher', [
+          '--servers', workerServer,
+          '--username', creds.account1.username,
+          '--password', creds.account1.password,
+        ]);
+
+        try {
+          await launcher.waitForOutput('worker ready', 30_000);
+
+          const client = spawnNpmBinary('client', [
+            '--server', clientServer,
+            '--username', creds.account2.username,
+            '--password', creds.account2.password,
+            'exec', creds.account1.username, 'echo', `interop-${id}`,
+          ]);
+
+          try {
+            const { code, stdout } = await client.waitForExit(timeout);
+            assert.equal(code, 0, `npm client should exit 0, got ${code}\nstdout: ${stdout}\nstderr: ${client.stderr}`);
+            assert.ok(stdout.includes(`interop-${id}`), `stdout should contain interop-${id}, got: ${stdout}`);
+          } finally {
+            client.kill();
+          }
+        } finally {
+          launcher.kill();
+        }
+        return;
+      }
+
+      assert.fail(`Combination ${id} has unhandled runtime combination: client=${client_runtime} worker=${worker_runtime}`);
     });
   });
 });

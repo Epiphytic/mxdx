@@ -189,6 +189,80 @@ export function spawnRustBinary(binary, args = [], opts = {}) {
 }
 
 /**
+ * Spawn an npm binary (mxdx-launcher or mxdx-client) as a Node.js subprocess.
+ * Returns the same interface as spawnRustBinary: { proc, stdout, stderr, waitForExit, waitForOutput, kill }.
+ *
+ * @param {'launcher'|'client'} binary - Which npm binary to spawn
+ * @param {string[]} args - Command-line arguments
+ * @param {object} opts - { env, cwd, timeout }
+ */
+export function spawnNpmBinary(binary, args = [], opts = {}) {
+  const binMap = {
+    launcher: path.join(REPO_ROOT, 'packages', 'launcher', 'bin', 'mxdx-launcher.js'),
+    client: path.join(REPO_ROOT, 'packages', 'client', 'bin', 'mxdx-client.js'),
+  };
+  const binPath = binMap[binary];
+  if (!binPath) {
+    throw new Error(`Unknown npm binary '${binary}'. Valid values: ${Object.keys(binMap).join(', ')}`);
+  }
+  if (!fs.existsSync(binPath)) {
+    throw new Error(`${binary} not found at ${binPath}.`);
+  }
+
+  const env = { ...process.env, ...opts.env };
+  const proc = spawn(process.execPath, [binPath, ...args], {
+    env,
+    cwd: opts.cwd || REPO_ROOT,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  let stdoutBuf = '';
+  let stderrBuf = '';
+  proc.stdout.on('data', (d) => { stdoutBuf += d.toString(); });
+  proc.stderr.on('data', (d) => { stderrBuf += d.toString(); });
+
+  const waitForExit = (timeoutMs = 30000) =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        proc.kill('SIGTERM');
+        reject(new Error(`npm ${binary} did not exit within ${timeoutMs}ms`));
+      }, timeoutMs);
+      proc.on('exit', (code) => {
+        clearTimeout(timer);
+        resolve({ code, stdout: stdoutBuf, stderr: stderrBuf });
+      });
+    });
+
+  const waitForOutput = (pattern, timeoutMs = 15000) =>
+    new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error(
+          `npm ${binary}: pattern "${pattern}" not found in output within ${timeoutMs}ms.\n` +
+          `stdout: ${stdoutBuf.slice(-500)}\nstderr: ${stderrBuf.slice(-500)}`,
+        ));
+      }, timeoutMs);
+      const check = () => {
+        if (stdoutBuf.includes(pattern) || stderrBuf.includes(pattern)) {
+          clearTimeout(timer);
+          resolve();
+        } else {
+          setTimeout(check, 50);
+        }
+      };
+      check();
+    });
+
+  return {
+    proc,
+    get stdout() { return stdoutBuf; },
+    get stderr() { return stderrBuf; },
+    waitForExit,
+    waitForOutput,
+    kill: (signal = 'SIGTERM') => proc.kill(signal),
+  };
+}
+
+/**
  * Sleep for the given number of milliseconds.
  */
 export function sleep(ms) {
