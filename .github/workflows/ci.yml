@@ -302,7 +302,10 @@ jobs:
         with:
           node-version: "22"
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md: wasm-pack MUST be pinned to a
+        # specific version matching the wasm-bindgen pin (=0.2.114) in mxdx-core-wasm/Cargo.toml.
+        # ADR amendment required to upgrade either version.
+        run: cargo install wasm-pack --version 0.14.0 --locked
       # Tuwunel not installed — npm E2E tests that need it will skip gracefully
       - name: Build WASM (nodejs)
         run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
@@ -353,7 +356,10 @@ jobs:
         with:
           node-version: "22"
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md: wasm-pack MUST be pinned to a
+        # specific version matching the wasm-bindgen pin (=0.2.114) in mxdx-core-wasm/Cargo.toml.
+        # ADR amendment required to upgrade either version.
+        run: cargo install wasm-pack --version 0.14.0 --locked
       - name: Build WASM (nodejs)
         run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
       - name: Build WASM (web)
@@ -401,7 +407,10 @@ jobs:
       - name: Install system deps
         run: sudo apt-get install -y libsqlite3-dev libssl-dev tmux
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md: wasm-pack MUST be pinned to a
+        # specific version matching the wasm-bindgen pin (=0.2.114) in mxdx-core-wasm/Cargo.toml.
+        # ADR amendment required to upgrade either version.
+        run: cargo install wasm-pack --version 0.14.0 --locked
       - name: Build Rust binaries (release)
         run: cargo build --release -p mxdx-worker -p mxdx-client
       - name: Build WASM (nodejs)
@@ -459,7 +468,10 @@ jobs:
       - name: Install system deps
         run: sudo apt-get install -y libsqlite3-dev libssl-dev tmux
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md: wasm-pack MUST be pinned to a
+        # specific version matching the wasm-bindgen pin (=0.2.114) in mxdx-core-wasm/Cargo.toml.
+        # ADR amendment required to upgrade either version.
+        run: cargo install wasm-pack --version 0.14.0 --locked
       - name: Build WASM (nodejs)
         run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
       - name: Build WASM (web)
@@ -509,7 +521,10 @@ jobs:
         with:
           node-version: "22"
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md: wasm-pack MUST be pinned to a
+        # specific version matching the wasm-bindgen pin (=0.2.114) in mxdx-core-wasm/Cargo.toml.
+        # ADR amendment required to upgrade either version.
+        run: cargo install wasm-pack --version 0.14.0 --locked
       - name: Build WASM (nodejs)
         run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
       - name: Fix WASM module type marker
@@ -550,7 +565,10 @@ jobs:
         run: sudo apt-get install -y libsqlite3-dev libssl-dev tmux
 
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md: wasm-pack MUST be pinned to a
+        # specific version matching the wasm-bindgen pin (=0.2.114) in mxdx-core-wasm/Cargo.toml.
+        # ADR amendment required to upgrade either version.
+        run: cargo install wasm-pack --version 0.14.0 --locked
 
       - name: Write test credentials
         run: echo "$TEST_CREDENTIALS_TOML" > test-credentials.toml
