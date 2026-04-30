@@ -13,8 +13,10 @@ const _wasm = _require('./wasm/nodejs/mxdx_core_wasm.js');
 // Re-export WASM bindings. Callers import from '@mxdx/core'.
 export const {
   ShieldStateCode,
+  SessionTransportManager,
   WasmBatchedSender,
   WasmMatrixClient,
+  buildTelemetryPayload,
   compressTerminalData,
   create_session_task,
   init,

@@ -2082,3 +2082,267 @@ impl WasmBatchedSender {
         self.buffer.len()
     }
 }
+
+// ── Telemetry payload construction (T-4.4) ───────────────────────────────────
+//
+// ADR docs/adr/2026-04-29-rust-npm-binary-parity.md req 13, 14, 15
+// JS equivalent: packages/launcher/src/runtime.js::LauncherRuntime.#postTelemetry
+
+/// Build a telemetry payload JSON string from OS-supplied values.
+///
+/// OS metric collection (os.hostname, os.cpus, etc.) MUST remain in JS.
+/// This function constructs and serialises the payload — the Matrix send call
+/// stays in JS via `WasmMatrixClient.sendStateEvent`.
+///
+/// # Arguments
+/// - `level`: `"full"` or `"summary"` (default `"full"` when empty/null)
+/// - `hostname`, `platform`, `arch`: always included
+/// - `cpus`, `total_memory_mb`, `free_memory_mb`, `uptime_secs`: full-level only
+/// - `tmux_available`, `tmux_version`: tmux probe results from JS
+/// - `session_persistence`: computed in JS (`useTmux` policy + tmux probe)
+/// - `p2p_enabled`: whether P2P is enabled
+/// - `p2p_internal_ips_json`: JSON array string of internal IPs, or empty string
+/// - `preferred_server`, `preferred_identity`, `accounts_json`, `server_health_json`:
+///   multi-homeserver fields; empty strings omit them
+/// - `status`: `"online"` or `"offline"`
+/// - `heartbeat_interval_ms`: telemetry interval in milliseconds
+#[wasm_bindgen(js_name = "buildTelemetryPayload")]
+pub fn build_telemetry_payload(
+    level: &str,
+    hostname: &str,
+    platform: &str,
+    arch: &str,
+    cpus: u32,
+    total_memory_mb: u32,
+    free_memory_mb: u32,
+    uptime_secs: u32,
+    tmux_available: bool,
+    tmux_version: &str,
+    session_persistence: bool,
+    p2p_enabled: bool,
+    p2p_internal_ips_json: &str,
+    preferred_server: &str,
+    preferred_identity: &str,
+    accounts_json: &str,
+    server_health_json: &str,
+    status: &str,
+    heartbeat_interval_ms: u32,
+) -> Result<String, JsValue> {
+    let effective_level = if level.is_empty() || level == "full" { "full" } else { level };
+    let mut payload = serde_json::Map::new();
+
+    payload.insert("timestamp".to_string(), serde_json::Value::String(
+        js_sys::Date::new_0().to_iso_string().as_string().unwrap_or_default(),
+    ));
+    payload.insert("heartbeat_interval_ms".to_string(), serde_json::Value::Number(heartbeat_interval_ms.into()));
+    payload.insert("hostname".to_string(), serde_json::Value::String(hostname.to_string()));
+    payload.insert("platform".to_string(), serde_json::Value::String(platform.to_string()));
+    payload.insert("arch".to_string(), serde_json::Value::String(arch.to_string()));
+
+    if effective_level == "full" {
+        payload.insert("cpus".to_string(), serde_json::Value::Number(cpus.into()));
+        payload.insert("total_memory_mb".to_string(), serde_json::Value::Number(total_memory_mb.into()));
+        payload.insert("free_memory_mb".to_string(), serde_json::Value::Number(free_memory_mb.into()));
+        payload.insert("uptime_secs".to_string(), serde_json::Value::Number(uptime_secs.into()));
+    }
+
+    payload.insert("tmux_available".to_string(), serde_json::Value::Bool(tmux_available));
+    if !tmux_version.is_empty() {
+        payload.insert("tmux_version".to_string(), serde_json::Value::String(tmux_version.to_string()));
+    }
+    payload.insert("session_persistence".to_string(), serde_json::Value::Bool(session_persistence));
+
+    let mut p2p_obj = serde_json::Map::new();
+    p2p_obj.insert("enabled".to_string(), serde_json::Value::Bool(p2p_enabled));
+    if !p2p_internal_ips_json.is_empty() {
+        let ips: serde_json::Value = serde_json::from_str(p2p_internal_ips_json)
+            .map_err(|e| to_js_err(format!("invalid p2p_internal_ips_json: {e}")))?;
+        p2p_obj.insert("internal_ips".to_string(), ips);
+    }
+    payload.insert("p2p".to_string(), serde_json::Value::Object(p2p_obj));
+
+    if !preferred_server.is_empty() {
+        payload.insert("preferred_server".to_string(), serde_json::Value::String(preferred_server.to_string()));
+        payload.insert("preferred_identity".to_string(), serde_json::Value::String(preferred_identity.to_string()));
+    }
+    if !accounts_json.is_empty() {
+        let accounts: serde_json::Value = serde_json::from_str(accounts_json)
+            .map_err(|e| to_js_err(format!("invalid accounts_json: {e}")))?;
+        payload.insert("accounts".to_string(), accounts);
+    }
+    if !server_health_json.is_empty() {
+        let health: serde_json::Value = serde_json::from_str(server_health_json)
+            .map_err(|e| to_js_err(format!("invalid server_health_json: {e}")))?;
+        payload.insert("server_health".to_string(), health);
+    }
+
+    payload.insert("status".to_string(), serde_json::Value::String(status.to_string()));
+
+    serde_json::to_string(&serde_json::Value::Object(payload))
+        .map_err(|e| to_js_err(format!("serialize telemetry payload: {e}")))
+}
+
+// ── P2P session transport state machine (T-4.4) ─────────────────────────────
+//
+// ADR docs/adr/2026-04-29-rust-npm-binary-parity.md req 13, 15
+// JS equivalent: packages/launcher/src/runtime.js::LauncherRuntime.#setupSessionTransport,
+//   #releaseRoomTransport, #attemptP2PConnection (state tracking portions)
+//
+// NodeWebRTCChannel and P2PSignaling remain JS-side (OS-bound native addon).
+// This struct tracks connection state, rate limits, refCounts, and attempt IDs.
+
+use std::collections::HashMap;
+
+#[derive(Default)]
+struct P2PTransportEntry {
+    ref_count: u32,
+    last_attempt_ms: f64,
+    current_attempt_id: u32,
+    settled: bool,
+    batch_ms: u32,
+}
+
+/// Tracks P2P transport state across rooms.
+///
+/// One instance manages all room connections for a launcher session.
+/// JS creates and holds the actual NodeWebRTCChannel / P2PTransport objects;
+/// this struct owns only the coordination state.
+#[wasm_bindgen]
+pub struct SessionTransportManager {
+    rooms: HashMap<String, P2PTransportEntry>,
+    p2p_rate_limit_ms: f64,
+}
+
+#[wasm_bindgen]
+impl SessionTransportManager {
+    /// Create a new manager.
+    ///
+    /// `p2p_rate_limit_ms`: minimum milliseconds between P2P attempts per room.
+    /// Pass a negative value to use the default (15_000 ms).
+    #[wasm_bindgen(constructor)]
+    pub fn new(p2p_rate_limit_ms: f64) -> Self {
+        SessionTransportManager {
+            rooms: HashMap::new(),
+            p2p_rate_limit_ms: if p2p_rate_limit_ms < 0.0 { 15_000.0 } else { p2p_rate_limit_ms },
+        }
+    }
+
+    /// Register a new transport for a room; returns the initial refCount (1).
+    /// If the room already has a transport, increments refCount and returns it.
+    #[wasm_bindgen(js_name = "addTransport")]
+    pub fn add_transport(&mut self, room_id: &str, batch_ms: u32) -> u32 {
+        let entry = self.rooms.entry(room_id.to_string()).or_insert_with(P2PTransportEntry::default);
+        if entry.ref_count == 0 {
+            entry.batch_ms = batch_ms;
+            entry.settled = false;
+            entry.last_attempt_ms = 0.0;
+            entry.current_attempt_id = 0;
+        }
+        entry.ref_count += 1;
+        entry.ref_count
+    }
+
+    /// Decrement refCount for a room; returns true if the transport should be closed
+    /// (refCount has reached 0). Returns false if the room is unknown.
+    #[wasm_bindgen(js_name = "releaseTransport")]
+    pub fn release_transport(&mut self, room_id: &str) -> bool {
+        let entry = match self.rooms.get_mut(room_id) {
+            Some(e) => e,
+            None => return false,
+        };
+        if entry.ref_count > 0 {
+            entry.ref_count -= 1;
+        }
+        if entry.ref_count == 0 {
+            self.rooms.remove(room_id);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Returns true if a P2P attempt for `room_id` is allowed (rate limit not exceeded).
+    /// Also returns true if no previous attempt has been recorded.
+    #[wasm_bindgen(js_name = "shouldAttemptP2P")]
+    pub fn should_attempt_p2p(&self, room_id: &str) -> bool {
+        match self.rooms.get(room_id) {
+            None => false,
+            Some(entry) => {
+                let now_ms = js_sys::Date::now();
+                now_ms - entry.last_attempt_ms >= self.p2p_rate_limit_ms
+            }
+        }
+    }
+
+    /// Record the start of a P2P attempt; returns the new attempt ID.
+    /// Resets `settled` for this room.
+    #[wasm_bindgen(js_name = "beginP2PAttempt")]
+    pub fn begin_p2p_attempt(&mut self, room_id: &str) -> u32 {
+        let entry = match self.rooms.get_mut(room_id) {
+            Some(e) => e,
+            None => return 0,
+        };
+        entry.last_attempt_ms = js_sys::Date::now();
+        entry.current_attempt_id += 1;
+        entry.settled = false;
+        entry.current_attempt_id
+    }
+
+    /// Reset the rate limit for a room (allows immediate retry).
+    /// Used when a new session joins an existing room.
+    #[wasm_bindgen(js_name = "resetRateLimit")]
+    pub fn reset_rate_limit(&mut self, room_id: &str) {
+        if let Some(entry) = self.rooms.get_mut(room_id) {
+            entry.last_attempt_ms = 0.0;
+        }
+    }
+
+    /// Returns true if the given attempt ID is no longer the current attempt
+    /// (a newer attempt has started). Used by async P2P paths to self-cancel.
+    #[wasm_bindgen(js_name = "isAttemptStale")]
+    pub fn is_attempt_stale(&self, room_id: &str, attempt_id: u32) -> bool {
+        match self.rooms.get(room_id) {
+            None => true,
+            Some(entry) => entry.current_attempt_id != attempt_id,
+        }
+    }
+
+    /// Mark a room's P2P connection as settled (data channel opened).
+    /// Returns false if the room is unknown (e.g. already released).
+    #[wasm_bindgen(js_name = "markSettled")]
+    pub fn mark_settled(&mut self, room_id: &str) -> bool {
+        match self.rooms.get_mut(room_id) {
+            None => false,
+            Some(entry) => {
+                entry.settled = true;
+                true
+            }
+        }
+    }
+
+    /// Returns true if the room's P2P connection is already settled.
+    #[wasm_bindgen(js_name = "isSettled")]
+    pub fn is_settled(&self, room_id: &str) -> bool {
+        self.rooms.get(room_id).map_or(false, |e| e.settled)
+    }
+
+    /// Returns the current batch_ms for a room (adjusted on P2P status change).
+    #[wasm_bindgen(js_name = "batchMs")]
+    pub fn batch_ms(&self, room_id: &str) -> u32 {
+        self.rooms.get(room_id).map_or(200, |e| e.batch_ms)
+    }
+
+    /// Update batch_ms for a room (called when P2P status changes).
+    #[wasm_bindgen(js_name = "setBatchMs")]
+    pub fn set_batch_ms(&mut self, room_id: &str, ms: u32) {
+        if let Some(entry) = self.rooms.get_mut(room_id) {
+            entry.batch_ms = ms;
+        }
+    }
+
+    /// Returns the number of rooms currently tracked.
+    #[wasm_bindgen(getter, js_name = "roomCount")]
+    pub fn room_count(&self) -> usize {
+        self.rooms.len()
+    }
+}

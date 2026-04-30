@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
-import { connectWithSession, TerminalDataEvent, saveIndexedDB, BatchedSender, fetchTurnCredentials, turnToIceServers, NodeWebRTCChannel, P2PSignaling, P2PTransport, generateSessionKey, createP2PCrypto, processTerminalInput } from '@mxdx/core';
+import { connectWithSession, TerminalDataEvent, saveIndexedDB, BatchedSender, fetchTurnCredentials, turnToIceServers, NodeWebRTCChannel, P2PSignaling, P2PTransport, generateSessionKey, createP2PCrypto, processTerminalInput, buildTelemetryPayload, SessionTransportManager } from '@mxdx/core';
 // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::WasmBatchedSender + compress_terminal_data
 import { executeCommand } from './process-bridge.js';
 // Rust equivalent: crates/mxdx-worker/src/bin/mxdx_exec.rs::execute_command
@@ -193,7 +193,9 @@ export class LauncherRuntime {
   #sessionRegistry = new Map(); // sessionId -> { tmuxName, dmRoomId, sender, persistent, pty, createdAt }
   #sessionRooms = new Map(); // "hostname:clientUserId" -> roomId
   #roomMuxes = new Map(); // dmRoomId -> SessionMux
-  #roomTransports = new Map(); // roomId -> { transport, p2pCrypto, refCount, lastP2PAttempt }
+  #roomTransports = new Map(); // roomId -> { transport, p2pCrypto }
+  // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::SessionTransportManager
+  #transportManager = new SessionTransportManager(15_000);
   #telemetryTimer = null;
 
   constructor(config) {
@@ -1229,75 +1231,85 @@ export class LauncherRuntime {
   }
 
   async #postTelemetry() {
-    const os = await import('node:os');
+    const nodeOs = await import('node:os');
     const level = this.#config.telemetry || 'full';
 
-    const telemetry = {
-      timestamp: new Date().toISOString(),
-      heartbeat_interval_ms: this.#config.telemetryIntervalS * 1000,
-      hostname: os.hostname(),
-      platform: os.platform(),
-      arch: os.arch(),
-    };
-
-    if (level === 'full') {
-      telemetry.cpus = os.cpus().length;
-      telemetry.total_memory_mb = Math.floor(os.totalmem() / (1024 * 1024));
-      telemetry.free_memory_mb = Math.floor(os.freemem() / (1024 * 1024));
-      telemetry.uptime_secs = Math.floor(os.uptime());
-    }
-
+    // OS metric collection remains in JS (OS-bound).
+    // Payload construction delegated to WASM.
+    // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::build_telemetry_payload
     const tmuxInfo = PtyBridge.tmuxInfo();
-    telemetry.tmux_available = tmuxInfo.available;
-    if (tmuxInfo.version) telemetry.tmux_version = tmuxInfo.version;
-    telemetry.session_persistence =
+    const sessionPersistence =
       (this.#config.useTmux === 'never') ? false :
       (this.#config.useTmux === 'always') ? true :
       tmuxInfo.available;
 
-    // P2P capability advertisement
-    telemetry.p2p = {
-      enabled: this.#config.p2pEnabled !== false,
-    };
-    // Internal IPs only when explicitly enabled — state events persist indefinitely
-    if (this.#config.p2pAdvertiseIps) {
-      telemetry.p2p.internal_ips = this.#getInternalIps();
-    }
+    const p2pInternalIpsJson = this.#config.p2pAdvertiseIps
+      ? JSON.stringify(this.#getInternalIps())
+      : '';
 
-    // Multi-homeserver fields
+    let preferredServer = '';
+    let preferredIdentity = '';
+    let accountsJson = '';
+    let serverHealthJson = '';
     if (this.#client.serverCount > 1) {
-      telemetry.preferred_server = this.#client.preferred.server;
-      telemetry.preferred_identity = this.#client.preferred.userId;
-      telemetry.accounts = this.#client.allUserIds();
-      telemetry.server_health = {};
+      preferredServer = this.#client.preferred.server;
+      preferredIdentity = this.#client.preferred.userId;
+      accountsJson = JSON.stringify(this.#client.allUserIds());
+      const healthMap = {};
       for (const [server, health] of this.#client.serverHealth()) {
-        telemetry.server_health[server] = {
-          status: health.status,
-          latency_ms: Math.round(health.latencyMs),
-        };
+        healthMap[server] = { status: health.status, latency_ms: Math.round(health.latencyMs) };
       }
+      serverHealthJson = JSON.stringify(healthMap);
     }
 
-    telemetry.status = 'online';
+    const payloadJson = buildTelemetryPayload(
+      level,
+      nodeOs.hostname(),
+      nodeOs.platform(),
+      nodeOs.arch(),
+      nodeOs.cpus().length,
+      Math.floor(nodeOs.totalmem() / (1024 * 1024)),
+      Math.floor(nodeOs.freemem() / (1024 * 1024)),
+      Math.floor(nodeOs.uptime()),
+      tmuxInfo.available,
+      tmuxInfo.version || '',
+      sessionPersistence,
+      this.#config.p2pEnabled !== false,
+      p2pInternalIpsJson,
+      preferredServer,
+      preferredIdentity,
+      accountsJson,
+      serverHealthJson,
+      'online',
+      this.#config.telemetryIntervalS * 1000,
+    );
 
     await this.#client.sendStateEvent(
       this.#topology.exec_room_id,
       'org.mxdx.host_telemetry',
       '',
-      JSON.stringify(telemetry),
+      payloadJson,
     );
   }
 
   async #postOfflineStatus() {
+    const nodeOs = await import('node:os');
+    // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::build_telemetry_payload
+    const payloadJson = buildTelemetryPayload(
+      'summary',
+      nodeOs.hostname(),
+      nodeOs.platform(),
+      nodeOs.arch(),
+      0, 0, 0, 0,
+      false, '', false, false, '', '', '', '', '',
+      'offline',
+      this.#config.telemetryIntervalS * 1000,
+    );
     await this.#client.sendStateEvent(
       this.#topology.exec_room_id,
       'org.mxdx.host_telemetry',
       '',
-      JSON.stringify({
-        timestamp: new Date().toISOString(),
-        heartbeat_interval_ms: this.#config.telemetryIntervalS * 1000,
-        status: 'offline',
-      }),
+      payloadJson,
     );
   }
 
@@ -1306,6 +1318,7 @@ export class LauncherRuntime {
    * Returns P2PTransport (with Matrix fallback) when P2P is enabled,
    * or a thin Matrix client wrapper when P2P is disabled.
    * One P2PTransport is shared across all sessions in a room.
+   * Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::SessionTransportManager
    */
   async #setupSessionTransport(dmRoomId, remotePeer, batchMs) {
     // When P2P is disabled, return raw Matrix client interface
@@ -1317,14 +1330,13 @@ export class LauncherRuntime {
       };
     }
 
-    // Check for existing room transport
+    // Check for existing room transport — refCount managed by WASM state machine
     const existing = this.#roomTransports.get(dmRoomId);
     if (existing) {
-      existing.refCount++;
-      // If P2P isn't active, trigger a new attempt (non-blocking)
-      // Reset rate limit so new session can trigger P2P immediately
+      this.#transportManager.addTransport(dmRoomId, batchMs);
+      // If P2P isn't active, reset rate limit and trigger a new attempt (non-blocking)
       if (existing.transport.status !== 'p2p') {
-        existing.lastP2PAttempt = 0; // Allow immediate retry for new session
+        this.#transportManager.resetRateLimit(dmRoomId);
         this.#attemptP2PConnection(dmRoomId).catch((err) => {
           this.#log.warn('P2P reconnect on session join failed', { error: err.message, room_id: dmRoomId });
         });
@@ -1332,7 +1344,8 @@ export class LauncherRuntime {
       return existing.transport;
     }
 
-    // Create new room-scoped transport
+    // Create new room-scoped transport; register with WASM state machine
+    this.#transportManager.addTransport(dmRoomId, batchMs);
     const idleTimeoutMs = (this.#config.p2pIdleTimeoutS || 300) * 1000;
     const sessionKey = await generateSessionKey();
     const p2pCrypto = await createP2PCrypto(sessionKey);
@@ -1348,9 +1361,10 @@ export class LauncherRuntime {
       idleTimeoutMs,
       onStatusChange: (status) => {
         this.#log.info('P2P transport status changed', { status, room_id: dmRoomId });
-        // Adjust all BatchedSenders for sessions in this room
+        const newBatchMs = status === 'p2p' ? 5 : 200;
+        this.#transportManager.setBatchMs(dmRoomId, newBatchMs);
         const mux = this.#roomMuxes.get(dmRoomId);
-        if (mux) mux.setBatchMs(status === 'p2p' ? 5 : 200);
+        if (mux) mux.setBatchMs(newBatchMs);
       },
       onReconnectNeeded: () => {
         this.#attemptP2PConnection(dmRoomId).catch((err) => {
@@ -1362,7 +1376,7 @@ export class LauncherRuntime {
       },
     });
 
-    this.#roomTransports.set(dmRoomId, { transport, p2pCrypto, refCount: 1, lastP2PAttempt: 0 });
+    this.#roomTransports.set(dmRoomId, { transport, p2pCrypto });
 
     // Attempt P2P (non-blocking, rate-limited)
     this.#attemptP2PConnection(dmRoomId).catch((err) => {
@@ -1374,13 +1388,15 @@ export class LauncherRuntime {
     return transport;
   }
 
+  // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::SessionTransportManager::release_transport
   #releaseRoomTransport(roomId) {
-    const entry = this.#roomTransports.get(roomId);
-    if (!entry) return;
-    entry.refCount--;
-    if (entry.refCount <= 0) {
-      entry.transport.close();
-      this.#roomTransports.delete(roomId);
+    const shouldClose = this.#transportManager.releaseTransport(roomId);
+    if (shouldClose) {
+      const entry = this.#roomTransports.get(roomId);
+      if (entry) {
+        entry.transport.close();
+        this.#roomTransports.delete(roomId);
+      }
     }
   }
 
@@ -1388,20 +1404,19 @@ export class LauncherRuntime {
    * Attempt to establish a P2P WebRTC connection for a room.
    * Launcher offers first. Also listens for incoming offers from client.
    * Non-blocking — the terminal session works on Matrix while this runs.
-   * Rate-limited to one attempt per 60 seconds per room.
+   * Rate-limited to one attempt per 15 seconds per room.
+   * Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::SessionTransportManager (state tracking)
    */
   async #attemptP2PConnection(dmRoomId) {
     const entry = this.#roomTransports.get(dmRoomId);
     if (!entry) { this.#log.debug('P2P: no entry for room', { room_id: dmRoomId }); return; }
 
-    // Rate limit: 15s cooldown per room (reset to 0 when new session joins)
-    const now = Date.now();
-    if (now - entry.lastP2PAttempt < 15_000) { this.#log.debug('P2P: rate limited', { room_id: dmRoomId }); return; }
-    entry.lastP2PAttempt = now;
-
-    // Cancel any previous in-flight attempt by incrementing attempt ID
-    const attemptId = (entry.currentAttemptId || 0) + 1;
-    entry.currentAttemptId = attemptId;
+    // Rate limit check delegated to WASM state machine
+    if (!this.#transportManager.shouldAttemptP2P(dmRoomId)) {
+      this.#log.debug('P2P: rate limited', { room_id: dmRoomId }); return;
+    }
+    // Record attempt start; get attempt ID for stale-check later
+    const attemptId = this.#transportManager.beginP2PAttempt(dmRoomId);
 
     this.#log.info('Attempting P2P connection', { room_id: dmRoomId, attempt: attemptId });
 
@@ -1424,18 +1439,19 @@ export class LauncherRuntime {
     const turnOnly = this.#config.p2pTurnOnly === true;
     this.#log.info('P2P: config', { turnOnly, iceServers: iceServers.length });
 
-    // Check if this attempt was superseded by a newer one
-    const isStale = () => entry.currentAttemptId !== attemptId;
+    // Staleness check delegated to WASM state machine
+    // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::SessionTransportManager::is_attempt_stale
+    const isStale = () => this.#transportManager.isAttemptStale(dmRoomId, attemptId);
 
     // Race: launcher offers, AND listens for incoming client offer
-    // First channel to open wins
-    let settled = false;
+    // First channel to open wins. Settled state tracked in WASM.
+    // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::SessionTransportManager::mark_settled / is_settled
     const settle = (channel, callId, role, p2pCrypto) => {
-      if (settled) {
+      if (this.#transportManager.isSettled(dmRoomId)) {
         channel.close();
         return false;
       }
-      settled = true;
+      this.#transportManager.markSettled(dmRoomId);
       if (p2pCrypto) transport.setP2PCrypto(p2pCrypto);
       transport.setDataChannel(channel);
       this.#log.info('P2P data channel established', { room_id: dmRoomId, call_id: callId, role });
@@ -1488,7 +1504,7 @@ export class LauncherRuntime {
 
       // Phase 2: Poll for new candidates arriving after polling started
       for (let i = 0; i < 30; i++) {
-        if (settled && i > 5) return; // After settle, poll a few more for stragglers
+        if (this.#transportManager.isSettled(dmRoomId) && i > 5) return; // After settle, poll a few more for stragglers
         const candJson = await this.#client.onRoomEvent(signalingRoomId, 'm.call.candidates', 1);
         if (candJson == null) continue;
         try {
@@ -1512,7 +1528,7 @@ export class LauncherRuntime {
       // Delay 5s to let browser start its answerer poll (browser needs time to
       // join room, sync, and set up transport before it starts listening)
       await new Promise((r) => setTimeout(r, 5000));
-      if (settled || isStale()) return;
+      if (this.#transportManager.isSettled(dmRoomId) || isStale()) return;
 
       const channel = new NodeWebRTCChannel({ iceServers, turnOnly });
       const signaling = new P2PSignaling(
@@ -1554,7 +1570,7 @@ export class LauncherRuntime {
       } catch { /* findRoomEvents not available or failed */ }
 
       const offerDeadline = Date.now() + 30_000;
-      while (!answerContent && Date.now() < offerDeadline && !settled && !isStale()) {
+      while (!answerContent && Date.now() < offerDeadline && !this.#transportManager.isSettled(dmRoomId) && !isStale()) {
         const answerJson = await this.#client.onRoomEvent(signalingRoomId, 'm.call.answer', 5);
         if (answerJson == null) {
           this.#log.debug('P2P offerer: poll returned null, retrying...', { call_id: callId });
@@ -1567,7 +1583,7 @@ export class LauncherRuntime {
         answerContent = content;
         break;
       }
-      if (!answerContent || settled) {
+      if (!answerContent || this.#transportManager.isSettled(dmRoomId)) {
         channel.close();
         throw new Error('No P2P answer received within timeout');
       }
@@ -1597,7 +1613,7 @@ export class LauncherRuntime {
       // Signaling via exec room for reliable E2EE.
       let inviteJson = null;
       const answererDeadline = Date.now() + 35_000;
-      while (Date.now() < answererDeadline && !settled && !isStale()) {
+      while (Date.now() < answererDeadline && !this.#transportManager.isSettled(dmRoomId) && !isStale()) {
         const json = await this.#client.onRoomEvent(signalingRoomId, 'm.call.invite', 5);
         if (json == null) continue;
         const evt = JSON.parse(json);
@@ -1606,7 +1622,7 @@ export class LauncherRuntime {
         inviteJson = json;
         break;
       }
-      if (settled || isStale() || !inviteJson) return;
+      if (this.#transportManager.isSettled(dmRoomId) || isStale() || !inviteJson) return;
 
       const inviteEvent = JSON.parse(inviteJson);
       const inviteContent = inviteEvent.content || inviteEvent;
