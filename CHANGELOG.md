@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **WASM session-loop migration (Phase 4 — ADR 2026-04-29 Pillar 2).** The
+  launcher session lifecycle, command routing, telemetry, batching, and P2P
+  state tracking have been moved from JavaScript into `mxdx-core-wasm`. The
+  npm `runtime.js` is now a thin OS-bound shell (265 lines, down from ~1700).
+  New exports from `@mxdx/core`:
+  - `WasmSessionManager` — pure-Rust session registry and command dispatcher.
+    Accepts a batch of Matrix events, returns `SendAction` objects for JS to
+    execute against the Matrix client and OS APIs.
+  - `SessionTransportManager` — pure-Rust P2P connection state machine
+    (refCounts, rate limits, attempt IDs, settled flags). NodeWebRTCChannel
+    and P2PSignaling remain JS-side (OS-bound native addon).
+  - `WasmBatchedSender` — buffers raw PTY bytes, compresses, and returns a
+    ready-to-send Matrix event payload JSON string. Implements full
+    `M_LIMIT_EXCEEDED` / 429 retry-with-coalesce semantics via a
+    structured state-machine API (`takePayload` / `markSent` /
+    `markRateLimited` / `markError` / `parseRetryAfterMs`); JS owns the
+    `setTimeout` driving and the actual `sendEvent` call, WASM owns
+    compression, sequencing, and in-flight payload retention. The launcher
+    hot path (`packages/launcher/src/batched-sender-wasm.js`) drives this
+    state machine.
+  - `buildTelemetryPayload` — constructs the `org.mxdx.host_telemetry` state
+    event payload from OS metrics supplied by JS.
+  - `compressTerminalData` / `processTerminalInput` — zlib+base64 encode/decode
+    with 1 MB decompression limit (zlib-bomb protection).
+
 - **Canonical config schema (Phase 3 — ADR 2026-04-29 Pillar 1).** Both the
   Rust binaries and the npm packages now read and write `worker.toml` /
   `client.toml` in a flat top-level TOML key layout (no `[launcher]` or

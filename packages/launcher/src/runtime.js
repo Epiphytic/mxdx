@@ -4,7 +4,6 @@ import os from 'node:os';
 import {
   connectWithSession,
   saveIndexedDB,
-  BatchedSender,
   P2PTransport,
   generateSessionKey,
   createP2PCrypto,
@@ -13,7 +12,11 @@ import {
   WasmSessionManager,
 } from '@mxdx/core';
 // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::WasmBatchedSender (rate-limit-aware
-// batching) + compress_terminal_data_wasm (exposed to JS as `compressTerminalData`)
+// batching) + compress_terminal_data_wasm (exposed to JS as `compressTerminalData`).
+// `BatchedSenderWasm` is the JS thin wrapper that drives WasmBatchedSender's
+// state machine (setTimeout / Matrix sendEvent are OS-bound; compression and
+// 429 retry/coalesce are WASM-side).
+import { BatchedSenderWasm as BatchedSender } from './batched-sender-wasm.js';
 import { executeCommand } from './process-bridge.js';
 // Rust equivalent: crates/mxdx-worker/src/bin/mxdx_exec.rs::main (subprocess execution via mxdx-exec binary)
 import { PtyBridge } from './pty-bridge.js';

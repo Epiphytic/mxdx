@@ -2026,24 +2026,76 @@ pub fn compress_terminal_data_wasm(data: &[u8]) -> Result<String, JsValue> {
         .map_err(|e| to_js_err(format!("serialize: {e}")))
 }
 
-/// WASM-side batched terminal sender.
+/// WASM-side batched terminal sender — full Rust replacement for
+/// `packages/core/batched-sender.js::BatchedSender`.
 ///
-/// Manages a buffer of raw PTY byte chunks, concatenates them, compresses,
-/// and emits the payload as a serialized event content JSON string for the
-/// JS caller to send via Matrix.
+/// Manages a buffer of raw PTY byte chunks, concatenates and compresses them,
+/// emits a ready-to-send payload as a JSON string, and absorbs Matrix
+/// `M_LIMIT_EXCEEDED` / 429 rate-limit errors with retry+coalesce semantics
+/// identical to the JS implementation it replaces.
 ///
-/// The JS caller is responsible for the actual Matrix `sendEvent` call — this
-/// keeps the E2EE send path in JS (through WasmMatrixClient) while moving the
-/// compression, sequencing, and batching logic into Rust.
+/// ## Threading model
 ///
-/// Rust equivalent: packages/core/batched-sender.js::BatchedSender
+/// JS owns the actual Matrix `sendEvent` call (the E2EE send path stays in
+/// `WasmMatrixClient`) and the wall-clock timing (`setTimeout`). WASM owns:
+///   - PTY chunk buffering
+///   - zlib + base64 compression
+///   - `seq` numbering
+///   - 429 retry-with-coalesce: when the previous send was rate-limited, the
+///     unsent payload is kept and re-emitted with any newly-buffered chunks
+///     concatenated, mirroring `BatchedSender.#drain`'s coalescing behavior.
+///
+/// ## JS driver contract
+///
+/// 1. `push(bytes)` — for every PTY chunk.
+/// 2. After a `batchMs` window, call `takePayload()`:
+///    - returns `null` if nothing to send;
+///    - returns a JSON string `{"data","encoding","seq","session_id"?}` to send.
+/// 3. JS calls `await client.sendEvent(roomId(), eventType(), payload)`.
+///    On success: call `markSent()`.
+///    On `429` / `M_LIMIT_EXCEEDED`: call `markRateLimited()`, then
+///    `WasmBatchedSender.parseRetryAfterMs(errString)` to get the wait
+///    duration, `await new Promise(r => setTimeout(r, ms))`, and loop back
+///    to step 2. Newly-buffered data will coalesce into the retry.
+///    On other error: call `markError()` and surface to caller (same
+///    drop-and-report behavior as the JS `onError` callback).
+/// 4. `flushFinal()` — drain on shutdown.
+///
+/// ## Why a state-machine API and not async sleep
+///
+/// The project's WASM target does not currently depend on `gloo-timers`;
+/// adding it pulls a futures crate into the WASM binary for what is
+/// strictly a JS-side concern (the runtime already manages timers for
+/// every other reason). Returning structured state lets JS own timing
+/// while WASM owns the security-critical compression + sequencing. This
+/// is the "structured retry-action" pattern called out in the P0-2
+/// migration plan as the no-`gloo-timers` fallback.
+///
+/// Rust equivalent of: packages/core/batched-sender.js::BatchedSender
 #[wasm_bindgen]
 pub struct WasmBatchedSender {
     room_id: String,
     event_type: String,
     session_id: Option<String>,
     seq: u32,
+    /// New raw PTY chunks awaiting compression.
     buffer: Vec<Vec<u8>>,
+    /// Last payload returned to JS that has not yet been confirmed sent.
+    /// On `markSent`, cleared. On `markRateLimited`, retained — next
+    /// `takePayload()` will recompress it together with any newly-buffered
+    /// chunks (coalesce).
+    in_flight: Option<InFlightPayload>,
+    /// True when the last attempt was rate-limited; used to drive an
+    /// `onBuffering(true)` notification from JS.
+    rate_limited: bool,
+}
+
+/// In-flight payload bookkeeping. Stores the *raw* bytes (pre-compression)
+/// so a retry can re-coalesce + recompress them with new data without
+/// re-decoding the compressed form.
+struct InFlightPayload {
+    raw: Vec<u8>,
+    seq: u32,
 }
 
 #[wasm_bindgen]
@@ -2062,6 +2114,8 @@ impl WasmBatchedSender {
             session_id,
             seq: 0,
             buffer: Vec::new(),
+            in_flight: None,
+            rate_limited: false,
         }
     }
 
@@ -2071,11 +2125,165 @@ impl WasmBatchedSender {
         self.buffer.push(data.to_vec());
     }
 
-    /// Flush the buffer: concatenate all buffered bytes, compress, and return
-    /// a JSON string suitable for passing to `WasmMatrixClient.sendEvent`.
+    /// Take the next payload to send.
+    ///
+    /// Returns:
+    ///   - `null` if there is nothing to send (no buffered data and no in-flight retry).
+    ///   - JSON string `{"data","encoding","seq","session_id"?}` otherwise.
+    ///
+    /// After a successful Matrix send, JS MUST call `markSent()`.
+    /// After a 429 / `M_LIMIT_EXCEEDED`, JS MUST call `markRateLimited()`.
+    /// On any other error, JS MUST call `markError()`.
+    /// Failure to call any of those three keeps the payload in-flight; a
+    /// follow-up `takePayload()` will return the same payload, plus any
+    /// new buffered data coalesced in.
+    #[wasm_bindgen(js_name = "takePayload")]
+    pub fn take_payload(&mut self) -> Result<JsValue, JsValue> {
+        // Combine: in-flight raw (if any, from prior 429) + everything in buffer.
+        let mut combined: Vec<u8> = Vec::new();
+        let chosen_seq;
+
+        match self.in_flight.take() {
+            Some(prev) => {
+                combined.extend_from_slice(&prev.raw);
+                for chunk in self.buffer.drain(..) {
+                    combined.extend_from_slice(&chunk);
+                }
+                // Reuse the previous seq on retry — this matches the JS
+                // implementation, which keeps the same seq when coalescing.
+                // (Strictly the JS does `lastSeq = q[q.length-1].seq` after
+                // coalescing, which for a 1-element queue is the original.)
+                chosen_seq = prev.seq;
+            }
+            None => {
+                if self.buffer.is_empty() {
+                    return Ok(JsValue::NULL);
+                }
+                for chunk in self.buffer.drain(..) {
+                    combined.extend_from_slice(&chunk);
+                }
+                chosen_seq = self.seq;
+                self.seq += 1;
+            }
+        }
+
+        if combined.is_empty() {
+            return Ok(JsValue::NULL);
+        }
+
+        // Stash the raw bytes as the new in-flight; if JS reports rate-limit,
+        // the next takePayload will coalesce with new data using these bytes.
+        self.in_flight = Some(InFlightPayload {
+            raw: combined.clone(),
+            seq: chosen_seq,
+        });
+
+        let (encoded, encoding) = compress_terminal_data(&combined);
+        let mut payload = serde_json::json!({
+            "data": encoded,
+            "encoding": encoding,
+            "seq": chosen_seq,
+        });
+        if let Some(sid) = &self.session_id {
+            payload["session_id"] = serde_json::Value::String(sid.clone());
+        }
+        let json = serde_json::to_string(&payload)
+            .map_err(|e| to_js_err(format!("serialize payload: {e}")))?;
+        Ok(JsValue::from_str(&json))
+    }
+
+    /// Confirm the last payload from `takePayload()` was sent successfully.
+    /// Clears the in-flight state and the rate-limited flag.
+    #[wasm_bindgen(js_name = "markSent")]
+    pub fn mark_sent(&mut self) {
+        self.in_flight = None;
+        self.rate_limited = false;
+    }
+
+    /// Mark the last payload as rate-limited.
+    /// The in-flight payload is retained so the next `takePayload()` will
+    /// re-emit it (with any newly-buffered data coalesced in).
+    /// Sets `isRateLimited()` to true; JS uses this to drive its
+    /// `onBuffering(true)` notification.
+    #[wasm_bindgen(js_name = "markRateLimited")]
+    pub fn mark_rate_limited(&mut self) {
+        self.rate_limited = true;
+        // in_flight is intentionally retained.
+    }
+
+    /// Mark the last payload as having failed with a non-retryable error.
+    /// Drops the in-flight payload and clears the rate-limited flag.
+    /// JS callers should report this to their `onError` callback.
+    #[wasm_bindgen(js_name = "markError")]
+    pub fn mark_error(&mut self) {
+        self.in_flight = None;
+        self.rate_limited = false;
+    }
+
+    /// True if the most recent send attempt was rate-limited.
+    /// Used by the JS thin wrapper to drive `onBuffering(true)` exactly once.
+    #[wasm_bindgen(getter, js_name = "isRateLimited")]
+    pub fn is_rate_limited(&self) -> bool {
+        self.rate_limited
+    }
+
+    /// Parse a Matrix error string for `retry_after_ms` and return that value
+    /// plus a 100ms safety margin (matching the JS implementation). Returns
+    /// 2000 (the JS fallback) if no `retry_after_ms` field is found.
+    ///
+    /// This is exposed as a static (associated) function so JS can call it
+    /// without holding a sender instance.
+    #[wasm_bindgen(js_name = "parseRetryAfterMs")]
+    pub fn parse_retry_after_ms(err: &str) -> u32 {
+        // Mirror the regex `/retry_after_ms["\s:]+(\d+)/` from
+        // packages/core/batched-sender.js. We do a manual scan rather than
+        // pulling in `regex` (which inflates the WASM binary).
+        let needle = "retry_after_ms";
+        let bytes = err.as_bytes();
+        let n = needle.len();
+        if bytes.len() < n {
+            return 2000;
+        }
+        let mut i = 0;
+        while i + n <= bytes.len() {
+            if &bytes[i..i + n] == needle.as_bytes() {
+                // skip needle, then any of `"`, whitespace, `:`
+                let mut j = i + n;
+                while j < bytes.len() {
+                    let c = bytes[j];
+                    if c == b'"' || c == b':' || c == b' ' || c == b'\t' || c == b'\n' || c == b'\r' {
+                        j += 1;
+                    } else {
+                        break;
+                    }
+                }
+                let start = j;
+                while j < bytes.len() && bytes[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > start {
+                    let num_str = &err[start..j];
+                    if let Ok(n) = num_str.parse::<u32>() {
+                        return n.saturating_add(100);
+                    }
+                }
+                return 2000;
+            }
+            i += 1;
+        }
+        2000
+    }
+
+    /// Flush the buffer immediately (single-shot, ignores 429 retry semantics).
+    ///
+    /// **Prefer the `takePayload` / `markSent` / `markRateLimited` /
+    /// `markError` cycle for the launcher hot path** — it implements the
+    /// full BatchedSender state machine. This method is preserved for
+    /// callers (and tests) that just want a single compressed payload
+    /// without rate-limit handling.
     ///
     /// Returns `null` (JS null) if the buffer is empty.
-    /// Returns a JSON string `{"data":"...","encoding":"...","seq":N,"session_id":"..."}` on success.
+    /// Returns a JSON string `{"data","encoding","seq","session_id"?}` on success.
     /// The room_id and event_type are available via `roomId()` and `eventType()` getters.
     #[wasm_bindgen]
     pub fn flush(&mut self) -> Result<JsValue, JsValue> {
@@ -2123,6 +2331,22 @@ impl WasmBatchedSender {
     #[wasm_bindgen(getter, js_name = "bufferLength")]
     pub fn buffer_length(&self) -> usize {
         self.buffer.len()
+    }
+
+    /// True iff a payload is currently in-flight (returned by `takePayload`
+    /// but not yet acknowledged via `markSent`/`markError`).
+    #[wasm_bindgen(getter, js_name = "hasInFlight")]
+    pub fn has_in_flight(&self) -> bool {
+        self.in_flight.is_some()
+    }
+
+    /// Number of pending raw bytes (in_flight + buffered).
+    /// Used by tests and shutdown logic to decide whether to keep draining.
+    #[wasm_bindgen(getter, js_name = "pendingBytes")]
+    pub fn pending_bytes(&self) -> usize {
+        let in_flight = self.in_flight.as_ref().map(|p| p.raw.len()).unwrap_or(0);
+        let buffered: usize = self.buffer.iter().map(|c| c.len()).sum();
+        in_flight + buffered
     }
 }
 
