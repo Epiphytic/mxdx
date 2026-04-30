@@ -777,6 +777,13 @@ _No public symbols._
 | `SecretStore::deserialize` | method | `crates/mxdx-secrets/src/store.rs` |
 | `SecretStore::key` | method | `crates/mxdx-secrets/src/store.rs` |
 
+### mxdx-test-perf
+
+| Symbol | Kind | File |
+|:---|:---|:---|
+| `PerfEntry` | struct | `crates/mxdx-test-perf/src/lib.rs` |
+| `write_perf_entry` | fn | `crates/mxdx-test-perf/src/lib.rs` |
+
 ### mxdx-types
 
 | Symbol | Kind | File |
@@ -797,7 +804,9 @@ _No public symbols._
 | `ProfileConfig` | struct | `crates/mxdx-types/src/config.rs` |
 | `WebSocketTransportConfig` | struct | `crates/mxdx-types/src/config.rs` |
 | `config_dir` | fn | `crates/mxdx-types/src/config.rs` |
+| `migrate_legacy_section_if_needed` | fn | `crates/mxdx-types/src/config.rs` |
 | `load_config` | fn | `crates/mxdx-types/src/config.rs` |
+| `load_config_from_dir` | fn | `crates/mxdx-types/src/config.rs` |
 | `load_merged_config` | fn | `crates/mxdx-types/src/config.rs` |
 | `remove_passwords_from_config` | fn | `crates/mxdx-types/src/config.rs` |
 | `SchemaProperty` | struct | `crates/mxdx-types/src/events/capability.rs` |
