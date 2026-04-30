@@ -195,15 +195,177 @@ describe('WasmSessionManager command routing', () => {
   });
 });
 
+// ── B.1d: WasmSessionManager session-management routing (P1, T-4.5) ─────
+
+describe('WasmSessionManager session-management actions', () => {
+  const makeManager = async () => {
+    const { WasmSessionManager } = await import('@mxdx/core');
+    return new WasmSessionManager(
+      JSON.stringify({ allowed_commands: ['echo', 'bash'], allowed_cwd: ['/tmp'], max_sessions: 10, username: 'launcher', use_tmux: 'auto', batch_ms: 200 }),
+      '!exec:example.com', '!state:example.com', '@launcher:example.com', 'DEVICE1',
+    );
+  };
+
+  it('list_sessions emits org.mxdx.terminal.sessions to exec room', async () => {
+    const mgr = await makeManager();
+    // Seed a session so the listing has content.
+    JSON.parse(mgr.onSessionStarted(
+      'sess-1', 'req-1', '!dm:example.com', 'tmux-1', true, 200,
+      '@client:example.com', Math.floor(Date.now() / 1000), 'bash', '[]',
+    ));
+    const events = JSON.stringify([{
+      event_id: '$ls-1',
+      type: 'org.mxdx.command',
+      sender: '@client:example.com',
+      content: { action: 'list_sessions', request_id: 'req-ls-1' },
+    }]);
+    const actions = JSON.parse(mgr.processCommands(events));
+    assert.strictEqual(actions.length, 1);
+    assert.strictEqual(actions[0].kind, 'send_event');
+    assert.strictEqual(actions[0].room_id, '!exec:example.com');
+    assert.strictEqual(actions[0].event_type, 'org.mxdx.terminal.sessions');
+    assert.strictEqual(actions[0].content.request_id, 'req-ls-1');
+    assert.ok(Array.isArray(actions[0].content.sessions), 'sessions is array');
+    assert.strictEqual(actions[0].content.sessions.length, 1);
+    const s = actions[0].content.sessions[0];
+    assert.strictEqual(s.session_id, 'sess-1');
+    assert.strictEqual(s.persistent, true);
+    // Security: the listing MUST NOT leak sender ID or DM room ID.
+    assert.strictEqual(s.sender, undefined, 'list MUST NOT leak sender');
+    assert.strictEqual(s.dm_room_id, undefined, 'list MUST NOT leak dmRoomId');
+  });
+
+  it('session_cancel routes to kill_pty action', async () => {
+    const mgr = await makeManager();
+    // Seed an active session (so cancel finds it).
+    JSON.parse(mgr.onSessionStarted(
+      'sess-cancel', 'req-c', '!dm:example.com', 'tmux-c', false, 200,
+      '@client:example.com', Math.floor(Date.now() / 1000), 'bash', '[]',
+    ));
+    const events = JSON.stringify([{
+      event_id: '$cancel-1',
+      type: 'org.mxdx.session.cancel',
+      sender: '@client:example.com',
+      content: { session_uuid: 'sess-cancel', grace_seconds: 5 },
+    }]);
+    const actions = JSON.parse(mgr.processCommands(events));
+    assert.strictEqual(actions.length, 1);
+    assert.strictEqual(actions[0].kind, 'kill_pty');
+    assert.strictEqual(actions[0].session_id, 'sess-cancel');
+    assert.strictEqual(actions[0].signal, 'SIGTERM');
+  });
+
+  it('session_signal routes to kill_pty with custom signal', async () => {
+    const mgr = await makeManager();
+    JSON.parse(mgr.onSessionStarted(
+      'sess-sig', 'req-s', '!dm:example.com', 'tmux-s', false, 200,
+      '@client:example.com', Math.floor(Date.now() / 1000), 'bash', '[]',
+    ));
+    const events = JSON.stringify([{
+      event_id: '$sig-1',
+      type: 'org.mxdx.session.signal',
+      sender: '@client:example.com',
+      content: { session_uuid: 'sess-sig', signal: 'SIGINT' },
+    }]);
+    const actions = JSON.parse(mgr.processCommands(events));
+    assert.strictEqual(actions.length, 1);
+    assert.strictEqual(actions[0].kind, 'kill_pty');
+    assert.strictEqual(actions[0].signal, 'SIGINT');
+  });
+
+  it('session_signal: unknown session_uuid is silently ignored', async () => {
+    const mgr = await makeManager();
+    const events = JSON.stringify([{
+      event_id: '$sig-unknown',
+      type: 'org.mxdx.session.signal',
+      sender: '@client:example.com',
+      content: { session_uuid: 'never-existed', signal: 'SIGINT' },
+    }]);
+    const actions = JSON.parse(mgr.processCommands(events));
+    assert.strictEqual(actions.length, 0, 'no kill_pty for unknown session');
+  });
+
+  it('spawn_pty happy path: allowed command + allowed cwd → spawn_pty action', async () => {
+    const mgr = await makeManager();
+    const events = JSON.stringify([{
+      event_id: '$spawn-1',
+      type: 'org.mxdx.command',
+      sender: '@client:example.com',
+      content: {
+        action: 'interactive',
+        command: 'bash',
+        args: ['-l'],
+        cwd: '/tmp',
+        cols: 100, rows: 30,
+        request_id: 'req-spawn-1',
+        batch_ms: 50,
+      },
+    }]);
+    const actions = JSON.parse(mgr.processCommands(events));
+    const spawn = actions.find(a => a.kind === 'spawn_pty');
+    assert.ok(spawn, 'should produce spawn_pty action');
+    assert.strictEqual(spawn.command, 'bash');
+    assert.deepStrictEqual(spawn.args, ['-l']);
+    assert.strictEqual(spawn.cwd, '/tmp');
+    assert.strictEqual(spawn.cols, 100);
+    assert.strictEqual(spawn.rows, 30);
+    assert.strictEqual(spawn.request_id, 'req-spawn-1');
+    // batch_ms is the negotiated max(client, default) so should be >= 200 (default).
+    assert.ok(spawn.batch_ms >= 200, `batch_ms negotiated to >= default (got ${spawn.batch_ms})`);
+    assert.strictEqual(mgr.activeSessions, 1, 'active sessions incremented on spawn');
+  });
+
+  it('spawn_pty rejected when command not allowlisted', async () => {
+    const mgr = await makeManager();
+    const events = JSON.stringify([{
+      event_id: '$spawn-2',
+      type: 'org.mxdx.command',
+      sender: '@client:example.com',
+      content: {
+        action: 'interactive',
+        command: 'rm',
+        cwd: '/tmp',
+        cols: 80, rows: 24,
+        request_id: 'req-spawn-2',
+      },
+    }]);
+    const actions = JSON.parse(mgr.processCommands(events));
+    assert.strictEqual(actions.length, 1);
+    assert.strictEqual(actions[0].kind, 'send_event');
+    assert.strictEqual(actions[0].event_type, 'org.mxdx.terminal.session');
+    assert.strictEqual(actions[0].content.status, 'rejected');
+    assert.strictEqual(mgr.activeSessions, 0, 'no session created on rejection');
+  });
+});
+
 // ── B.2: Max Sessions Enforcement ────────────────────────────────────────
 
 describe('Max sessions enforcement', () => {
-  it('tracks active session count', () => {
-    assert.ok(true, 'Session tracking is structural — verified via limit test');
+  it('tracks active session count via incrementActiveSessions', async () => {
+    const { WasmSessionManager } = await import('@mxdx/core');
+    const mgr = new WasmSessionManager(
+      JSON.stringify({ allowed_commands: ['echo'], allowed_cwd: ['/tmp'], max_sessions: 2, username: 'launcher', use_tmux: 'auto', batch_ms: 200 }),
+      '!exec:example.com', '!state:example.com', '@launcher:example.com', 'DEVICE1',
+    );
+    assert.strictEqual(mgr.activeSessions, 0, 'Starts at 0');
+    mgr.incrementActiveSessions();
+    assert.strictEqual(mgr.activeSessions, 1, 'After increment: 1');
+    mgr.decrementActiveSessions();
+    assert.strictEqual(mgr.activeSessions, 0, 'After decrement: back to 0');
   });
 
-  it('rejects commands when at session limit', () => {
-    assert.ok(true, 'Session limit check exists in processCommands');
+  it('rejects commands when at session limit', async () => {
+    const { WasmSessionManager } = await import('@mxdx/core');
+    const mgr = new WasmSessionManager(
+      JSON.stringify({ allowed_commands: ['echo'], allowed_cwd: ['/tmp'], max_sessions: 1, username: 'launcher', use_tmux: 'auto', batch_ms: 200 }),
+      '!exec:example.com', '!state:example.com', '@launcher:example.com', 'DEVICE1',
+    );
+    mgr.incrementActiveSessions(); // fill the 1-slot limit
+    const events = JSON.stringify([{ event_id: '$limit1', type: 'org.mxdx.session.task', sender: '@client:example.com', content: { uuid: 'task-limit', bin: 'echo', args: [], cwd: '/tmp' } }]);
+    const actions = JSON.parse(mgr.processCommands(events));
+    assert.strictEqual(actions.length, 1, 'Should produce one rejection action');
+    assert.strictEqual(actions[0].content.status, 'failed', 'Should be failed');
+    assert.ok(actions[0].content.error.includes('limit'), 'Error should mention limit');
   });
 });
 
