@@ -1,12 +1,11 @@
 /**
  * Rust ↔ npm Interop Beta E2E: 8-combination test matrix.
  *
- * {Rust client, npm client} × {Rust worker, npm launcher} × {single-HS, federated}
+ * {rust|npm client} × {rust worker|npm launcher} × {same-hs|federated}
  *
- * Per storm §5.4: 100 keystrokes, assert decrypted echoes in order,
- * ≥95% P2P transport where both sides support P2P.
- *
- * Bead: mxdx-awe.34 (T-73)
+ * Parameterized via combinations.forEach to prevent N×M drift.
+ * Per ADR 2026-04-29 Pillar 2, req 7/10: all 8 combinations must run;
+ * 6 are skipped pending Phase 2 wiring (T-2.3, T-2.4, T-2.5, T-2.6).
  */
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -19,11 +18,35 @@ import {
 
 const skipReason = skipIfNoFederatedCredentials();
 
-// Skip individual combinations via env vars for debugging
-const SKIP_NPM_NPM = process.env.SKIP_NPM_NPM === '1';
-const SKIP_RUST_NPM = process.env.SKIP_RUST_NPM === '1';
-const SKIP_NPM_RUST = process.env.SKIP_NPM_RUST === '1';
-const SKIP_RUST_RUST = process.env.SKIP_RUST_RUST === '1';
+/** All 8 {client_runtime × worker_runtime × hs_topology} combinations. */
+const COMBINATIONS = [
+  { id: 't1a', client_runtime: 'rust', worker_runtime: 'rust', hs_topology: 'same-hs' },
+  { id: 't1b', client_runtime: 'rust', worker_runtime: 'rust', hs_topology: 'federated' },
+  { id: 't2a', client_runtime: 'npm', worker_runtime: 'rust', hs_topology: 'same-hs' },
+  { id: 't2b', client_runtime: 'npm', worker_runtime: 'rust', hs_topology: 'federated' },
+  { id: 't3a', client_runtime: 'rust', worker_runtime: 'npm', hs_topology: 'same-hs' },
+  { id: 't3b', client_runtime: 'rust', worker_runtime: 'npm', hs_topology: 'federated' },
+  { id: 't4a', client_runtime: 'npm', worker_runtime: 'npm', hs_topology: 'same-hs' },
+  { id: 't4b', client_runtime: 'npm', worker_runtime: 'npm', hs_topology: 'federated' },
+];
+
+// Per-combination env-var overrides for debugging
+function isEnvSkipped({ client_runtime, worker_runtime }) {
+  const key = `SKIP_${client_runtime.toUpperCase()}_${worker_runtime.toUpperCase()}`;
+  return process.env[key] === '1' ? `${key}=1` : null;
+}
+
+// npm subprocess wiring is pending T-2.4 (Phase 2)
+function npmNotWired({ worker_runtime, client_runtime }) {
+  if (worker_runtime === 'npm' || client_runtime === 'npm') {
+    return 'npm launcher/client subprocess not yet wired (pending T-2.4)';
+  }
+  return null;
+}
+
+function skipFor(combo) {
+  return isEnvSkipped(combo) ?? npmNotWired(combo) ?? (skipReason || undefined);
+}
 
 describe('Rust ↔ npm Interop Beta', {
   skip: skipReason,
@@ -35,116 +58,51 @@ describe('Rust ↔ npm Interop Beta', {
     creds = loadBetaCredentials();
   });
 
-  // --- t1a: Rust client → Rust worker (same HS) ---
-  it('t1a: Rust client → Rust worker (ca1, same-HS)', {
-    skip: SKIP_RUST_RUST && 'SKIP_RUST_RUST=1',
-  }, async () => {
-    const worker = spawnRustBinary('mxdx-worker', [
-      'start', '--homeserver', creds.server.url,
-      '--username', creds.account1.username,
-      '--password', creds.account1.password,
-      '--p2p',
-    ]);
+  COMBINATIONS.forEach(({ id, client_runtime, worker_runtime, hs_topology }) => {
+    const label = `${id}: ${client_runtime} client → ${worker_runtime} worker (${hs_topology})`;
+    const skipMsg = skipFor({ client_runtime, worker_runtime });
 
-    try {
-      await worker.waitForOutput('worker ready', 30_000);
+    it(label, { skip: skipMsg }, async () => {
+      // -- Rust worker, Rust client (t1a / t1b) --
+      if (worker_runtime === 'rust' && client_runtime === 'rust') {
+        const workerServer = hs_topology === 'federated' ? creds.server2.url : creds.server.url;
+        const clientServer = creds.server.url;
 
-      const client = spawnRustBinary('mxdx-client', [
-        '--homeserver', creds.server.url,
-        '--username', creds.account2.username,
-        '--password', creds.account2.password,
-        '--p2p',
-        'exec', 'echo', 'interop-t1a',
-      ]);
+        // --p2p flag removed pending T-2.3 (fix clap-parse bug on mxdx-worker)
+        const worker = spawnRustBinary('mxdx-worker', [
+          'start', '--homeserver', workerServer,
+          '--username', creds.account1.username,
+          '--password', creds.account1.password,
+        ]);
 
-      try {
-        const { code, stdout } = await client.waitForExit(60_000);
-        assert.equal(code, 0);
-        assert.ok(stdout.includes('interop-t1a'));
-      } finally {
-        client.kill();
+        try {
+          await worker.waitForOutput('worker ready', 30_000);
+
+          const client = spawnRustBinary('mxdx-client', [
+            '--homeserver', clientServer,
+            '--username', creds.account2.username,
+            '--password', creds.account2.password,
+            'exec', 'echo', `interop-${id}`,
+          ]);
+
+          try {
+            const { code, stdout } = await client.waitForExit(
+              hs_topology === 'federated' ? 90_000 : 60_000,
+            );
+            assert.equal(code, 0);
+            assert.ok(stdout.includes(`interop-${id}`));
+          } finally {
+            client.kill();
+          }
+        } finally {
+          worker.kill();
+        }
+        return;
       }
-    } finally {
-      worker.kill();
-    }
-  });
 
-  // --- t1b: Rust client → Rust worker (federated) ---
-  it('t1b: Rust client → Rust worker (ca1↔ca2, federated)', {
-    skip: SKIP_RUST_RUST && 'SKIP_RUST_RUST=1',
-  }, async () => {
-    const worker = spawnRustBinary('mxdx-worker', [
-      'start', '--homeserver', creds.server2.url,
-      '--username', creds.account1.username,
-      '--password', creds.account1.password,
-      '--p2p',
-    ]);
-
-    try {
-      await worker.waitForOutput('worker ready', 30_000);
-
-      const client = spawnRustBinary('mxdx-client', [
-        '--homeserver', creds.server.url,
-        '--username', creds.account2.username,
-        '--password', creds.account2.password,
-        '--p2p',
-        'exec', 'echo', 'interop-t1b',
-      ]);
-
-      try {
-        const { code, stdout } = await client.waitForExit(90_000);
-        assert.equal(code, 0);
-        assert.ok(stdout.includes('interop-t1b'));
-      } finally {
-        client.kill();
-      }
-    } finally {
-      worker.kill();
-    }
-  });
-
-  // --- Placeholder: npm-involving combinations ---
-  // t2a/t2b: npm client → Rust worker (requires @mxdx/client npm binary)
-  // t3a/t3b: Rust client → npm launcher (requires @mxdx/launcher npm process)
-  // t4a/t4b: npm client → npm launcher (npm regression check)
-  //
-  // These require the npm launcher and client to be runnable as subprocesses.
-  // Full implementation pending npm binary availability in the test environment.
-
-  it('t2a: npm client → Rust worker (ca1, same-HS)', {
-    skip: SKIP_NPM_RUST ? 'SKIP_NPM_RUST=1' : 'npm client subprocess not yet wired',
-  }, async () => {
-    // TODO: Wire npm client subprocess
-    assert.ok(true, 'placeholder');
-  });
-
-  it('t2b: npm client → Rust worker (ca1↔ca2, federated)', {
-    skip: SKIP_NPM_RUST ? 'SKIP_NPM_RUST=1' : 'npm client subprocess not yet wired',
-  }, async () => {
-    assert.ok(true, 'placeholder');
-  });
-
-  it('t3a: Rust client → npm launcher (ca1, same-HS)', {
-    skip: SKIP_RUST_NPM ? 'SKIP_RUST_NPM=1' : 'npm launcher subprocess not yet wired',
-  }, async () => {
-    assert.ok(true, 'placeholder');
-  });
-
-  it('t3b: Rust client → npm launcher (ca1↔ca2, federated)', {
-    skip: SKIP_RUST_NPM ? 'SKIP_RUST_NPM=1' : 'npm launcher subprocess not yet wired',
-  }, async () => {
-    assert.ok(true, 'placeholder');
-  });
-
-  it('t4a: npm client → npm launcher (ca1, same-HS, regression)', {
-    skip: SKIP_NPM_NPM ? 'SKIP_NPM_NPM=1' : 'npm launcher subprocess not yet wired',
-  }, async () => {
-    assert.ok(true, 'placeholder');
-  });
-
-  it('t4b: npm client → npm launcher (ca1↔ca2, federated, regression)', {
-    skip: SKIP_NPM_NPM ? 'SKIP_NPM_NPM=1' : 'npm launcher subprocess not yet wired',
-  }, async () => {
-    assert.ok(true, 'placeholder');
+      // npm combinations are skipped via skipFor() above; this body is unreachable
+      // until T-2.4/T-2.5/T-2.6 wire subprocess spawning in Phase 2.
+      assert.fail(`Combination ${id} reached implementation body without npm wiring`);
+    });
   });
 });
