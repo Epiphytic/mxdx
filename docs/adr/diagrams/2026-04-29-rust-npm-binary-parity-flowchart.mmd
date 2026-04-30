@@ -1,0 +1,40 @@
+%% brains:diagram auto-generated source
+flowchart LR
+    subgraph "Rust binaries"
+        RW["mxdx-worker"]
+        RC["mxdx-client"]
+        RCO["mxdx-coordinator"]
+        RE["mxdx-exec"]
+    end
+
+    subgraph "npm binaries (thin wrappers)"
+        NL["@mxdx/launcher<br/>node-pty + IndexedDB"]
+        NC["@mxdx/client"]
+        NCO["@mxdx/coordinator"]
+    end
+
+    subgraph "Shared core"
+        WASM["mxdx-core-wasm<br/>session loop, batching,<br/>telemetry, P2P state"]
+        TYPES["mxdx-types<br/>config schema + wire format"]
+        TPERF["mxdx-test-perf<br/>JSONL writer"]
+    end
+
+    subgraph "CI"
+        GATE["wire-format-parity gate<br/>8 combinations × 3 transports"]
+    end
+
+    NL --> WASM
+    NC --> WASM
+    NCO --> WASM
+    RW --> TYPES
+    RC --> TYPES
+    RCO --> TYPES
+    NL --> TYPES
+    NC --> TYPES
+    NCO --> TYPES
+    WASM --> TYPES
+    GATE -->|gates merge to main| RW
+    GATE -->|gates merge to main| NL
+    GATE --> TPERF
+    RW -.->|emits perf via| TPERF
+    NL -.->|emits perf via| TPERF
