@@ -2346,3 +2346,907 @@ impl SessionTransportManager {
         self.rooms.len()
     }
 }
+
+// ── Session lifecycle + command dispatch state machine (T-4.5) ───────────────
+//
+// ADR docs/adr/2026-04-29-rust-npm-binary-parity.md req 13, 14, 15, 16
+// JS equivalent: packages/launcher/src/runtime.js::LauncherRuntime (core logic)
+//
+// WasmSessionManager: pure-Rust session state + command routing.
+// JS thin shell: OS-bound I/O (PTY, subprocess, Matrix client, timers).
+// Dispatch model: JS calls processCommands(events_json) -> SendActions JSON;
+// JS executes the returned send actions against the Matrix client.
+
+const SESSION_EVENT_TASK: &str = "org.mxdx.session.task";
+const SESSION_EVENT_START: &str = "org.mxdx.session.start";
+const SESSION_EVENT_OUTPUT: &str = "org.mxdx.session.output";
+const SESSION_EVENT_RESULT: &str = "org.mxdx.session.result";
+const SESSION_EVENT_CANCEL: &str = "org.mxdx.session.cancel";
+const SESSION_EVENT_SIGNAL: &str = "org.mxdx.session.signal";
+const SESSION_EVENT_ACTIVE: &str = "org.mxdx.session.active";
+const SESSION_EVENT_COMPLETED: &str = "org.mxdx.session.completed";
+
+/// A "send action" returned by WasmSessionManager.processCommands().
+/// JS executes each action against the Matrix client.
+#[derive(Serialize)]
+#[serde(tag = "kind")]
+enum SendAction {
+    /// Regular encrypted room event.
+    #[serde(rename = "send_event")]
+    SendEvent {
+        room_id: String,
+        event_type: String,
+        content: serde_json::Value,
+    },
+    /// Encrypted state event (MSC4362 path in JS).
+    #[serde(rename = "send_state_event")]
+    SendStateEvent {
+        room_id: String,
+        event_type: String,
+        state_key: String,
+        content: serde_json::Value,
+    },
+    /// Spawn a new PTY session (JS OS-bound operation).
+    #[serde(rename = "spawn_pty")]
+    SpawnPty {
+        session_id: String,
+        request_id: String,
+        command: String,
+        args: Vec<String>,
+        cols: u16,
+        rows: u16,
+        cwd: String,
+        env: serde_json::Value,
+        dm_room_id: String,
+        batch_ms: u32,
+        persistent: bool,
+    },
+    /// Execute a command via subprocess (JS OS-bound operation).
+    #[serde(rename = "exec_command")]
+    ExecCommand {
+        request_id: String,
+        uuid: String,
+        command: String,
+        args: Vec<String>,
+        cwd: String,
+        timeout_ms: u64,
+        exec_room_id: String,
+    },
+    /// Kill a PTY session.
+    #[serde(rename = "kill_pty")]
+    KillPty {
+        session_id: String,
+        signal: String,
+    },
+    /// Write session metadata to state room (JS handles Matrix write).
+    #[serde(rename = "write_session")]
+    WriteSession {
+        state_room_id: String,
+        device_id: String,
+        session_id: String,
+        content: serde_json::Value,
+    },
+    /// Remove session metadata from state room.
+    #[serde(rename = "remove_session")]
+    RemoveSession {
+        state_room_id: String,
+        device_id: String,
+        session_id: String,
+    },
+}
+
+/// Lightweight session record (security: MUST NOT expose sender or dmRoomId as public API).
+#[derive(Clone, Serialize, Deserialize)]
+struct SessionRecord {
+    session_id: String,
+    tmux_name: Option<String>,
+    dm_room_id: String,
+    /// Matrix user ID of the session requester — kept internal, not returned to JS callers.
+    #[serde(skip_serializing)]
+    sender: String,
+    persistent: bool,
+    created_at: String,
+    alive: bool,
+}
+
+/// Configuration for WasmSessionManager.
+#[derive(Deserialize)]
+struct WasmSessionConfig {
+    allowed_commands: Vec<String>,
+    allowed_cwd: Vec<String>,
+    max_sessions: u32,
+    username: String,
+    #[serde(default)]
+    use_tmux: String,
+    #[serde(default = "default_batch_ms")]
+    batch_ms: u32,
+}
+
+fn default_batch_ms() -> u32 { 200 }
+
+/// Pure-Rust session state machine for the launcher.
+///
+/// Manages session registry, command routing, and authorization.
+/// All OS-bound I/O is expressed as `SendAction` return values for JS to execute.
+#[wasm_bindgen]
+pub struct WasmSessionManager {
+    config: WasmSessionConfig,
+    exec_room_id: String,
+    state_room_id: String,
+    user_id: String,
+    device_id: String,
+    processed_events: std::collections::HashSet<String>,
+    sessions: HashMap<String, SessionRecord>,
+    /// Map "username:clientUserId" -> dmRoomId
+    session_rooms: HashMap<String, String>,
+    active_sessions: u32,
+}
+
+#[wasm_bindgen]
+impl WasmSessionManager {
+    /// Create a new WasmSessionManager from a JSON config string.
+    ///
+    /// `config_json`: serialized WasmSessionConfig
+    /// `exec_room_id`: exec room for session events
+    /// `state_room_id`: state room for persistence
+    /// `user_id`: Matrix user ID of the launcher
+    /// `device_id`: Matrix device ID of the launcher
+    #[wasm_bindgen(constructor)]
+    pub fn new(
+        config_json: &str,
+        exec_room_id: &str,
+        state_room_id: &str,
+        user_id: &str,
+        device_id: &str,
+    ) -> Result<WasmSessionManager, JsValue> {
+        let config: WasmSessionConfig = serde_json::from_str(config_json)
+            .map_err(|e| to_js_err(format!("WasmSessionManager config parse error: {e}")))?;
+        Ok(WasmSessionManager {
+            config,
+            exec_room_id: exec_room_id.to_string(),
+            state_room_id: state_room_id.to_string(),
+            user_id: user_id.to_string(),
+            device_id: device_id.to_string(),
+            processed_events: std::collections::HashSet::new(),
+            sessions: HashMap::new(),
+            session_rooms: HashMap::new(),
+            active_sessions: 0,
+        })
+    }
+
+    /// Process a batch of Matrix events from the exec room.
+    ///
+    /// `events_json`: JSON array of room events (from `collectRoomEvents`)
+    ///
+    /// Returns a JSON array of `SendAction` objects for JS to execute.
+    /// JS executes each action against the Matrix client and OS APIs.
+    #[wasm_bindgen(js_name = "processCommands")]
+    pub fn process_commands(&mut self, events_json: &str) -> Result<String, JsValue> {
+        let events: Vec<serde_json::Value> = serde_json::from_str(events_json)
+            .map_err(|e| to_js_err(format!("processCommands: invalid events JSON: {e}")))?;
+
+        let mut actions: Vec<SendAction> = Vec::new();
+
+        for event in &events {
+            let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let event_id = event.get("event_id").and_then(|v| v.as_str()).unwrap_or("");
+            if event_id.is_empty() { continue; }
+            if self.processed_events.contains(event_id) { continue; }
+            self.processed_events.insert(event_id.to_string());
+
+            let content = event.get("content").cloned().unwrap_or(serde_json::Value::Object(Default::default()));
+            let sender = event.get("sender").and_then(|v| v.as_str()).unwrap_or("");
+
+            match event_type {
+                SESSION_EVENT_TASK => {
+                    if sender == self.user_id { continue; }
+                    self.handle_session_task(&content, event_id, sender, &mut actions);
+                }
+                SESSION_EVENT_CANCEL => {
+                    if sender == self.user_id { continue; }
+                    self.handle_session_cancel(&content, &mut actions);
+                }
+                SESSION_EVENT_SIGNAL => {
+                    if sender == self.user_id { continue; }
+                    self.handle_session_signal(&content, &mut actions);
+                }
+                "org.mxdx.command" => {
+                    self.handle_legacy_command(&content, event_id, sender, &mut actions);
+                }
+                _ => {}
+            }
+        }
+
+        serde_json::to_string(&actions)
+            .map_err(|e| to_js_err(format!("processCommands: serialize actions: {e}")))
+    }
+
+    /// Called by JS when a PTY session exits.
+    /// Returns a JSON array of SendActions to execute (state event cleanup).
+    #[wasm_bindgen(js_name = "onPtyExit")]
+    pub fn on_pty_exit(&mut self, session_id: &str, exit_code: i32) -> Result<String, JsValue> {
+        let actions = self.cleanup_session(session_id, exit_code);
+        serde_json::to_string(&actions)
+            .map_err(|e| to_js_err(format!("onPtyExit: serialize actions: {e}")))
+    }
+
+    /// Called by JS when an exec command completes.
+    /// Returns a JSON array of SendActions (SESSION_RESULT + state event).
+    #[wasm_bindgen(js_name = "onCommandComplete")]
+    pub fn on_command_complete(
+        &mut self,
+        uuid: &str,
+        exec_room_id: &str,
+        exit_code: i32,
+        duration_seconds: u32,
+        timed_out: bool,
+        tail_json: &str,
+        error_msg: &str,
+    ) -> Result<String, JsValue> {
+        let tail: Vec<String> = if tail_json.is_empty() {
+            vec![]
+        } else {
+            serde_json::from_str(tail_json).unwrap_or_default()
+        };
+
+        let status = if exit_code == 0 && !timed_out { "success" } else { "failed" };
+        let mut result_content = serde_json::json!({
+            "session_uuid": uuid,
+            "worker_id": self.user_id,
+            "status": status,
+            "exit_code": exit_code,
+            "duration_seconds": duration_seconds,
+            "tail": tail,
+            "timed_out": timed_out,
+        });
+        if !error_msg.is_empty() {
+            result_content["error"] = serde_json::Value::String(error_msg.to_string());
+        }
+
+        let mut actions = vec![
+            SendAction::SendEvent {
+                room_id: exec_room_id.to_string(),
+                event_type: SESSION_EVENT_RESULT.to_string(),
+                content: result_content,
+            },
+            // Clear active session state
+            SendAction::SendStateEvent {
+                room_id: exec_room_id.to_string(),
+                event_type: SESSION_EVENT_ACTIVE.to_string(),
+                state_key: format!("session/{uuid}"),
+                content: serde_json::Value::Object(Default::default()),
+            },
+            // Write completed state
+            SendAction::SendStateEvent {
+                room_id: exec_room_id.to_string(),
+                event_type: SESSION_EVENT_COMPLETED.to_string(),
+                state_key: format!("session/{uuid}"),
+                content: serde_json::json!({
+                    "session_uuid": uuid,
+                    "worker_id": self.user_id,
+                    "status": status,
+                    "exit_code": exit_code,
+                    "duration_seconds": duration_seconds,
+                }),
+            },
+        ];
+
+        if self.active_sessions > 0 { self.active_sessions -= 1; }
+
+        serde_json::to_string(&actions)
+            .map_err(|e| to_js_err(format!("onCommandComplete: serialize: {e}")))
+    }
+
+    /// Report a session as started (called by JS after PTY spawn succeeds).
+    /// Returns SendActions to emit SESSION_START + write active state.
+    #[wasm_bindgen(js_name = "onSessionStarted")]
+    pub fn on_session_started(
+        &mut self,
+        session_id: &str,
+        _request_id: &str,
+        dm_room_id: &str,
+        tmux_name: &str,
+        persistent: bool,
+        _batch_ms: u32,
+        sender: &str,
+        started_at_secs: f64,
+        bin: &str,
+        args_json: &str,
+    ) -> Result<String, JsValue> {
+        let args: Vec<String> = serde_json::from_str(args_json).unwrap_or_default();
+        let created_at = js_sys::Date::new_0().to_iso_string().as_string().unwrap_or_default();
+        self.sessions.insert(session_id.to_string(), SessionRecord {
+            session_id: session_id.to_string(),
+            tmux_name: if tmux_name.is_empty() { None } else { Some(tmux_name.to_string()) },
+            dm_room_id: dm_room_id.to_string(),
+            sender: sender.to_string(),
+            persistent,
+            created_at: created_at.clone(),
+            alive: true,
+        });
+
+        let actions = vec![
+            SendAction::SendEvent {
+                room_id: self.exec_room_id.clone(),
+                event_type: SESSION_EVENT_START.to_string(),
+                content: serde_json::json!({
+                    "session_uuid": session_id,
+                    "worker_id": self.user_id,
+                    "tmux_session": if tmux_name.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(tmux_name.to_string()) },
+                    "pid": serde_json::Value::Null,
+                    "started_at": started_at_secs as u64,
+                }),
+            },
+            SendAction::SendStateEvent {
+                room_id: self.exec_room_id.clone(),
+                event_type: SESSION_EVENT_ACTIVE.to_string(),
+                state_key: format!("session/{session_id}"),
+                content: serde_json::json!({
+                    "session_uuid": session_id,
+                    "worker_id": self.user_id,
+                    "bin": bin,
+                    "args": args,
+                    "sender_id": sender,
+                    "started_at": started_at_secs as u64,
+                }),
+            },
+            SendAction::WriteSession {
+                state_room_id: self.state_room_id.clone(),
+                device_id: self.device_id.clone(),
+                session_id: session_id.to_string(),
+                content: serde_json::json!({
+                    "uuid": session_id,
+                    "tmuxName": tmux_name,
+                    "dmRoomId": dm_room_id,
+                    "sender": sender,
+                    "persistent": persistent,
+                    "createdAt": created_at,
+                    "state": "running",
+                }),
+            },
+        ];
+
+        serde_json::to_string(&actions)
+            .map_err(|e| to_js_err(format!("onSessionStarted: serialize: {e}")))
+    }
+
+    /// Register a recovered (existing tmux) session from state room.
+    #[wasm_bindgen(js_name = "recoverSession")]
+    pub fn recover_session(
+        &mut self,
+        session_id: &str,
+        tmux_name: &str,
+        dm_room_id: &str,
+        sender: &str,
+        persistent: bool,
+        created_at: &str,
+    ) {
+        self.sessions.insert(session_id.to_string(), SessionRecord {
+            session_id: session_id.to_string(),
+            tmux_name: if tmux_name.is_empty() { None } else { Some(tmux_name.to_string()) },
+            dm_room_id: dm_room_id.to_string(),
+            sender: sender.to_string(),
+            persistent,
+            created_at: created_at.to_string(),
+            alive: true,
+        });
+        if !dm_room_id.is_empty() && !sender.is_empty() {
+            let key = self.session_room_key(sender);
+            self.session_rooms.entry(key).or_insert_with(|| dm_room_id.to_string());
+        }
+    }
+
+    /// Register a session room mapping (called when a DM room is created/loaded).
+    #[wasm_bindgen(js_name = "registerSessionRoom")]
+    pub fn register_session_room(&mut self, room_key: &str, room_id: &str) {
+        self.session_rooms.insert(room_key.to_string(), room_id.to_string());
+    }
+
+    /// Get the DM room ID for a client user, or empty string if not found.
+    #[wasm_bindgen(js_name = "getSessionRoomId")]
+    pub fn get_session_room_id(&self, client_user_id: &str) -> String {
+        let key = self.session_room_key(client_user_id);
+        self.session_rooms.get(&key).cloned().unwrap_or_default()
+    }
+
+    /// Get the room key for a client user.
+    #[wasm_bindgen(js_name = "sessionRoomKey")]
+    pub fn session_room_key_pub(&self, client_user_id: &str) -> String {
+        self.session_room_key(client_user_id)
+    }
+
+    /// Returns a JSON array of public session info (session_id, persistent, tmux_name, alive).
+    /// DOES NOT return sender IDs or dmRoomIds (security constraint per T-4.5).
+    #[wasm_bindgen(js_name = "listSessions")]
+    pub fn list_sessions(&self) -> Result<String, JsValue> {
+        let sessions: Vec<serde_json::Value> = self.sessions.values().map(|s| {
+            serde_json::json!({
+                "session_id": s.session_id,
+                "persistent": s.persistent,
+                "tmux_name": s.tmux_name,
+                "alive": s.alive,
+                "created_at": s.created_at,
+            })
+        }).collect();
+        serde_json::to_string(&sessions)
+            .map_err(|e| to_js_err(format!("listSessions: serialize: {e}")))
+    }
+
+    /// Returns the DM room ID for a session (needed for transport setup in JS).
+    #[wasm_bindgen(js_name = "sessionDmRoomId")]
+    pub fn session_dm_room_id(&self, session_id: &str) -> String {
+        self.sessions.get(session_id).map(|s| s.dm_room_id.clone()).unwrap_or_default()
+    }
+
+    /// Returns the sender (client user ID) for a session.
+    #[wasm_bindgen(js_name = "sessionSender")]
+    pub fn session_sender(&self, session_id: &str) -> String {
+        self.sessions.get(session_id).map(|s| s.sender.clone()).unwrap_or_default()
+    }
+
+    /// Returns the tmux name for a session, or empty string.
+    #[wasm_bindgen(js_name = "sessionTmuxName")]
+    pub fn session_tmux_name(&self, session_id: &str) -> String {
+        self.sessions.get(session_id).and_then(|s| s.tmux_name.clone()).unwrap_or_default()
+    }
+
+    /// Check authorization for a command against the allowlist.
+    #[wasm_bindgen(js_name = "isCommandAllowed")]
+    pub fn is_command_allowed(&self, command: &str) -> bool {
+        if self.config.allowed_commands.is_empty() { return false; }
+        self.config.allowed_commands.iter().any(|c| c == command)
+    }
+
+    /// Check authorization for a cwd against the allowlist.
+    #[wasm_bindgen(js_name = "isCwdAllowed")]
+    pub fn is_cwd_allowed(&self, cwd: &str) -> bool {
+        self.config.allowed_cwd.iter().any(|allowed| cwd.starts_with(allowed.as_str()))
+    }
+
+    /// Number of currently active sessions.
+    #[wasm_bindgen(getter, js_name = "activeSessions")]
+    pub fn active_sessions(&self) -> u32 {
+        self.active_sessions
+    }
+
+    /// Maximum allowed sessions.
+    #[wasm_bindgen(getter, js_name = "maxSessions")]
+    pub fn max_sessions(&self) -> u32 {
+        self.config.max_sessions
+    }
+
+    /// Increment active session count (called by JS before spawning a PTY or exec).
+    #[wasm_bindgen(js_name = "incrementActiveSessions")]
+    pub fn increment_active_sessions(&mut self) {
+        self.active_sessions += 1;
+    }
+
+    /// Decrement active session count (called by JS on session end / exec complete).
+    #[wasm_bindgen(js_name = "decrementActiveSessions")]
+    pub fn decrement_active_sessions(&mut self) {
+        if self.active_sessions > 0 { self.active_sessions -= 1; }
+    }
+
+    /// Mark a session as not alive (PTY exited).
+    #[wasm_bindgen(js_name = "markSessionDead")]
+    pub fn mark_session_dead(&mut self, session_id: &str) {
+        if let Some(s) = self.sessions.get_mut(session_id) {
+            s.alive = false;
+        }
+    }
+
+    /// Remove a session record entirely.
+    #[wasm_bindgen(js_name = "removeSession")]
+    pub fn remove_session(&mut self, session_id: &str) {
+        self.sessions.remove(session_id);
+    }
+
+    /// Returns the default batch_ms from config.
+    #[wasm_bindgen(getter, js_name = "defaultBatchMs")]
+    pub fn default_batch_ms(&self) -> u32 {
+        self.config.batch_ms
+    }
+
+    // ── Internal helpers ──────────────────────────────────────────────────
+
+    fn session_room_key(&self, client_user_id: &str) -> String {
+        format!("{}:{}", self.config.username, client_user_id)
+    }
+
+    fn handle_session_task(
+        &mut self,
+        task: &serde_json::Value,
+        event_id: &str,
+        sender: &str,
+        actions: &mut Vec<SendAction>,
+    ) {
+        let uuid = task.get("uuid").and_then(|v| v.as_str()).unwrap_or(event_id);
+        let bin = task.get("bin").or_else(|| task.get("command"))
+            .and_then(|v| v.as_str()).unwrap_or("");
+        let args: Vec<String> = task.get("args")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let cwd = task.get("cwd").and_then(|v| v.as_str()).unwrap_or("/tmp");
+        let interactive = task.get("interactive").and_then(|v| v.as_bool()).unwrap_or(false);
+        let timeout_seconds = task.get("timeout_seconds").and_then(|v| v.as_u64());
+        let exec_room_id = self.exec_room_id.clone();
+
+        if interactive {
+            // Route to interactive handler (spawn_pty)
+            let cols = task.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+            let rows = task.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
+            self.handle_interactive_request(uuid, sender, bin, &args, cwd, cols, rows,
+                serde_json::Value::Object(Default::default()), self.config.batch_ms, actions);
+            return;
+        }
+
+        // Validate
+        if !self.is_command_allowed(bin) {
+            actions.push(SendAction::SendEvent {
+                room_id: exec_room_id.clone(),
+                event_type: SESSION_EVENT_RESULT.to_string(),
+                content: serde_json::json!({
+                    "session_uuid": uuid,
+                    "worker_id": self.user_id,
+                    "status": "failed",
+                    "exit_code": 1,
+                    "error": format!("Command '{}' is not allowed", bin),
+                    "duration_seconds": 0,
+                    "tail": [],
+                }),
+            });
+            return;
+        }
+        if !self.is_cwd_allowed(cwd) {
+            actions.push(SendAction::SendEvent {
+                room_id: exec_room_id.clone(),
+                event_type: SESSION_EVENT_RESULT.to_string(),
+                content: serde_json::json!({
+                    "session_uuid": uuid,
+                    "worker_id": self.user_id,
+                    "status": "failed",
+                    "exit_code": 1,
+                    "error": format!("Working directory '{}' is not allowed", cwd),
+                    "duration_seconds": 0,
+                    "tail": [],
+                }),
+            });
+            return;
+        }
+        if self.active_sessions >= self.config.max_sessions {
+            actions.push(SendAction::SendEvent {
+                room_id: exec_room_id.clone(),
+                event_type: SESSION_EVENT_RESULT.to_string(),
+                content: serde_json::json!({
+                    "session_uuid": uuid,
+                    "worker_id": self.user_id,
+                    "status": "failed",
+                    "exit_code": 1,
+                    "error": format!("Session limit reached ({} max)", self.config.max_sessions),
+                    "duration_seconds": 0,
+                    "tail": [],
+                }),
+            });
+            return;
+        }
+
+        self.active_sessions += 1;
+        let timeout_ms = timeout_seconds.unwrap_or(30) * 1000;
+        let started_at_secs = (js_sys::Date::now() / 1000.0) as u64;
+
+        // SESSION_START event
+        actions.push(SendAction::SendEvent {
+            room_id: exec_room_id.clone(),
+            event_type: SESSION_EVENT_START.to_string(),
+            content: serde_json::json!({
+                "session_uuid": uuid,
+                "worker_id": self.user_id,
+                "tmux_session": serde_json::Value::Null,
+                "pid": serde_json::Value::Null,
+                "started_at": started_at_secs,
+            }),
+        });
+        // ACTIVE state event
+        actions.push(SendAction::SendStateEvent {
+            room_id: exec_room_id.clone(),
+            event_type: SESSION_EVENT_ACTIVE.to_string(),
+            state_key: format!("session/{uuid}"),
+            content: serde_json::json!({
+                "session_uuid": uuid,
+                "worker_id": self.user_id,
+                "bin": bin,
+                "args": args,
+                "sender_id": sender,
+                "started_at": started_at_secs,
+            }),
+        });
+        // Exec command action (JS runs the subprocess)
+        actions.push(SendAction::ExecCommand {
+            request_id: uuid.to_string(),
+            uuid: uuid.to_string(),
+            command: bin.to_string(),
+            args,
+            cwd: cwd.to_string(),
+            timeout_ms,
+            exec_room_id,
+        });
+    }
+
+    fn handle_session_cancel(&mut self, content: &serde_json::Value, actions: &mut Vec<SendAction>) {
+        let uuid = content.get("session_uuid").and_then(|v| v.as_str()).unwrap_or("");
+        let _grace_seconds = content.get("grace_seconds").and_then(|v| v.as_u64()).unwrap_or(5);
+        if uuid.is_empty() { return; }
+
+        if self.sessions.contains_key(uuid) {
+            actions.push(SendAction::KillPty {
+                session_id: uuid.to_string(),
+                signal: "SIGTERM".to_string(),
+            });
+        }
+    }
+
+    fn handle_session_signal(&mut self, content: &serde_json::Value, actions: &mut Vec<SendAction>) {
+        let uuid = content.get("session_uuid").and_then(|v| v.as_str()).unwrap_or("");
+        let signal = content.get("signal").and_then(|v| v.as_str()).unwrap_or("");
+        if uuid.is_empty() || signal.is_empty() { return; }
+
+        if self.sessions.contains_key(uuid) {
+            actions.push(SendAction::KillPty {
+                session_id: uuid.to_string(),
+                signal: signal.to_string(),
+            });
+        }
+    }
+
+    fn handle_legacy_command(
+        &mut self,
+        content: &serde_json::Value,
+        event_id: &str,
+        sender: &str,
+        actions: &mut Vec<SendAction>,
+    ) {
+        let action = content.get("action").and_then(|v| v.as_str()).unwrap_or("");
+        let command = content.get("command").and_then(|v| v.as_str()).unwrap_or("");
+        let args: Vec<String> = content.get("args")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        let cwd = content.get("cwd").and_then(|v| v.as_str()).unwrap_or("/tmp");
+        let request_id = content.get("request_id").and_then(|v| v.as_str()).unwrap_or(event_id);
+        let exec_room_id = self.exec_room_id.clone();
+
+        match action {
+            "interactive" => {
+                let cols = content.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+                let rows = content.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
+                let env = content.get("env").cloned().unwrap_or(serde_json::Value::Object(Default::default()));
+                let client_batch_ms = content.get("batch_ms").and_then(|v| v.as_u64()).unwrap_or(200) as u32;
+                let negotiated_batch_ms = std::cmp::max(client_batch_ms, self.config.batch_ms);
+                self.handle_interactive_request(request_id, sender, command, &args, cwd,
+                    cols, rows, env, negotiated_batch_ms, actions);
+            }
+            "list_sessions" => {
+                let sessions = self.sessions.values().map(|s| serde_json::json!({
+                    "session_id": s.session_id,
+                    "room_id": s.dm_room_id,
+                    "persistent": s.persistent,
+                    "tmux_name": s.tmux_name,
+                    "alive": s.alive,
+                    "created_at": s.created_at,
+                })).collect::<Vec<_>>();
+                actions.push(SendAction::SendEvent {
+                    room_id: exec_room_id,
+                    event_type: "org.mxdx.terminal.sessions".to_string(),
+                    content: serde_json::json!({ "request_id": request_id, "sessions": sessions }),
+                });
+            }
+            "reconnect" => {
+                let session_id = content.get("session_id").and_then(|v| v.as_str()).unwrap_or("");
+                let cols = content.get("cols").and_then(|v| v.as_u64()).unwrap_or(80) as u16;
+                let rows = content.get("rows").and_then(|v| v.as_u64()).unwrap_or(24) as u16;
+                self.handle_reconnect_request(session_id, request_id, sender, cols, rows, actions);
+            }
+            _ => {
+                // Non-interactive command execution
+                if !self.is_command_allowed(command) {
+                    actions.push(SendAction::SendEvent {
+                        room_id: exec_room_id.clone(),
+                        event_type: "org.mxdx.result".to_string(),
+                        content: serde_json::json!({
+                            "request_id": request_id,
+                            "exit_code": 1,
+                            "error": format!("Command '{}' is not allowed", command),
+                        }),
+                    });
+                    return;
+                }
+                if !self.is_cwd_allowed(cwd) {
+                    actions.push(SendAction::SendEvent {
+                        room_id: exec_room_id.clone(),
+                        event_type: "org.mxdx.result".to_string(),
+                        content: serde_json::json!({
+                            "request_id": request_id,
+                            "exit_code": 1,
+                            "error": format!("Working directory '{}' is not allowed", cwd),
+                        }),
+                    });
+                    return;
+                }
+                if self.active_sessions >= self.config.max_sessions {
+                    actions.push(SendAction::SendEvent {
+                        room_id: exec_room_id.clone(),
+                        event_type: "org.mxdx.result".to_string(),
+                        content: serde_json::json!({
+                            "request_id": request_id,
+                            "exit_code": 1,
+                            "error": format!("Session limit reached ({} max)", self.config.max_sessions),
+                        }),
+                    });
+                    return;
+                }
+                self.active_sessions += 1;
+                actions.push(SendAction::ExecCommand {
+                    request_id: request_id.to_string(),
+                    uuid: request_id.to_string(),
+                    command: command.to_string(),
+                    args,
+                    cwd: cwd.to_string(),
+                    timeout_ms: 30_000,
+                    exec_room_id,
+                });
+            }
+        }
+    }
+
+    fn handle_interactive_request(
+        &mut self,
+        request_id: &str,
+        sender: &str,
+        command: &str,
+        args: &[String],
+        cwd: &str,
+        cols: u16,
+        rows: u16,
+        env: serde_json::Value,
+        batch_ms: u32,
+        actions: &mut Vec<SendAction>,
+    ) {
+        let exec_room_id = self.exec_room_id.clone();
+
+        if !command.is_empty() && !self.is_command_allowed(command) {
+            actions.push(SendAction::SendEvent {
+                room_id: exec_room_id,
+                event_type: "org.mxdx.terminal.session".to_string(),
+                content: serde_json::json!({ "request_id": request_id, "status": "rejected", "room_id": serde_json::Value::Null }),
+            });
+            return;
+        }
+        if !self.is_cwd_allowed(cwd) {
+            actions.push(SendAction::SendEvent {
+                room_id: exec_room_id,
+                event_type: "org.mxdx.terminal.session".to_string(),
+                content: serde_json::json!({ "request_id": request_id, "status": "rejected", "room_id": serde_json::Value::Null }),
+            });
+            return;
+        }
+        if self.active_sessions >= self.config.max_sessions {
+            actions.push(SendAction::SendEvent {
+                room_id: exec_room_id,
+                event_type: "org.mxdx.terminal.session".to_string(),
+                content: serde_json::json!({ "request_id": request_id, "status": "rejected", "room_id": serde_json::Value::Null }),
+            });
+            return;
+        }
+        if sender.is_empty() {
+            actions.push(SendAction::SendEvent {
+                room_id: exec_room_id,
+                event_type: "org.mxdx.terminal.session".to_string(),
+                content: serde_json::json!({ "request_id": request_id, "status": "rejected", "room_id": serde_json::Value::Null }),
+            });
+            return;
+        }
+
+        self.active_sessions += 1;
+        let dm_room_id = self.session_rooms.get(&self.session_room_key(sender)).cloned().unwrap_or_default();
+
+        actions.push(SendAction::SpawnPty {
+            session_id: request_id.to_string(),
+            request_id: request_id.to_string(),
+            command: command.to_string(),
+            args: args.to_vec(),
+            cols,
+            rows,
+            cwd: cwd.to_string(),
+            env,
+            dm_room_id,
+            batch_ms,
+            persistent: self.config.use_tmux != "never",
+        });
+    }
+
+    fn handle_reconnect_request(
+        &mut self,
+        session_id: &str,
+        request_id: &str,
+        sender: &str,
+        cols: u16,
+        rows: u16,
+        actions: &mut Vec<SendAction>,
+    ) {
+        let exec_room_id = self.exec_room_id.clone();
+        let entry = self.sessions.get(session_id);
+        match entry {
+            None => {
+                actions.push(SendAction::SendEvent {
+                    room_id: exec_room_id,
+                    event_type: "org.mxdx.terminal.session".to_string(),
+                    content: serde_json::json!({ "request_id": request_id, "status": "expired", "room_id": serde_json::Value::Null }),
+                });
+            }
+            Some(entry) if !entry.persistent => {
+                actions.push(SendAction::SendEvent {
+                    room_id: exec_room_id,
+                    event_type: "org.mxdx.terminal.session".to_string(),
+                    content: serde_json::json!({ "request_id": request_id, "status": "expired", "room_id": serde_json::Value::Null }),
+                });
+            }
+            Some(entry) if entry.sender != sender => {
+                actions.push(SendAction::SendEvent {
+                    room_id: exec_room_id,
+                    event_type: "org.mxdx.terminal.session".to_string(),
+                    content: serde_json::json!({ "request_id": request_id, "status": "rejected", "room_id": serde_json::Value::Null }),
+                });
+            }
+            Some(entry) => {
+                let dm_room_id = entry.dm_room_id.clone();
+                let _tmux_name = entry.tmux_name.clone();
+                self.active_sessions += 1;
+                actions.push(SendAction::SendEvent {
+                    room_id: exec_room_id.clone(),
+                    event_type: "org.mxdx.terminal.session".to_string(),
+                    content: serde_json::json!({
+                        "request_id": request_id,
+                        "status": "reconnected",
+                        "room_id": dm_room_id,
+                        "session_id": session_id,
+                        "persistent": true,
+                    }),
+                });
+                actions.push(SendAction::SpawnPty {
+                    session_id: session_id.to_string(),
+                    request_id: request_id.to_string(),
+                    command: "bash".to_string(),
+                    args: vec![],
+                    cols,
+                    rows,
+                    cwd: "/tmp".to_string(),
+                    env: serde_json::Value::Object(Default::default()),
+                    dm_room_id,
+                    batch_ms: self.config.batch_ms,
+                    persistent: true,
+                });
+            }
+        }
+    }
+
+    fn cleanup_session(&mut self, session_id: &str, _exit_code: i32) -> Vec<SendAction> {
+        let entry = match self.sessions.get(session_id) {
+            Some(e) => e.clone(),
+            None => return vec![],
+        };
+
+        let mut actions = vec![];
+        if !entry.persistent {
+            self.sessions.remove(session_id);
+            actions.push(SendAction::RemoveSession {
+                state_room_id: self.state_room_id.clone(),
+                device_id: self.device_id.clone(),
+                session_id: session_id.to_string(),
+            });
+        }
+
+        if self.active_sessions > 0 { self.active_sessions -= 1; }
+        actions
+    }
+}

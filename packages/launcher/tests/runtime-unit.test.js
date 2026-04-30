@@ -136,6 +136,65 @@ describe('SessionTransportManager state machine', () => {
   });
 });
 
+// ── B.1c: WasmSessionManager command routing ─────────────────────────────
+
+describe('WasmSessionManager command routing', () => {
+  const makeManager = async () => {
+    const { WasmSessionManager } = await import('@mxdx/core');
+    return new WasmSessionManager(
+      JSON.stringify({ allowed_commands: ['echo', 'bash'], allowed_cwd: ['/tmp'], max_sessions: 10, username: 'launcher', use_tmux: 'auto', batch_ms: 200 }),
+      '!exec:example.com', '!state:example.com', '@launcher:example.com', 'DEVICE1',
+    );
+  };
+
+  it('rejects disallowed commands', async () => {
+    const mgr = await makeManager();
+    const events = JSON.stringify([{ event_id: '$evt1', type: 'org.mxdx.session.task', sender: '@client:example.com', content: { uuid: 'task-1', bin: 'rm', args: ['-rf', '/'], cwd: '/tmp' } }]);
+    const actions = JSON.parse(mgr.processCommands(events));
+    assert.strictEqual(actions.length, 1, 'Should produce one action (reject result)');
+    assert.strictEqual(actions[0].kind, 'send_event');
+    assert.ok(actions[0].content.error, 'Should include error message');
+    assert.strictEqual(actions[0].content.status, 'failed', 'Should be failed status');
+  });
+
+  it('rejects disallowed cwd', async () => {
+    const mgr = await makeManager();
+    const events = JSON.stringify([{ event_id: '$evt2', type: 'org.mxdx.session.task', sender: '@client:example.com', content: { uuid: 'task-2', bin: 'echo', args: ['hi'], cwd: '/etc' } }]);
+    const actions = JSON.parse(mgr.processCommands(events));
+    assert.strictEqual(actions[0].content.status, 'failed');
+    assert.ok(actions[0].content.error.includes('not allowed'));
+  });
+
+  it('rejects self-sent events', async () => {
+    const mgr = await makeManager();
+    const events = JSON.stringify([{ event_id: '$evt3', type: 'org.mxdx.session.task', sender: '@launcher:example.com', content: { uuid: 'task-3', bin: 'echo', cwd: '/tmp' } }]);
+    const actions = JSON.parse(mgr.processCommands(events));
+    assert.strictEqual(actions.length, 0, 'Should ignore events from self');
+  });
+
+  it('deduplicates processed events', async () => {
+    const mgr = await makeManager();
+    const events = JSON.stringify([{ event_id: '$evt4', type: 'org.mxdx.command', sender: '@client:example.com', content: { action: 'list_sessions', request_id: 'req-1' } }]);
+    const actions1 = JSON.parse(mgr.processCommands(events));
+    const actions2 = JSON.parse(mgr.processCommands(events));
+    assert.strictEqual(actions1.length, 1, 'First process produces action');
+    assert.strictEqual(actions2.length, 0, 'Second process skips duplicate event_id');
+  });
+
+  it('isCommandAllowed checks allowlist', async () => {
+    const mgr = await makeManager();
+    assert.strictEqual(mgr.isCommandAllowed('echo'), true);
+    assert.strictEqual(mgr.isCommandAllowed('rm'), false);
+  });
+
+  it('isCwdAllowed checks prefix list', async () => {
+    const mgr = await makeManager();
+    assert.strictEqual(mgr.isCwdAllowed('/tmp'), true);
+    assert.strictEqual(mgr.isCwdAllowed('/tmp/sub'), true);
+    assert.strictEqual(mgr.isCwdAllowed('/etc'), false);
+  });
+});
+
 // ── B.2: Max Sessions Enforcement ────────────────────────────────────────
 
 describe('Max sessions enforcement', () => {

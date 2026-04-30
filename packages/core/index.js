@@ -16,6 +16,7 @@ export const {
   SessionTransportManager,
   WasmBatchedSender,
   WasmMatrixClient,
+  WasmSessionManager,
   buildTelemetryPayload,
   compressTerminalData,
   create_session_task,

@@ -1,439 +1,99 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
-import { connectWithSession, TerminalDataEvent, saveIndexedDB, BatchedSender, fetchTurnCredentials, turnToIceServers, NodeWebRTCChannel, P2PSignaling, P2PTransport, generateSessionKey, createP2PCrypto, processTerminalInput, buildTelemetryPayload, SessionTransportManager } from '@mxdx/core';
+import {
+  connectWithSession,
+  saveIndexedDB,
+  BatchedSender,
+  P2PTransport,
+  generateSessionKey,
+  createP2PCrypto,
+  buildTelemetryPayload,
+  SessionTransportManager,
+  WasmSessionManager,
+} from '@mxdx/core';
 // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::WasmBatchedSender + compress_terminal_data
 import { executeCommand } from './process-bridge.js';
 // Rust equivalent: crates/mxdx-worker/src/bin/mxdx_exec.rs::execute_command
 import { PtyBridge } from './pty-bridge.js';
 // Rust equivalent: crates/mxdx-worker/src/bin/mxdx_exec.rs::main (tmux + Unix-socket exit-code channel)
+import { SessionMux } from './session-mux.js';
+// Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::SessionTransportManager (state tracking)
+import { attemptP2PConnection } from './p2p-bridge.js';
+// Rust equivalent: crates/mxdx-worker/src/p2p/ (OS-bound: node-datachannel native addon)
 
 const DEFAULT_SESSION_DIR = path.join(os.homedir(), '.mxdx');
 
 /**
- * Unified session event type constants.
- */
-const SESSION_EVENTS = {
-  TASK: 'org.mxdx.session.task',
-  START: 'org.mxdx.session.start',
-  OUTPUT: 'org.mxdx.session.output',
-  RESULT: 'org.mxdx.session.result',
-  CANCEL: 'org.mxdx.session.cancel',
-  SIGNAL: 'org.mxdx.session.signal',
-  INPUT: 'org.mxdx.session.input',
-  RESIZE: 'org.mxdx.session.resize',
-  ACTIVE: 'org.mxdx.session.active',
-  COMPLETED: 'org.mxdx.session.completed',
-};
-
-/**
  * Structured logger with JSON and text output modes.
+ * Rust equivalent: crates/mxdx-worker/src/logging.rs
  */
 class Logger {
   #format;
-
-  constructor(format = 'json') {
-    this.#format = format;
-  }
-
+  constructor(format = 'json') { this.#format = format; }
   info(msg, data) { this.#log('info', msg, data); }
   warn(msg, data) { this.#log('warn', msg, data); }
   error(msg, data) { this.#log('error', msg, data); }
   debug(msg, data) { this.#log('debug', msg, data); }
-
   #log(level, msg, data) {
     if (this.#format === 'json') {
-      const entry = { level, msg, ts: new Date().toISOString(), ...data };
-      const stream = level === 'error' ? process.stderr : process.stdout;
-      stream.write(JSON.stringify(entry) + '\n');
+      (level === 'error' ? process.stderr : process.stdout).write(JSON.stringify({ level, msg, ts: new Date().toISOString(), ...data }) + '\n');
     } else {
-      const ts = new Date().toISOString();
-      const prefix = `[${level}] [${ts}]`;
       const extra = data ? ' ' + JSON.stringify(data) : '';
-      const stream = level === 'error' ? process.stderr : process.stdout;
-      stream.write(`${prefix} ${msg}${extra}\n`);
+      (level === 'error' ? process.stderr : process.stdout).write(`[${level}] [${new Date().toISOString()}] ${msg}${extra}\n`);
     }
   }
 }
 
 /**
- * Multiplexes terminal I/O across sessions sharing a single DM room.
- * One poll loop per room routes events to sessions by session_id.
- */
-class SessionMux {
-  #transport;
-  #roomId;
-  #launcherUserId;
-  #sessions = new Map(); // sessionId -> { pty }
-  #senders = new Map(); // sessionId -> BatchedSender
-  #running = false;
-  #log;
-
-  constructor(transport, roomId, launcherUserId, log) {
-    this.#transport = transport;
-    this.#roomId = roomId;
-    this.#launcherUserId = launcherUserId;
-    this.#log = log;
-  }
-
-  addSession(sessionId, pty) {
-    this.#sessions.set(sessionId, { pty });
-    if (!this.#running) this.#start();
-  }
-
-  /** Register a BatchedSender so its batchMs can be adjusted on P2P status changes. */
-  registerSender(sessionId, sender) {
-    this.#senders.set(sessionId, sender);
-  }
-
-  removeSession(sessionId) {
-    this.#sessions.delete(sessionId);
-    this.#senders.delete(sessionId);
-    if (this.#sessions.size === 0) this.#running = false;
-  }
-
-  /** Adjust batch window for all senders in this room (called on P2P status change). */
-  setBatchMs(ms) {
-    for (const sender of this.#senders.values()) {
-      sender.batchMs = ms;
-    }
-  }
-
-  get sessionCount() { return this.#sessions.size; }
-
-  #start() {
-    this.#running = true;
-    this.#poll().catch((err) => {
-      this.#log.warn('SessionMux poll error', { room_id: this.#roomId, error: err.message });
-    });
-  }
-
-  async #poll() {
-    // Start a separate resize poll loop (non-blocking to data path)
-    this.#pollResize();
-
-    while (this.#running && this.#sessions.size > 0) {
-      try {
-        const dataJson = await this.#transport.onRoomEvent(
-          this.#roomId, 'org.mxdx.terminal.data', 1,
-        );
-        if (dataJson != null) {
-          const event = JSON.parse(dataJson);
-          const content = event.content || event;
-          const sender = event.sender;
-          const sessionId = content.session_id;
-
-          // P2P frames don't carry sender (authenticated via peer verification).
-          // Matrix events do — filter out our own echo.
-          if (sender !== this.#launcherUserId && sessionId) {
-            const session = this.#sessions.get(sessionId);
-            if (session) {
-              this.#processInput(content, session.pty);
-            }
-          }
-        }
-      } catch {
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-    }
-  }
-
-  /** Separate resize poll loop — runs independently so it never blocks data. */
-  async #pollResize() {
-    while (this.#running && this.#sessions.size > 0) {
-      try {
-        const resizeJson = await this.#transport.onRoomEvent(
-          this.#roomId, 'org.mxdx.terminal.resize', 2,
-        );
-        if (resizeJson != null) {
-          const event = JSON.parse(resizeJson);
-          const content = event.content || event;
-          const sessionId = content.session_id;
-          if (sessionId) {
-            const session = this.#sessions.get(sessionId);
-            if (session && content.cols && content.rows) {
-              session.pty.resize(content.cols, content.rows);
-            }
-          }
-        }
-      } catch {
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-    }
-  }
-
-  #processInput(content, pty) {
-    const parsed = TerminalDataEvent.safeParse(content);
-    if (!parsed.success) return;
-    const { data, encoding } = parsed.data;
-    try {
-      // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::process_terminal_input
-      // Handles base64 decode + zlib inflate with 1MB bomb protection in Rust.
-      const bytes = processTerminalInput(data, encoding || 'base64');
-      pty.write(bytes);
-    } catch { /* zlib bomb protection — WASM throws on oversized decompression */ }
-  }
-}
-
-/**
- * The launcher runtime: connects to Matrix, creates rooms, listens for commands.
+ * The launcher runtime: thin OS-bound shell delegating to WasmSessionManager.
+ * All session state, routing, and authorization live in Rust (WasmSessionManager).
+ * Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::WasmSessionManager
  */
 export class LauncherRuntime {
-  #client;
-  #config;
-  #topology;
-  #stateRoomId;
-  #running = false;
-  #processedEvents = new Set();
-  #activeSessions = 0;
-  #maxSessions;
-  #backoffMs = 0;
-  #lastStoreSave = 0;
-  #log;
-  #sessionRegistry = new Map(); // sessionId -> { tmuxName, dmRoomId, sender, persistent, pty, createdAt }
-  #sessionRooms = new Map(); // "hostname:clientUserId" -> roomId
+  #client; #config; #topology; #stateRoomId; #running = false;
+  #backoffMs = 0; #lastStoreSave = 0; #log;
+  #sessionMgr = null; // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::WasmSessionManager
+  #ptys = new Map(); // sessionId -> PtyBridge (OS-bound, not in WASM)
   #roomMuxes = new Map(); // dmRoomId -> SessionMux
   #roomTransports = new Map(); // roomId -> { transport, p2pCrypto }
-  // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::SessionTransportManager
-  #transportManager = new SessionTransportManager(15_000);
+  #transportManager = null; // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::SessionTransportManager
   #telemetryTimer = null;
 
-  constructor(config) {
-    this.#config = config;
-    this.#maxSessions = config.maxSessions || 10;
-    this.#log = new Logger(config.logFormat || 'json');
-  }
+  constructor(config) { this.#config = config; this.#log = new Logger(config.logFormat || 'json'); }
 
-  get #sessionDir() {
-    return this.#config.sessionDir || DEFAULT_SESSION_DIR;
-  }
-
-  get #socketDir() {
-    return this.#config.tmuxSocketDir || path.join(this.#sessionDir, 'tmux');
-  }
-
-  #sessionRoomKey(clientUserId) {
-    return `${this.#config.username}:${clientUserId}`;
-  }
-
-  async #recoverSessions() {
-    // Load tracked rooms from state room
-    try {
-      const roomsJson = await this.#client.readRooms(this.#stateRoomId);
-      const rooms = JSON.parse(roomsJson);
-      for (const entry of rooms) {
-        if (entry.content?.room_id && entry.content?.role === 'dm') {
-          // Reconstruct session room key from room name or sender info
-          const roomId = entry.content.room_id;
-          const roomKey = entry.content.room_key;
-          if (roomKey) {
-            this.#sessionRooms.set(roomKey, roomId);
-          }
-        }
-      }
-    } catch (err) {
-      this.#log.warn('Failed to load rooms from state room', { error: err.message });
-    }
-
-    // Load sessions from state room
-    const deviceId = this.#client.deviceId();
-    const liveTmux = PtyBridge.list(this.#socketDir);
-    let recovered = 0;
-
-    try {
-      const sessionsJson = await this.#client.readSessions(this.#stateRoomId);
-      const sessions = JSON.parse(sessionsJson);
-
-      for (const entry of sessions) {
-        const content = entry.content || {};
-        const stateKey = entry.state_key || '';
-        // State key format: {device_id}/{uuid}
-        const sessionId = content.uuid || stateKey.split('/')[1];
-
-        // Skip empty (removed) entries
-        if (!sessionId || !content.tmuxName) continue;
-
-        // Only recover sessions for this device
-        if (stateKey && !stateKey.startsWith(`${deviceId}/`)) continue;
-
-        if (liveTmux.includes(content.tmuxName)) {
-          this.#sessionRegistry.set(sessionId, {
-            tmuxName: content.tmuxName,
-            dmRoomId: content.dmRoomId,
-            sender: content.sender,
-            persistent: true,
-            pty: null, // no attached PtyBridge yet — will attach on reconnect
-            createdAt: content.createdAt,
-          });
-          recovered++;
-          this.#log.info('Recovered tmux session', { session_id: sessionId, tmux: content.tmuxName });
-        } else {
-          this.#log.info('Stale session removed (tmux gone)', { session_id: sessionId, tmux: content.tmuxName });
-          // Best-effort cleanup of stale state room entry
-          this.#client.removeSession(this.#stateRoomId, deviceId, sessionId).catch((err) => {
-            this.#log.warn('Failed to remove stale session from state room', { session_id: sessionId, error: err.message });
-          });
-        }
-      }
-    } catch (err) {
-      this.#log.warn('Failed to load sessions from state room', { error: err.message });
-    }
-
-    // Rebuild session rooms cache from recovered sessions
-    for (const [, session] of this.#sessionRegistry) {
-      if (session.dmRoomId && session.sender) {
-        const key = this.#sessionRoomKey(session.sender);
-        if (!this.#sessionRooms.has(key)) {
-          this.#sessionRooms.set(key, session.dmRoomId);
-        }
-      }
-    }
-
-    return recovered;
-  }
-
-  /** Get or create a session room for a client user. Keyed by hostname:clientUserId. */
-  async #getSessionRoom(clientUserId) {
-    const key = this.#sessionRoomKey(clientUserId);
-    const existing = this.#sessionRooms.get(key);
-
-    if (existing) {
-      // Verify the room is still joined — it may be stale (Left/Kicked)
-      try {
-        await this.#client.joinRoom(existing);
-        return existing;
-      } catch {
-        this.#log.warn('Stale session room, creating new one', { room_id: existing, client: clientUserId });
-        this.#sessionRooms.delete(key);
-      }
-    }
-
-    const topic = `org.mxdx.launcher.sessions:${this.#config.username}:${clientUserId}`;
-    const roomId = await this.#client.createRoom(JSON.stringify({
-      invite: [clientUserId],
-      topic,
-      preset: 'trusted_private_chat',
-    }));
-
-    this.#sessionRooms.set(key, roomId);
-
-    // Persist to state room (best-effort)
-    try {
-      await this.#client.writeRoom(this.#stateRoomId, roomId, JSON.stringify({
-        room_id: roomId,
-        room_key: key,
-        role: 'dm',
-        joined_at: new Date().toISOString(),
-      }));
-    } catch (err) {
-      this.#log.warn('Failed to persist session room to state room', { room_id: roomId, error: err.message });
-    }
-
-    return roomId;
-  }
+  get #sessionDir() { return this.#config.sessionDir || DEFAULT_SESSION_DIR; }
+  get #socketDir() { return this.#config.tmuxSocketDir || path.join(this.#sessionDir, 'tmux'); }
+  get topology() { return this.#topology; }
+  get client() { return this.#client; }
 
   async start() {
-    const servers = this.#config.servers;
-    const username = this.#config.username;
+    const servers = this.#config.servers; const username = this.#config.username;
     const log = (msg) => this.#log.info(msg);
-
-    // ── 1. Connect (crypto store is persistent via IndexedDB snapshots) ──
     if (servers.length > 1) {
       const { MultiHsClient } = await import('@mxdx/core');
-      const configs = servers.map(server => {
-        const creds = this.#config.serverCredentials?.[server];
-        return {
-          username: creds?.username || username,
-          server,
-          password: creds?.password || this.#config.password,
-          registrationToken: this.#config.registrationToken,
-          configDir: this.#config.configDir,
-          useKeychain: true,
-          log,
-        };
-      });
-      this.#client = await MultiHsClient.connect(configs, {
-        preferredServer: this.#config.preferredServer,
-        log,
-      });
-
-      this.#client.onPreferredChange((newPreferred, oldPreferred) => {
-        this.#log.info('Preferred server changed', {
-          from: oldPreferred.server,
-          to: newPreferred.server,
-        });
-        this.#postTelemetry().catch(err =>
-          this.#log.warn('telemetry post failed after failover', { error: err.message })
-        );
-      });
+      this.#client = await MultiHsClient.connect(servers.map(server => { const creds = this.#config.serverCredentials?.[server]; return { username: creds?.username || username, server, password: creds?.password || this.#config.password, registrationToken: this.#config.registrationToken, configDir: this.#config.configDir, useKeychain: true, log }; }), { preferredServer: this.#config.preferredServer, log });
+      this.#client.onPreferredChange((n, o) => { this.#log.info('Preferred server changed', { from: o.server, to: n.server }); this.#postTelemetry().catch(err => this.#log.warn('telemetry post failed after failover', { error: err.message })); });
     } else {
-      const server = servers[0];
-      const { client, freshLogin } = await connectWithSession({
-        username,
-        server,
-        password: this.#config.password,
-        registrationToken: this.#config.registrationToken,
-        configDir: this.#config.configDir,
-        useKeychain: true,
-        log,
-      });
+      const { client, freshLogin } = await connectWithSession({ username, server: servers[0], password: this.#config.password, registrationToken: this.#config.registrationToken, configDir: this.#config.configDir, useKeychain: true, log });
       this.#client = client;
-
-      // ── 2. Remove password from config file after keyring storage ─
-      if (freshLogin && this.#config.password && this.#config.configPath) {
-        this.#config.password = undefined;
-        this.#config._password = undefined;
-        try {
-          this.#config.save(this.#config.configPath);
-          log('Password removed from config file (now in keyring)');
-        } catch {
-          // Non-fatal: config may be read-only
-        }
-      }
+      if (freshLogin && this.#config.password && this.#config.configPath) { this.#config.password = undefined; this.#config._password = undefined; try { this.#config.save(this.#config.configPath); log('Password removed from config file (now in keyring)'); } catch { /* Non-fatal */ } }
     }
-
-    // ── 3. Set up rooms ─────────────────────────────────────────
     log(`Setting up rooms for ${username}...`);
     this.#topology = await this.#client.getOrCreateLauncherSpace(username);
     log(`Rooms ready: space=${this.#topology.space_id} exec=${this.#topology.exec_room_id}`);
-
-    // ── 4. Set up state room for persistence ────────────────────
-    const hostname = os.hostname();
-    const osUser = os.userInfo().username;
-    this.#stateRoomId = await this.#client.getOrCreateStateRoom(hostname, osUser, username);
+    this.#stateRoomId = await this.#client.getOrCreateStateRoom(os.hostname(), os.userInfo().username, username);
     log(`State room ready: ${this.#stateRoomId}`);
-
-    // Invite admin users to all rooms
-    if (this.#config.adminUsers && this.#config.adminUsers.length > 0) {
+    if (this.#config.adminUsers?.length > 0) {
       log(`Inviting admin users: ${this.#config.adminUsers.join(', ')}`);
-      for (const adminUser of this.#config.adminUsers) {
-        for (const roomId of [
-          this.#topology.space_id,
-          this.#topology.exec_room_id,
-          this.#topology.logs_room_id,
-        ]) {
-          try {
-            await this.#client.inviteUser(roomId, adminUser);
-          } catch {
-            // May already be invited/joined
-          }
-        }
-      }
+      for (const adminUser of this.#config.adminUsers) for (const roomId of [this.#topology.space_id, this.#topology.exec_room_id, this.#topology.logs_room_id]) try { await this.#client.inviteUser(roomId, adminUser); } catch { /* May already be invited */ }
     }
-
-    // Recover tmux sessions from previous launcher instance
-    const recovered = await this.#recoverSessions();
-    if (recovered > 0) {
-      log(`Recovered ${recovered} tmux session(s) from previous instance`);
-    }
-
-    // Post initial telemetry and start periodic posting
+    // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::WasmSessionManager
+    this.#sessionMgr = new WasmSessionManager(JSON.stringify({ allowed_commands: this.#config.allowedCommands, allowed_cwd: this.#config.allowedCwd, max_sessions: this.#config.maxSessions || 10, username: this.#config.username, use_tmux: this.#config.useTmux || 'auto', batch_ms: this.#config.batchMs || 200 }), this.#topology.exec_room_id, this.#stateRoomId, this.#client.userId(), this.#client.deviceId());
+    this.#transportManager = new SessionTransportManager(15_000);
+    await this.#recoverSessions();
     await this.#postTelemetry();
-    this.#telemetryTimer = setInterval(
-      () => this.#postTelemetry().catch(err => this.#log.warn('telemetry post failed', { error: err.message })),
-      this.#config.telemetryIntervalS * 1000,
-    );
-
+    this.#telemetryTimer = setInterval(() => this.#postTelemetry().catch(err => this.#log.warn('telemetry post failed', { error: err.message })), this.#config.telemetryIntervalS * 1000);
     log('Online. Listening for commands...');
     this.#running = true;
     await this.#syncLoop();
@@ -441,1269 +101,165 @@ export class LauncherRuntime {
 
   async stop() {
     this.#running = false;
-
-    // Post offline status (best-effort, 1s timeout)
-    try {
-      await Promise.race([
-        this.#postOfflineStatus(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('offline status timeout')), 1000)),
-      ]);
-    } catch {
-      // Don't block shutdown
-    }
-
-    // Stop periodic telemetry
-    if (this.#telemetryTimer) {
-      clearInterval(this.#telemetryTimer);
-      this.#telemetryTimer = null;
-    }
-
-    // Detach persistent sessions so tmux sessions survive launcher restart
-    for (const [id, entry] of this.#sessionRegistry) {
-      if (entry.persistent && entry.pty) {
-        this.#log.info('Detaching persistent session for restart survival', { sessionId: id, tmuxName: entry.tmuxName });
-        entry.pty.detach();
-      }
-    }
-
-    // Close all room transports
-    for (const [, entry] of this.#roomTransports) {
-      entry.transport.close();
-    }
+    try { await Promise.race([this.#postOfflineStatus(), new Promise((_, r) => setTimeout(() => r(new Error('timeout')), 1000))]); } catch { /* Don't block shutdown */ }
+    if (this.#telemetryTimer) { clearInterval(this.#telemetryTimer); this.#telemetryTimer = null; }
+    for (const [id, pty] of this.#ptys) { if (this.#sessionMgr?.sessionTmuxName(id)) { this.#log.info('Detaching persistent session', { sessionId: id }); pty.detach(); } }
+    for (const [, entry] of this.#roomTransports) entry.transport.close();
     this.#roomTransports.clear();
-
-    // Persist session metadata to state room for recovery on next start
-    const deviceId = this.#client.deviceId();
-    for (const [id, entry] of this.#sessionRegistry) {
-      if (entry.persistent && entry.tmuxName) {
-        try {
-          await this.#client.writeSession(this.#stateRoomId, deviceId, id, JSON.stringify({
-            uuid: id,
-            tmuxName: entry.tmuxName,
-            dmRoomId: entry.dmRoomId,
-            sender: entry.sender,
-            persistent: true,
-            createdAt: entry.createdAt,
-            state: 'detached',
-          }));
-        } catch (err) {
-          this.#log.warn('Failed to persist session on shutdown', { session_id: id, error: err.message });
-        }
+    if (this.#sessionMgr) {
+      const deviceId = this.#client.deviceId();
+      for (const s of JSON.parse(this.#sessionMgr.listSessions())) {
+        if (!s.persistent || !s.tmux_name) continue;
+        try { await this.#client.writeSession(this.#stateRoomId, deviceId, s.session_id, JSON.stringify({ uuid: s.session_id, tmuxName: s.tmux_name, dmRoomId: this.#sessionMgr.sessionDmRoomId(s.session_id), sender: this.#sessionMgr.sessionSender(s.session_id), persistent: true, createdAt: s.created_at, state: 'detached' })); } catch (err) { this.#log.warn('Failed to persist session on shutdown', { session_id: s.session_id, error: err.message }); }
       }
     }
   }
 
-  get topology() {
-    return this.#topology;
-  }
-
-  get client() {
-    return this.#client;
+  async #recoverSessions() {
+    try { const rooms = JSON.parse(await this.#client.readRooms(this.#stateRoomId)); for (const entry of rooms) if (entry.content?.room_id && entry.content?.role === 'dm' && entry.content?.room_key) this.#sessionMgr.registerSessionRoom(entry.content.room_key, entry.content.room_id); }
+    catch (err) { this.#log.warn('Failed to load rooms from state room', { error: err.message }); }
+    const deviceId = this.#client.deviceId(); const liveTmux = PtyBridge.list(this.#socketDir); let recovered = 0;
+    try {
+      for (const entry of JSON.parse(await this.#client.readSessions(this.#stateRoomId))) {
+        const content = entry.content || {}; const stateKey = entry.state_key || ''; const sessionId = content.uuid || stateKey.split('/')[1];
+        if (!sessionId || !content.tmuxName || (stateKey && !stateKey.startsWith(`${deviceId}/`))) continue;
+        if (liveTmux.includes(content.tmuxName)) { this.#sessionMgr.recoverSession(sessionId, content.tmuxName, content.dmRoomId || '', content.sender || '', true, content.createdAt || ''); recovered++; this.#log.info('Recovered tmux session', { session_id: sessionId, tmux: content.tmuxName }); }
+        else { this.#log.info('Stale session removed (tmux gone)', { session_id: sessionId }); this.#client.removeSession(this.#stateRoomId, deviceId, sessionId).catch((err) => this.#log.warn('Failed to remove stale session', { session_id: sessionId, error: err.message })); }
+      }
+    } catch (err) { this.#log.warn('Failed to load sessions from state room', { error: err.message }); }
+    if (recovered > 0) this.#log.info(`Recovered ${recovered} tmux session(s)`);
   }
 
   async #syncLoop() {
     while (this.#running) {
       try {
-        await Promise.race([
-          this.#client.syncOnce(),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('syncOnce timed out after 30s')), 30000),
-          ),
-        ]);
-        await Promise.race([
-          this.#processCommands(),
-          new Promise((_, reject) =>
-            setTimeout(() => reject(new Error('processCommands timed out after 30s')), 30000),
-          ),
-        ]);
+        await Promise.race([this.#client.syncOnce(), new Promise((_, r) => setTimeout(() => r(new Error('syncOnce timed out')), 30000))]);
+        await Promise.race([this.#processCommands(), new Promise((_, r) => setTimeout(() => r(new Error('processCommands timed out')), 30000))]);
         this.#backoffMs = 0;
-
-        // Save crypto store every 5 minutes to persist new Megolm keys
-        if (Date.now() - this.#lastStoreSave > 300000) {
-          try {
-            await saveIndexedDB(this.#config.configDir);
-            this.#lastStoreSave = Date.now();
-          } catch {
-            // Non-fatal
-          }
-        }
-      } catch (err) {
-        this.#backoffMs = Math.min(Math.max(1000, this.#backoffMs * 2 || 1000), 30000);
-        this.#log.error('Sync error', { error: err.message, backoff_ms: this.#backoffMs });
-        await new Promise((r) => setTimeout(r, this.#backoffMs));
-      }
+        if (Date.now() - this.#lastStoreSave > 300000) { try { await saveIndexedDB(this.#config.configDir); this.#lastStoreSave = Date.now(); } catch { /* Non-fatal */ } }
+      } catch (err) { this.#backoffMs = Math.min(Math.max(1000, this.#backoffMs * 2 || 1000), 30000); this.#log.error('Sync error', { error: err.message, backoff_ms: this.#backoffMs }); await new Promise((r) => setTimeout(r, this.#backoffMs)); }
     }
   }
 
   async #processCommands() {
-    const eventsJson = await this.#client.collectRoomEvents(
-      this.#topology.exec_room_id,
-      1,
-    );
-    const events = JSON.parse(eventsJson);
+    const eventsJson = await this.#client.collectRoomEvents(this.#topology.exec_room_id, 1);
+    // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::WasmSessionManager::process_commands
+    for (const action of JSON.parse(this.#sessionMgr.processCommands(eventsJson))) await this.#executeAction(action);
+  }
 
-    if (!events || !Array.isArray(events)) return;
-
-    for (const event of events) {
-      const eventType = event?.type;
-      const eventId = event?.event_id;
-
-      // Unified session event types (Phase 6 migration):
-      //   SESSION_START  = 'org.mxdx.session.start'   — replaces org.mxdx.command
-      //   SESSION_OUTPUT = 'org.mxdx.session.output'   — replaces org.mxdx.output
-      //   SESSION_RESULT = 'org.mxdx.session.result'   — replaces org.mxdx.result
-      //   SESSION_CANCEL = 'org.mxdx.session.cancel'   — new
-      //   SESSION_HEARTBEAT = 'org.mxdx.session.heartbeat' — new
-      // State events:
-      //   ACTIVE_SESSION  = 'org.mxdx.session.active'
-      //   COMPLETED_SESSION = 'org.mxdx.session.completed'
-      //   WORKER_INFO     = 'org.mxdx.worker.info'     — replaces org.mxdx.host_telemetry
-
-      if (!eventId) continue;
-      if (this.#processedEvents.has(eventId)) continue;
-      this.#processedEvents.add(eventId);
-
-      const content = event.content || {};
-      const sender = event.sender;
-
-      // ── Unified session events ──────────────────────────────────
-      if (eventType === SESSION_EVENTS.TASK) {
-        // Skip tasks we submitted ourselves
-        if (sender === this.#client.userId()) continue;
-        await this.#handleSessionTask(content, eventId, sender);
-        continue;
-      }
-
-      if (eventType === SESSION_EVENTS.CANCEL) {
-        if (sender === this.#client.userId()) continue;
-        await this.#handleSessionCancel(content);
-        continue;
-      }
-
-      if (eventType === SESSION_EVENTS.SIGNAL) {
-        if (sender === this.#client.userId()) continue;
-        await this.#handleSessionSignal(content);
-        continue;
-      }
-
-      // ── Legacy org.mxdx.command events (backward compat) ───────
-      if (eventType !== 'org.mxdx.command') continue;
-
-      const action = content.action;
-      const command = content.command;
-      const args = content.args || [];
-      const cwd = content.cwd || '/tmp';
-      const requestId = content.request_id || eventId;
-
-      // Route session management actions
-      if (action === 'list_sessions') {
-        this.#log.info('Session list requested', { request_id: requestId, sender });
-        await this.#handleListSessions(requestId);
-        continue;
-      }
-
-      if (action === 'reconnect') {
-        this.#log.info('Session reconnect requested', { request_id: requestId, sender });
-        await this.#handleReconnect(content, requestId, sender);
-        continue;
-      }
-
-      // Route interactive sessions
-      if (action === 'interactive') {
-        this.#log.info('Interactive session requested', { request_id: requestId, sender });
-        await this.#handleInteractiveSession(content, requestId, sender);
-        continue;
-      }
-
-      this.#log.info(`Received command: ${command} ${args.join(' ')}`, { request_id: requestId });
-
-      // Validate command against allowlist
-      if (!this.#isCommandAllowed(command)) {
-        this.#log.warn(`Command rejected: ${command} not in allowlist`, { request_id: requestId });
-        await this.#sendResult(requestId, {
-          exit_code: 1,
-          error: `Command '${command}' is not allowed`,
-        });
-        continue;
-      }
-
-      // Validate cwd
-      if (!this.#isCwdAllowed(cwd)) {
-        this.#log.warn(`CWD rejected: ${cwd}`, { request_id: requestId });
-        await this.#sendResult(requestId, {
-          exit_code: 1,
-          error: `Working directory '${cwd}' is not allowed`,
-        });
-        continue;
-      }
-
-      // Check session limit
-      if (this.#activeSessions >= this.#maxSessions) {
-        this.#log.warn('Session limit reached', { active: this.#activeSessions, max: this.#maxSessions, request_id: requestId });
-        await this.#sendResult(requestId, {
-          exit_code: 1,
-          error: `Session limit reached (${this.#maxSessions} max)`,
-        });
-        continue;
-      }
-
-      // Execute command
-      this.#activeSessions++;
-      try {
-        const result = await executeCommand(command, args, {
-          cwd,
-          timeoutMs: 30000,
-          onStdout: async (line) => {
-            await this.#sendOutput(requestId, 'stdout', line);
-          },
-          onStderr: async (line) => {
-            await this.#sendOutput(requestId, 'stderr', line);
-          },
-        });
-
-        await this.#sendResult(requestId, {
-          exit_code: result.exitCode,
-          timed_out: result.timedOut,
-        });
-      } catch (err) {
-        await this.#sendResult(requestId, {
-          exit_code: 1,
-          error: err.message,
-        });
-      } finally {
-        this.#activeSessions--;
-      }
+  async #executeAction(action) {
+    switch (action.kind) {
+      case 'send_event': await this.#client.sendEvent(action.room_id, action.event_type, JSON.stringify(action.content)).catch(() => {}); break;
+      case 'send_state_event': await this.#client.sendStateEvent(action.room_id, action.event_type, action.state_key, JSON.stringify(action.content)).catch(() => {}); break;
+      case 'write_session': await this.#client.writeSession(action.state_room_id, action.device_id, action.session_id, JSON.stringify(action.content)).catch(() => {}); break;
+      case 'remove_session': await this.#client.removeSession(action.state_room_id, action.device_id, action.session_id).catch(() => {}); break;
+      case 'kill_pty': { const pty = this.#ptys.get(action.session_id); if (pty?.alive) pty.kill(action.signal); break; }
+      case 'spawn_pty': await this.#spawnPty(action); break;
+      case 'exec_command': this.#runExecCommand(action); break;
     }
   }
 
-  /**
-   * Handle a unified SESSION_TASK event.
-   * Claims the task, executes the command, and posts lifecycle events.
-   */
-  async #handleSessionTask(task, eventId, sender) {
-    const uuid = task.uuid;
-    const bin = task.bin || task.command;
-    const args = task.args || [];
-    const cwd = task.cwd || '/tmp';
-    const interactive = task.interactive || false;
-    const timeoutSeconds = task.timeout_seconds || null;
-    const execRoomId = this.#topology.exec_room_id;
-
-    this.#log.info('Unified session task received', { uuid, bin, sender });
-
-    // Route interactive sessions through existing handler
-    if (interactive) {
-      await this.#handleInteractiveSession({
-        command: bin,
-        args,
-        cwd,
-        action: 'interactive',
-        cols: task.cols || 80,
-        rows: task.rows || 24,
-      }, uuid, sender);
-      return;
+  async #spawnPty(action) {
+    const { session_id, request_id, command, args, cols, rows, cwd, env, batch_ms } = action;
+    const cmd = command || process.env.SHELL || '/bin/bash';
+    const sender = this.#sessionMgr.sessionSender(session_id);
+    let dmRoomId = action.dm_room_id || this.#sessionMgr.getSessionRoomId(sender);
+    if (!dmRoomId) {
+      const roomKey = this.#sessionMgr.sessionRoomKey(sender);
+      dmRoomId = await this.#getOrCreateDmRoom(sender, roomKey).catch(() => null);
     }
-
-    // Validate command against allowlist
-    if (!this.#isCommandAllowed(bin)) {
-      this.#log.warn(`Session task rejected: ${bin} not in allowlist`, { uuid });
-      await this.#sendSessionResult(execRoomId, uuid, {
-        status: 'failed',
-        exit_code: 1,
-        error: `Command '${bin}' is not allowed`,
-        duration_seconds: 0,
-        tail: [],
-      });
-      return;
-    }
-
-    // Validate cwd
-    if (!this.#isCwdAllowed(cwd)) {
-      this.#log.warn(`Session task CWD rejected: ${cwd}`, { uuid });
-      await this.#sendSessionResult(execRoomId, uuid, {
-        status: 'failed',
-        exit_code: 1,
-        error: `Working directory '${cwd}' is not allowed`,
-        duration_seconds: 0,
-        tail: [],
-      });
-      return;
-    }
-
-    // Check session limit
-    if (this.#activeSessions >= this.#maxSessions) {
-      this.#log.warn('Session limit reached for task', { uuid, active: this.#activeSessions });
-      await this.#sendSessionResult(execRoomId, uuid, {
-        status: 'failed',
-        exit_code: 1,
-        error: `Session limit reached (${this.#maxSessions} max)`,
-        duration_seconds: 0,
-        tail: [],
-      });
-      return;
-    }
-
-    this.#activeSessions++;
-    const startTime = Date.now();
-    let seqNum = 0;
-    const tailLines = [];
-    const MAX_TAIL_LINES = 10;
-
-    try {
-      // Post SESSION_START
-      await this.#client.sendEvent(execRoomId, SESSION_EVENTS.START, JSON.stringify({
-        session_uuid: uuid,
-        worker_id: this.#client.userId(),
-        tmux_session: null,
-        pid: null,
-        started_at: Math.floor(startTime / 1000),
-      }));
-
-      // Write active session state (best-effort)
-      try {
-        await this.#client.sendStateEvent(execRoomId, SESSION_EVENTS.ACTIVE, `session/${uuid}`, JSON.stringify({
-          session_uuid: uuid,
-          worker_id: this.#client.userId(),
-          bin,
-          args,
-          sender_id: sender,
-          started_at: Math.floor(startTime / 1000),
-        }));
-      } catch (err) {
-        this.#log.warn('Failed to write active session state', { uuid, error: err.message });
-      }
-
-      const timeoutMs = timeoutSeconds ? timeoutSeconds * 1000 : 30000;
-
-      const result = await executeCommand(bin, args, {
-        cwd,
-        timeoutMs,
-        onStdout: async (line) => {
-          seqNum++;
-          trackTail(tailLines, line, MAX_TAIL_LINES);
-          await this.#sendSessionOutput(execRoomId, uuid, 'stdout', line, seqNum);
-        },
-        onStderr: async (line) => {
-          seqNum++;
-          trackTail(tailLines, line, MAX_TAIL_LINES);
-          await this.#sendSessionOutput(execRoomId, uuid, 'stderr', line, seqNum);
-        },
-      });
-
-      const durationSeconds = Math.floor((Date.now() - startTime) / 1000);
-      const status = result.exitCode === 0 ? 'success' : 'failed';
-
-      await this.#sendSessionResult(execRoomId, uuid, {
-        status,
-        exit_code: result.exitCode,
-        duration_seconds: durationSeconds,
-        tail: tailLines,
-        timed_out: result.timedOut || false,
-      });
-
-      // Clear active session state, write completed (best-effort)
-      try {
-        await this.#client.sendStateEvent(execRoomId, SESSION_EVENTS.ACTIVE, `session/${uuid}`, JSON.stringify({}));
-        await this.#client.sendStateEvent(execRoomId, SESSION_EVENTS.COMPLETED, `session/${uuid}`, JSON.stringify({
-          session_uuid: uuid,
-          worker_id: this.#client.userId(),
-          status,
-          exit_code: result.exitCode,
-          duration_seconds: durationSeconds,
-        }));
-      } catch (err) {
-        this.#log.warn('Failed to update session state', { uuid, error: err.message });
-      }
-    } catch (err) {
-      const durationSeconds = Math.floor((Date.now() - startTime) / 1000);
-      await this.#sendSessionResult(execRoomId, uuid, {
-        status: 'failed',
-        exit_code: 1,
-        error: err.message,
-        duration_seconds: durationSeconds,
-        tail: tailLines,
-      });
-    } finally {
-      this.#activeSessions--;
-    }
-  }
-
-  /**
-   * Handle a unified SESSION_CANCEL event.
-   * Finds the matching session and sends SIGTERM to its process.
-   */
-  async #handleSessionCancel(content) {
-    const uuid = content.session_uuid;
-    const graceSeconds = content.grace_seconds || 5;
-    if (!uuid) return;
-
-    this.#log.info('Session cancel received', { uuid, grace_seconds: graceSeconds });
-
-    const entry = this.#sessionRegistry.get(uuid);
-    if (entry && entry.pty && entry.pty.alive) {
-      entry.pty.kill('SIGTERM');
-      // If grace period elapses and still alive, force kill
-      setTimeout(() => {
-        if (entry.pty && entry.pty.alive) {
-          this.#log.warn('Grace period expired, sending SIGKILL', { uuid });
-          entry.pty.kill('SIGKILL');
-        }
-      }, graceSeconds * 1000);
-    } else {
-      this.#log.warn('Cancel target session not found or not alive', { uuid });
-    }
-  }
-
-  /**
-   * Handle a unified SESSION_SIGNAL event.
-   * Forwards the specified signal to the session process.
-   */
-  async #handleSessionSignal(content) {
-    const uuid = content.session_uuid;
-    const signal = content.signal;
-    if (!uuid || !signal) return;
-
-    this.#log.info('Session signal received', { uuid, signal });
-
-    const entry = this.#sessionRegistry.get(uuid);
-    if (entry && entry.pty && entry.pty.alive) {
-      entry.pty.kill(signal);
-    } else {
-      this.#log.warn('Signal target session not found or not alive', { uuid, signal });
-    }
-  }
-
-  /**
-   * Post a SESSION_OUTPUT event to the exec room.
-   */
-  async #sendSessionOutput(roomId, uuid, stream, data, seq) {
-    try {
-      await this.#client.sendEvent(roomId, SESSION_EVENTS.OUTPUT, JSON.stringify({
-        session_uuid: uuid,
-        worker_id: this.#client.userId(),
-        stream,
-        data: Buffer.from(data).toString('base64'),
-        encoding: 'base64',
-        seq,
-        timestamp: Math.floor(Date.now() / 1000),
-      }));
-    } catch {
-      // Best effort — don't stop execution on send failure
-    }
-  }
-
-  /**
-   * Post a SESSION_RESULT event to the exec room.
-   */
-  async #sendSessionResult(roomId, uuid, result) {
-    await this.#client.sendEvent(roomId, SESSION_EVENTS.RESULT, JSON.stringify({
-      session_uuid: uuid,
-      worker_id: this.#client.userId(),
-      ...result,
-    }));
-  }
-
-  async #handleInteractiveSession(content, requestId, sender) {
-    const defaultShell = process.env.SHELL || '/bin/bash';
-    const command = content.command || defaultShell;
-    const cols = content.cols || 80;
-    const rows = content.rows || 24;
-    const cwd = content.cwd || '/tmp';
-    const env = content.env || {};
-
-    // Negotiate batch window: use the longest of client and launcher preferences
-    const clientBatchMs = content.batch_ms || 200;
-    const launcherBatchMs = this.#config.batchMs || 200;
-    const negotiatedBatchMs = Math.max(clientBatchMs, launcherBatchMs);
-    this.#log.info('Batch window negotiated', {
-      client: clientBatchMs, launcher: launcherBatchMs, negotiated: negotiatedBatchMs,
+    if (!dmRoomId) { await this.#client.sendEvent(this.#topology.exec_room_id, 'org.mxdx.terminal.session', JSON.stringify({ request_id, status: 'error', room_id: null })).catch(() => {}); this.#sessionMgr.decrementActiveSessions(); return; }
+    const sessionId = session_id || crypto.randomUUID().slice(0, 8);
+    const pty = new PtyBridge(cmd, { cols, rows, cwd, env, useTmux: this.#config.useTmux || 'auto', socketDir: this.#socketDir });
+    this.#ptys.set(sessionId, pty);
+    const startedAt = Math.floor(Date.now() / 1000);
+    for (const a of JSON.parse(this.#sessionMgr.onSessionStarted(sessionId, request_id, dmRoomId, pty.tmuxName || '', pty.persistent, batch_ms, sender || '', startedAt, cmd, JSON.stringify(args)))) await this.#executeAction(a);
+    await this.#client.sendEvent(this.#topology.exec_room_id, 'org.mxdx.terminal.session', JSON.stringify({ request_id, status: 'started', room_id: dmRoomId, session_id: sessionId, persistent: pty.persistent, batch_ms })).catch(() => {});
+    await this.#client.syncOnce();
+    const transport = await this.#setupSessionTransport(dmRoomId, '', batch_ms);
+    const batchSender = new BatchedSender({ sendEvent: (rId, t, c) => transport.sendEvent(rId, t, c), roomId: dmRoomId, batchMs: batch_ms, sessionId, onError: (err, seq) => this.#log.warn('terminal.data send failed', { seq, error: String(err) }) });
+    pty.onData((data) => batchSender.push(data));
+    if (!this.#roomMuxes.has(dmRoomId)) this.#roomMuxes.set(dmRoomId, new SessionMux(transport, dmRoomId, this.#client.userId(), this.#log));
+    const mux = this.#roomMuxes.get(dmRoomId);
+    mux.addSession(sessionId, pty); mux.registerSender(sessionId, batchSender);
+    if (transport.status === 'p2p') batchSender.batchMs = 5;
+    (async () => { while (pty.alive) await new Promise((r) => setTimeout(r, 1000)); })().finally(() => {
+      mux.removeSession(sessionId); batchSender.destroy(); this.#releaseRoomTransport(dmRoomId);
+      if (mux.sessionCount === 0) this.#roomMuxes.delete(dmRoomId);
+      this.#ptys.delete(sessionId); this.#sessionMgr.markSessionDead(sessionId);
+      if (!pty.persistent) { this.#sessionMgr.removeSession(sessionId); JSON.parse(this.#sessionMgr.onPtyExit(sessionId, 0)).forEach(a => this.#executeAction(a).catch(() => {})); }
+      else pty.detach();
+      this.#client.sendEvent(this.#topology.exec_room_id, 'org.mxdx.terminal.session', JSON.stringify({ request_id, status: 'ended', room_id: dmRoomId })).catch(() => {});
+      this.#sessionMgr.decrementActiveSessions();
     });
-
-    // Validate explicit command against allowlist; default shell is always permitted
-    if (content.command && !this.#isCommandAllowed(command)) {
-      this.#log.warn(`Interactive command rejected: ${command}`, { request_id: requestId });
-      await this.#sendSessionResponse(requestId, 'rejected', null);
-      return;
-    }
-
-    // Validate cwd
-    if (!this.#isCwdAllowed(cwd)) {
-      this.#log.warn(`Interactive CWD rejected: ${cwd}`, { request_id: requestId });
-      await this.#sendSessionResponse(requestId, 'rejected', null);
-      return;
-    }
-
-    // Check session limit
-    if (this.#activeSessions >= this.#maxSessions) {
-      this.#log.warn('Session limit reached for interactive', { request_id: requestId });
-      await this.#sendSessionResponse(requestId, 'rejected', null);
-      return;
-    }
-
-    if (!sender) {
-      this.#log.warn('Interactive session missing sender', { request_id: requestId });
-      await this.#sendSessionResponse(requestId, 'rejected', null);
-      return;
-    }
-
-    this.#activeSessions++;
-    let dmRoomId;
-
-    try {
-      dmRoomId = await this.#getSessionRoom(sender);
-      this.#log.info('DM room for session', { request_id: requestId, room_id: dmRoomId, sender });
-
-      // Spawn PTY bridge with tmux support
-      const sessionId = crypto.randomUUID().slice(0, 8);
-      const pty = new PtyBridge(command, {
-        cols, rows, cwd, env,
-        useTmux: this.#config.useTmux || 'auto',
-        socketDir: this.#socketDir,
-      });
-
-      const createdAt = new Date().toISOString();
-      this.#sessionRegistry.set(sessionId, {
-        tmuxName: pty.tmuxName,
-        dmRoomId,
-        sender,
-        persistent: pty.persistent,
-        pty,
-        createdAt,
-      });
-
-      // Persist session to state room (best-effort)
-      try {
-        const deviceId = this.#client.deviceId();
-        await this.#client.writeSession(this.#stateRoomId, deviceId, sessionId, JSON.stringify({
-          uuid: sessionId,
-          tmuxName: pty.tmuxName,
-          dmRoomId,
-          sender,
-          persistent: pty.persistent,
-          createdAt,
-          state: 'running',
-        }));
-      } catch (err) {
-        this.#log.warn('Failed to persist session to state room', { session_id: sessionId, error: err.message });
-      }
-
-      // Respond with DM room ID and negotiated batch window
-      await this.#sendSessionResponse(requestId, 'started', dmRoomId, {
-        session_id: sessionId,
-        persistent: pty.persistent,
-        batch_ms: negotiatedBatchMs,
-      });
-
-      // Sync to pick up any join events (client may already be in room)
-      await this.#client.syncOnce();
-
-      // Set up transport — P2PTransport if enabled, raw Matrix client otherwise
-      const transport = await this.#setupSessionTransport(dmRoomId, sender, negotiatedBatchMs);
-
-      // Forward PTY output -> DM room as batched terminal.data events (tagged with session_id)
-      const batchSender = new BatchedSender({
-        sendEvent: (roomId, type, content) => transport.sendEvent(roomId, type, content),
-        roomId: dmRoomId,
-        batchMs: negotiatedBatchMs,
-        sessionId,
-        onError: (err, seq) => this.#log.warn('terminal.data send failed', { seq, error: String(err) }),
-      });
-      pty.onData((data) => batchSender.push(data));
-
-      // Register with room multiplexer for incoming events
-      if (!this.#roomMuxes.has(dmRoomId)) {
-        this.#roomMuxes.set(dmRoomId, new SessionMux(
-          transport, dmRoomId, this.#client.userId(), this.#log,
-        ));
-      }
-      const mux = this.#roomMuxes.get(dmRoomId);
-      mux.addSession(sessionId, pty);
-      mux.registerSender(sessionId, batchSender);
-
-      // If P2P is already active, use low-latency batching immediately
-      if (transport.status === 'p2p') batchSender.batchMs = 5;
-
-      // Monitor PTY lifecycle
-      const watchPty = async () => {
-        while (pty.alive) {
-          await new Promise((r) => setTimeout(r, 1000));
-        }
-      };
-
-      watchPty().finally(() => {
-        mux.removeSession(sessionId);
-        batchSender.destroy();
-        this.#releaseRoomTransport(dmRoomId);
-        if (mux.sessionCount === 0) this.#roomMuxes.delete(dmRoomId);
-
-        if (pty.persistent) {
-          pty.detach();
-          this.#log.info('Interactive session bridge detached (tmux alive)', {
-            request_id: requestId, session_id: sessionId,
-          });
-        } else {
-          this.#sessionRegistry.delete(sessionId);
-          // Remove session from state room (best-effort)
-          const deviceId = this.#client.deviceId();
-          this.#client.removeSession(this.#stateRoomId, deviceId, sessionId).catch((err) => {
-            this.#log.warn('Failed to remove session from state room', { session_id: sessionId, error: err.message });
-          });
-          this.#log.info('Interactive session ended', { request_id: requestId, session_id: sessionId });
-        }
-        this.#sendSessionResponse(requestId, 'ended', dmRoomId).catch(() => {});
-        this.#activeSessions--;
-      });
-
-      return;
-    } catch (err) {
-      if (dmRoomId) this.#releaseRoomTransport(dmRoomId);
-      this.#log.error('Interactive session failed', { request_id: requestId, error: err.message || String(err), stack: err.stack });
-      await this.#sendSessionResponse(requestId, 'error', null);
-      this.#activeSessions--;
-    }
   }
 
-  async #handleListSessions(requestId) {
-    const sessions = [];
-    for (const [sessionId, entry] of this.#sessionRegistry) {
-      // Check if tmux session is still alive
-      const alive = entry.pty?.alive ?? (entry.tmuxName ? PtyBridge.list(this.#socketDir).includes(entry.tmuxName) : false);
-      sessions.push({
-        session_id: sessionId,
-        room_id: entry.dmRoomId,
-        persistent: entry.persistent,
-        tmux_name: entry.tmuxName || null,
-        alive,
-        created_at: entry.createdAt,
-      });
-    }
-    await this.#client.sendEvent(
-      this.#topology.exec_room_id,
-      'org.mxdx.terminal.sessions',
-      JSON.stringify({ request_id: requestId, sessions }),
-    );
+  #runExecCommand(action) {
+    const { uuid, command, args, cwd, timeout_ms, exec_room_id } = action;
+    const tail = []; const MAX_TAIL = 10;
+    const sendOutput = (stream, line) => { tail.push(line); if (tail.length > MAX_TAIL) tail.shift(); return this.#client.sendEvent(exec_room_id, 'org.mxdx.session.output', JSON.stringify({ session_uuid: uuid, worker_id: this.#client.userId(), stream, data: Buffer.from(line).toString('base64'), encoding: 'base64', seq: 0, timestamp: Math.floor(Date.now() / 1000) })).catch(() => {}); };
+    executeCommand(command, args, { cwd, timeoutMs: timeout_ms, onStdout: (line) => sendOutput('stdout', line), onStderr: (line) => sendOutput('stderr', line) })
+      .then(async (result) => { for (const a of JSON.parse(this.#sessionMgr.onCommandComplete(uuid, exec_room_id, result.exitCode, 0, result.timedOut || false, JSON.stringify(tail), ''))) await this.#executeAction(a); })
+      .catch(async (err) => { for (const a of JSON.parse(this.#sessionMgr.onCommandComplete(uuid, exec_room_id, 1, 0, false, '[]', err.message))) await this.#executeAction(a); });
   }
 
-  async #handleReconnect(content, requestId, sender) {
-    const sessionId = content.session_id;
-    const cols = content.cols || 80;
-    const rows = content.rows || 24;
-
-    const entry = this.#sessionRegistry.get(sessionId);
-    if (!entry || !entry.persistent) {
-      await this.#sendSessionResponse(requestId, 'expired', null);
-      return;
-    }
-
-    if (entry.sender !== sender) {
-      await this.#sendSessionResponse(requestId, 'rejected', null);
-      return;
-    }
-
-    try {
-      const pty = new PtyBridge('bash', {
-        cols, rows,
-        sessionName: entry.tmuxName,
-        useTmux: 'always',
-        socketDir: this.#socketDir,
-      });
-
-      entry.pty = pty;
-      this.#activeSessions++;
-
-      await this.#sendSessionResponse(requestId, 'reconnected', entry.dmRoomId, {
-        session_id: sessionId,
-        persistent: true,
-      });
-
-      await this.#client.syncOnce();
-
-      const batchMs = this.#config.batchMs || 200;
-      const transport = await this.#setupSessionTransport(entry.dmRoomId, sender, batchMs);
-
-      const batchSender = new BatchedSender({
-        sendEvent: (roomId, type, content) => transport.sendEvent(roomId, type, content),
-        roomId: entry.dmRoomId,
-        batchMs,
-        sessionId,
-        onError: (err, seq) => this.#log.warn('terminal.data send failed', { seq, error: String(err) }),
-      });
-      pty.onData((data) => batchSender.push(data));
-
-      // Register with room multiplexer
-      if (!this.#roomMuxes.has(entry.dmRoomId)) {
-        this.#roomMuxes.set(entry.dmRoomId, new SessionMux(
-          transport, entry.dmRoomId, this.#client.userId(), this.#log,
-        ));
-      }
-      const mux = this.#roomMuxes.get(entry.dmRoomId);
-      mux.addSession(sessionId, pty);
-      mux.registerSender(sessionId, batchSender);
-
-      // If P2P is already active, use low-latency batching immediately
-      if (transport.status === 'p2p') batchSender.batchMs = 5;
-
-      const watchPty = async () => {
-        while (pty.alive) {
-          await new Promise((r) => setTimeout(r, 1000));
-        }
-      };
-
-      watchPty().finally(() => {
-        mux.removeSession(sessionId);
-        batchSender.destroy();
-        this.#releaseRoomTransport(entry.dmRoomId);
-        if (mux.sessionCount === 0) this.#roomMuxes.delete(entry.dmRoomId);
-
-        if (pty.persistent) {
-          pty.detach();
-          this.#log.info('Reconnected session bridge detached', { session_id: sessionId });
-        } else {
-          this.#sessionRegistry.delete(sessionId);
-          // Remove session from state room (best-effort)
-          const deviceId = this.#client.deviceId();
-          this.#client.removeSession(this.#stateRoomId, deviceId, sessionId).catch((err) => {
-            this.#log.warn('Failed to remove session from state room', { session_id: sessionId, error: err.message });
-          });
-        }
-        this.#sendSessionResponse(requestId, 'ended', entry.dmRoomId).catch(() => {});
-        this.#activeSessions--;
-      });
-    } catch (err) {
-      this.#activeSessions--;
-      this.#log.error('Reconnect failed', { session_id: sessionId, error: err.message });
-      await this.#sendSessionResponse(requestId, 'expired', null);
-    }
-  }
-
-  async #sendSessionResponse(requestId, status, roomId, extra = {}) {
-    await Promise.race([
-      this.#client.sendEvent(
-        this.#topology.exec_room_id,
-        'org.mxdx.terminal.session',
-        JSON.stringify({
-          request_id: requestId,
-          status,
-          room_id: roomId,
-          ...extra,
-        }),
-      ),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('sendSessionResponse timed out after 30s')), 30000),
-      ),
-    ]);
-  }
-
-  #isCommandAllowed(command) {
-    if (this.#config.allowedCommands.length === 0) return false;
-    return this.#config.allowedCommands.includes(command);
-  }
-
-  #isCwdAllowed(cwd) {
-    return this.#config.allowedCwd.some((allowed) => cwd.startsWith(allowed));
-  }
-
-  async #sendOutput(requestId, stream, line) {
-    try {
-      await this.#client.sendEvent(
-        this.#topology.exec_room_id,
-        'org.mxdx.output',
-        JSON.stringify({
-          request_id: requestId,
-          stream,
-          data: Buffer.from(line).toString('base64'),
-        }),
-      );
-    } catch {
-      // Best effort — don't stop execution on send failure
-    }
-  }
-
-  async #sendResult(requestId, result) {
-    await this.#client.sendEvent(
-      this.#topology.exec_room_id,
-      'org.mxdx.result',
-      JSON.stringify({
-        request_id: requestId,
-        ...result,
-      }),
-    );
+  async #getOrCreateDmRoom(clientUserId, roomKey) {
+    const existing = this.#sessionMgr.getSessionRoomId(clientUserId);
+    if (existing) { try { await this.#client.joinRoom(existing); return existing; } catch { this.#log.warn('Stale session room, creating new one', { room_id: existing }); } }
+    const roomId = await this.#client.createRoom(JSON.stringify({ invite: [clientUserId], topic: `org.mxdx.launcher.sessions:${this.#config.username}:${clientUserId}`, preset: 'trusted_private_chat' }));
+    this.#sessionMgr.registerSessionRoom(roomKey, roomId);
+    this.#client.writeRoom(this.#stateRoomId, roomId, JSON.stringify({ room_id: roomId, room_key: roomKey, role: 'dm', joined_at: new Date().toISOString() })).catch((err) => this.#log.warn('Failed to persist session room', { room_id: roomId, error: err.message }));
+    return roomId;
   }
 
   async #postTelemetry() {
     const nodeOs = await import('node:os');
     const level = this.#config.telemetry || 'full';
-
-    // OS metric collection remains in JS (OS-bound).
-    // Payload construction delegated to WASM.
-    // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::build_telemetry_payload
     const tmuxInfo = PtyBridge.tmuxInfo();
-    const sessionPersistence =
-      (this.#config.useTmux === 'never') ? false :
-      (this.#config.useTmux === 'always') ? true :
-      tmuxInfo.available;
-
-    const p2pInternalIpsJson = this.#config.p2pAdvertiseIps
-      ? JSON.stringify(this.#getInternalIps())
-      : '';
-
-    let preferredServer = '';
-    let preferredIdentity = '';
-    let accountsJson = '';
-    let serverHealthJson = '';
+    const sessionPersistence = (this.#config.useTmux === 'never') ? false : (this.#config.useTmux === 'always') ? true : tmuxInfo.available;
+    let preferredServer = '', preferredIdentity = '', accountsJson = '', serverHealthJson = '';
     if (this.#client.serverCount > 1) {
-      preferredServer = this.#client.preferred.server;
-      preferredIdentity = this.#client.preferred.userId;
-      accountsJson = JSON.stringify(this.#client.allUserIds());
-      const healthMap = {};
-      for (const [server, health] of this.#client.serverHealth()) {
-        healthMap[server] = { status: health.status, latency_ms: Math.round(health.latencyMs) };
-      }
-      serverHealthJson = JSON.stringify(healthMap);
+      preferredServer = this.#client.preferred.server; preferredIdentity = this.#client.preferred.userId; accountsJson = JSON.stringify(this.#client.allUserIds());
+      const h = {}; for (const [s, health] of this.#client.serverHealth()) h[s] = { status: health.status, latency_ms: Math.round(health.latencyMs) }; serverHealthJson = JSON.stringify(h);
     }
-
-    const payloadJson = buildTelemetryPayload(
-      level,
-      nodeOs.hostname(),
-      nodeOs.platform(),
-      nodeOs.arch(),
-      nodeOs.cpus().length,
-      Math.floor(nodeOs.totalmem() / (1024 * 1024)),
-      Math.floor(nodeOs.freemem() / (1024 * 1024)),
-      Math.floor(nodeOs.uptime()),
-      tmuxInfo.available,
-      tmuxInfo.version || '',
-      sessionPersistence,
-      this.#config.p2pEnabled !== false,
-      p2pInternalIpsJson,
-      preferredServer,
-      preferredIdentity,
-      accountsJson,
-      serverHealthJson,
-      'online',
-      this.#config.telemetryIntervalS * 1000,
-    );
-
-    await this.#client.sendStateEvent(
-      this.#topology.exec_room_id,
-      'org.mxdx.host_telemetry',
-      '',
-      payloadJson,
-    );
+    // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::build_telemetry_payload
+    await this.#client.sendStateEvent(this.#topology.exec_room_id, 'org.mxdx.host_telemetry', '', buildTelemetryPayload(level, nodeOs.hostname(), nodeOs.platform(), nodeOs.arch(), nodeOs.cpus().length, Math.floor(nodeOs.totalmem() / (1024 * 1024)), Math.floor(nodeOs.freemem() / (1024 * 1024)), Math.floor(nodeOs.uptime()), tmuxInfo.available, tmuxInfo.version || '', sessionPersistence, this.#config.p2pEnabled !== false, this.#config.p2pAdvertiseIps ? JSON.stringify(this.#getInternalIps()) : '', preferredServer, preferredIdentity, accountsJson, serverHealthJson, 'online', this.#config.telemetryIntervalS * 1000));
   }
 
   async #postOfflineStatus() {
     const nodeOs = await import('node:os');
     // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::build_telemetry_payload
-    const payloadJson = buildTelemetryPayload(
-      'summary',
-      nodeOs.hostname(),
-      nodeOs.platform(),
-      nodeOs.arch(),
-      0, 0, 0, 0,
-      false, '', false, false, '', '', '', '', '',
-      'offline',
-      this.#config.telemetryIntervalS * 1000,
-    );
-    await this.#client.sendStateEvent(
-      this.#topology.exec_room_id,
-      'org.mxdx.host_telemetry',
-      '',
-      payloadJson,
-    );
+    await this.#client.sendStateEvent(this.#topology.exec_room_id, 'org.mxdx.host_telemetry', '', buildTelemetryPayload('summary', nodeOs.hostname(), nodeOs.platform(), nodeOs.arch(), 0, 0, 0, 0, false, '', false, false, '', '', '', '', '', 'offline', this.#config.telemetryIntervalS * 1000));
   }
 
-  /**
-   * Set up transport for a terminal session.
-   * Returns P2PTransport (with Matrix fallback) when P2P is enabled,
-   * or a thin Matrix client wrapper when P2P is disabled.
-   * One P2PTransport is shared across all sessions in a room.
-   * Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::SessionTransportManager
-   */
+  // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::SessionTransportManager
   async #setupSessionTransport(dmRoomId, remotePeer, batchMs) {
-    // When P2P is disabled, return raw Matrix client interface
-    if (this.#config.p2pEnabled === false) {
-      return {
-        sendEvent: (roomId, type, content) => this.#client.sendEvent(roomId, type, content),
-        onRoomEvent: (roomId, type, timeout) => this.#client.onRoomEvent(roomId, type, timeout),
-        close: () => {},
-      };
-    }
-
-    // Check for existing room transport — refCount managed by WASM state machine
+    if (this.#config.p2pEnabled === false) return { sendEvent: (rId, t, c) => this.#client.sendEvent(rId, t, c), onRoomEvent: (rId, t, timeout) => this.#client.onRoomEvent(rId, t, timeout), close: () => {} };
     const existing = this.#roomTransports.get(dmRoomId);
-    if (existing) {
-      this.#transportManager.addTransport(dmRoomId, batchMs);
-      // If P2P isn't active, reset rate limit and trigger a new attempt (non-blocking)
-      if (existing.transport.status !== 'p2p') {
-        this.#transportManager.resetRateLimit(dmRoomId);
-        this.#attemptP2PConnection(dmRoomId).catch((err) => {
-          this.#log.warn('P2P reconnect on session join failed', { error: err.message, room_id: dmRoomId });
-        });
-      }
-      return existing.transport;
-    }
-
-    // Create new room-scoped transport; register with WASM state machine
+    if (existing) { this.#transportManager.addTransport(dmRoomId, batchMs); if (existing.transport.status !== 'p2p') { this.#transportManager.resetRateLimit(dmRoomId); this.#doAttemptP2P(dmRoomId).catch((err) => this.#log.warn('P2P reconnect on session join failed', { error: err.message, room_id: dmRoomId })); } return existing.transport; }
     this.#transportManager.addTransport(dmRoomId, batchMs);
-    const idleTimeoutMs = (this.#config.p2pIdleTimeoutS || 300) * 1000;
-    const sessionKey = await generateSessionKey();
-    const p2pCrypto = await createP2PCrypto(sessionKey);
-
-    const transport = P2PTransport.create({
-      matrixClient: {
-        sendEvent: (roomId, type, content) => this.#client.sendEvent(roomId, type, content),
-        onRoomEvent: (roomId, type, timeout) => this.#client.onRoomEvent(roomId, type, timeout),
-        userId: () => this.#client.userId(),
-      },
-      p2pCrypto,
-      localDeviceId: this.#client.deviceId(),
-      idleTimeoutMs,
-      onStatusChange: (status) => {
-        this.#log.info('P2P transport status changed', { status, room_id: dmRoomId });
-        const newBatchMs = status === 'p2p' ? 5 : 200;
-        this.#transportManager.setBatchMs(dmRoomId, newBatchMs);
-        const mux = this.#roomMuxes.get(dmRoomId);
-        if (mux) mux.setBatchMs(newBatchMs);
-      },
-      onReconnectNeeded: () => {
-        this.#attemptP2PConnection(dmRoomId).catch((err) => {
-          this.#log.warn('P2P reconnect failed', { error: err.message, room_id: dmRoomId });
-        });
-      },
-      onHangup: (reason) => {
-        this.#log.info('P2P hangup', { reason, room_id: dmRoomId });
-      },
-    });
-
+    const sessionKey = await generateSessionKey(); const p2pCrypto = await createP2PCrypto(sessionKey);
+    const transport = P2PTransport.create({ matrixClient: { sendEvent: (rId, t, c) => this.#client.sendEvent(rId, t, c), onRoomEvent: (rId, t, timeout) => this.#client.onRoomEvent(rId, t, timeout), userId: () => this.#client.userId() }, p2pCrypto, localDeviceId: this.#client.deviceId(), idleTimeoutMs: (this.#config.p2pIdleTimeoutS || 300) * 1000, onStatusChange: (status) => { this.#log.info('P2P transport status changed', { status, room_id: dmRoomId }); const ms = status === 'p2p' ? 5 : 200; this.#transportManager.setBatchMs(dmRoomId, ms); this.#roomMuxes.get(dmRoomId)?.setBatchMs(ms); }, onReconnectNeeded: () => { this.#doAttemptP2P(dmRoomId).catch((err) => this.#log.warn('P2P reconnect failed', { error: err.message, room_id: dmRoomId })); }, onHangup: (reason) => { this.#log.info('P2P hangup', { reason, room_id: dmRoomId }); } });
     this.#roomTransports.set(dmRoomId, { transport, p2pCrypto });
-
-    // Attempt P2P (non-blocking, rate-limited)
-    this.#attemptP2PConnection(dmRoomId).catch((err) => {
-      this.#log.warn('Initial P2P connection failed, continuing on Matrix', {
-        error: err.message, room_id: dmRoomId,
-      });
-    });
-
+    this.#doAttemptP2P(dmRoomId).catch((err) => this.#log.warn('Initial P2P connection failed, continuing on Matrix', { error: err.message, room_id: dmRoomId }));
     return transport;
   }
 
   // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::SessionTransportManager::release_transport
   #releaseRoomTransport(roomId) {
-    const shouldClose = this.#transportManager.releaseTransport(roomId);
-    if (shouldClose) {
-      const entry = this.#roomTransports.get(roomId);
-      if (entry) {
-        entry.transport.close();
-        this.#roomTransports.delete(roomId);
-      }
-    }
+    if (this.#transportManager.releaseTransport(roomId)) { const entry = this.#roomTransports.get(roomId); if (entry) { entry.transport.close(); this.#roomTransports.delete(roomId); } }
   }
 
-  /**
-   * Attempt to establish a P2P WebRTC connection for a room.
-   * Launcher offers first. Also listens for incoming offers from client.
-   * Non-blocking — the terminal session works on Matrix while this runs.
-   * Rate-limited to one attempt per 15 seconds per room.
-   * Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::SessionTransportManager (state tracking)
-   */
-  async #attemptP2PConnection(dmRoomId) {
+  #doAttemptP2P(dmRoomId) {
     const entry = this.#roomTransports.get(dmRoomId);
-    if (!entry) { this.#log.debug('P2P: no entry for room', { room_id: dmRoomId }); return; }
-
-    // Rate limit check delegated to WASM state machine
-    if (!this.#transportManager.shouldAttemptP2P(dmRoomId)) {
-      this.#log.debug('P2P: rate limited', { room_id: dmRoomId }); return;
-    }
-    // Record attempt start; get attempt ID for stale-check later
-    const attemptId = this.#transportManager.beginP2PAttempt(dmRoomId);
-
-    this.#log.info('Attempting P2P connection', { room_id: dmRoomId, attempt: attemptId });
-
-    const { transport } = entry;
-
-    // Fetch TURN credentials from homeserver
-    const session = JSON.parse(this.#client.exportSession());
-    const server = session.homeserver_url;
-    const accessToken = session.access_token;
-    let iceServers = [];
-
-    const turnCreds = await fetchTurnCredentials(server, accessToken);
-    if (turnCreds) {
-      iceServers = turnToIceServers(turnCreds);
-      this.#log.info('P2P: TURN credentials fetched', { uris: turnCreds.uris?.length || 0 });
-    } else {
-      this.#log.warn('P2P: no TURN credentials available');
-    }
-
-    const turnOnly = this.#config.p2pTurnOnly === true;
-    this.#log.info('P2P: config', { turnOnly, iceServers: iceServers.length });
-
-    // Staleness check delegated to WASM state machine
-    // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::SessionTransportManager::is_attempt_stale
-    const isStale = () => this.#transportManager.isAttemptStale(dmRoomId, attemptId);
-
-    // Race: launcher offers, AND listens for incoming client offer
-    // First channel to open wins. Settled state tracked in WASM.
-    // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::SessionTransportManager::mark_settled / is_settled
-    const settle = (channel, callId, role, p2pCrypto) => {
-      if (this.#transportManager.isSettled(dmRoomId)) {
-        channel.close();
-        return false;
-      }
-      this.#transportManager.markSettled(dmRoomId);
-      if (p2pCrypto) transport.setP2PCrypto(p2pCrypto);
-      transport.setDataChannel(channel);
-      this.#log.info('P2P data channel established', { room_id: dmRoomId, call_id: callId, role });
-      return true;
-    };
-
-    // Helper to wire ICE candidate batching for a channel+signaling pair
-    const wireIceBatching = (channel, signaling, callId, partyId) => {
-      const candidates = [];
-      let candidateTimer = null;
-      channel.onIceCandidate((candidate) => {
-        candidates.push(candidate);
-        if (candidateTimer) clearTimeout(candidateTimer);
-        candidateTimer = setTimeout(async () => {
-          const batch = candidates.splice(0);
-          if (batch.length > 0) {
-            await signaling.sendCandidates({ callId, partyId, candidates: batch }).catch(() => {});
-          }
-        }, 100);
-      });
-    };
-
-    // P2P signaling goes through the exec room (established E2EE) not the DM room
-    // (newly-created DM rooms have unreliable Megolm key exchange).
-    const signalingRoomId = this.#topology.exec_room_id;
-
-    // Helper to poll for ICE candidates continuously (adds them to channel as they arrive)
-    // Note: uses call_id + party_id to filter, NOT sender — same-user scenario.
-    // First scans existing room history (candidates may arrive before polling starts),
-    // then polls for new candidates via onRoomEvent.
-    const pollCandidates = async (channel, callId, ownPartyId) => {
-      // Phase 1: Scan existing room history for candidates that arrived before polling started.
-      // This is critical because onRoomEvent marks existing events as "seen" and skips them.
-      try {
-        const existingJson = await this.#client.findRoomEvents(signalingRoomId, 'm.call.candidates', 20);
-        const existing = JSON.parse(existingJson);
-        for (const evt of existing) {
-          const content = evt.content || evt;
-          if (content.call_id !== callId) continue;
-          if (content.party_id === ownPartyId) continue;
-          const cands = content.candidates || [];
-          this.#log.debug('P2P: found existing candidates', { call_id: callId, count: cands.length });
-          for (const c of cands) {
-            channel.addIceCandidate(c);
-          }
-        }
-      } catch (err) {
-        this.#log.debug('P2P: findRoomEvents scan failed', { error: err.message });
-      }
-
-      // Phase 2: Poll for new candidates arriving after polling started
-      for (let i = 0; i < 30; i++) {
-        if (this.#transportManager.isSettled(dmRoomId) && i > 5) return; // After settle, poll a few more for stragglers
-        const candJson = await this.#client.onRoomEvent(signalingRoomId, 'm.call.candidates', 1);
-        if (candJson == null) continue;
-        try {
-          const candEvent = JSON.parse(candJson);
-          const candContent = candEvent.content || candEvent;
-          if (candContent.call_id !== callId) continue;
-          if (candContent.party_id === ownPartyId) continue; // Skip our own candidates
-          for (const c of (candContent.candidates || [])) {
-            channel.addIceCandidate(c);
-          }
-        } catch { /* malformed */ }
-      }
-    };
-
-    // Pre-generate offerer's call_id so the answerer can skip our own invite
-    // (can't use sender check since browser and launcher may share the same Matrix user ID)
-    const offererCallId = P2PSignaling.generateCallId();
-
-    // --- Offerer path: launcher creates offer ---
-    const offerPath = async () => {
-      // Delay 5s to let browser start its answerer poll (browser needs time to
-      // join room, sync, and set up transport before it starts listening)
-      await new Promise((r) => setTimeout(r, 5000));
-      if (this.#transportManager.isSettled(dmRoomId) || isStale()) return;
-
-      const channel = new NodeWebRTCChannel({ iceServers, turnOnly });
-      const signaling = new P2PSignaling(
-        {
-          sendEvent: (roomId, type, content) => this.#client.sendEvent(roomId, type, content),
-          onRoomEvent: (roomId, cb) => this.#client.onRoomEvent(roomId, cb),
-        },
-        signalingRoomId,
-        this.#client.userId(),
-      );
-
-      const callId = offererCallId;
-      const partyId = P2PSignaling.generatePartyId();
-      wireIceBatching(channel, signaling, callId, partyId);
-
-      // Generate session key for P2P encryption — shared via E2EE Matrix invite
-      const offerSessionKey = await generateSessionKey();
-      const offerP2PCrypto = await createP2PCrypto(offerSessionKey);
-
-      const offer = await channel.createOffer();
-      this.#log.info('P2P offerer: sending invite', { call_id: callId, room_id: dmRoomId, signaling_room: signalingRoomId });
-      await signaling.sendInvite({ callId, partyId, sdp: offer.sdp, lifetime: 30000, sessionKey: offerSessionKey });
-
-      // Wait for answer matching our call_id (signaling via exec room)
-      // Note: do NOT filter by sender — browser and launcher may share the same
-      // Matrix user ID (same-user, different device). The call_id check is sufficient.
-      // Also scan existing room history for answers (may have arrived during signaling)
-      let answerContent = null;
-      try {
-        const existingAnswers = JSON.parse(await this.#client.findRoomEvents(signalingRoomId, 'm.call.answer', 10));
-        for (const evt of existingAnswers) {
-          const c = evt.content || evt;
-          if (c.call_id === callId) {
-            this.#log.info('P2P offerer: found answer in room history', { call_id: callId });
-            answerContent = c;
-            break;
-          }
-        }
-      } catch { /* findRoomEvents not available or failed */ }
-
-      const offerDeadline = Date.now() + 30_000;
-      while (!answerContent && Date.now() < offerDeadline && !this.#transportManager.isSettled(dmRoomId) && !isStale()) {
-        const answerJson = await this.#client.onRoomEvent(signalingRoomId, 'm.call.answer', 5);
-        if (answerJson == null) {
-          this.#log.debug('P2P offerer: poll returned null, retrying...', { call_id: callId });
-          continue;
-        }
-        const answerEvent = JSON.parse(answerJson);
-        const content = answerEvent.content || answerEvent;
-        this.#log.debug('P2P offerer: got answer event', { call_id: content.call_id, expected: callId });
-        if (content.call_id !== callId) continue; // Wrong call
-        answerContent = content;
-        break;
-      }
-      if (!answerContent || this.#transportManager.isSettled(dmRoomId)) {
-        channel.close();
-        throw new Error('No P2P answer received within timeout');
-      }
-
-      this.#log.info('P2P offerer: answer received, accepting', { call_id: callId });
-      await channel.acceptAnswer({ sdp: answerContent.answer.sdp, type: answerContent.answer.type });
-
-      // Log ICE state changes for debugging
-      channel.onStateChange((state) => this.#log.debug('P2P offerer ICE state', { state, call_id: callId }));
-
-      // Poll candidates in background
-      pollCandidates(channel, callId, partyId).catch(() => {});
-
-      // Wait for data channel with timeout (30s)
-      await Promise.race([
-        channel.waitForDataChannel(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Data channel open timeout (30s)')), 30_000)),
-      ]);
-      settle(channel, callId, 'offerer', offerP2PCrypto);
-    };
-
-    // --- Answerer path: listen for incoming client offer ---
-    const answererPath = async () => {
-      // Poll for incoming m.call.invite from client (skip our own offerer invite)
-      // Note: use call_id to differentiate, NOT sender — browser and launcher may
-      // share the same Matrix user ID (same-user, different device).
-      // Signaling via exec room for reliable E2EE.
-      let inviteJson = null;
-      const answererDeadline = Date.now() + 35_000;
-      while (Date.now() < answererDeadline && !this.#transportManager.isSettled(dmRoomId) && !isStale()) {
-        const json = await this.#client.onRoomEvent(signalingRoomId, 'm.call.invite', 5);
-        if (json == null) continue;
-        const evt = JSON.parse(json);
-        const evtContent = evt.content || evt;
-        if (evtContent.call_id === offererCallId) continue; // Skip our own invite
-        inviteJson = json;
-        break;
-      }
-      if (this.#transportManager.isSettled(dmRoomId) || isStale() || !inviteJson) return;
-
-      const inviteEvent = JSON.parse(inviteJson);
-      const inviteContent = inviteEvent.content || inviteEvent;
-      const callId = inviteContent.call_id;
-      if (!callId || !inviteContent.offer?.sdp) return;
-
-      // Extract shared session key from offerer's invite. Field name is
-      // `mxdx_session_key` per ADR 2026-04-15-mcall-wire-format.md (2026-04-16
-      // addendum) — the Rust emitter in crates/mxdx-p2p emits the same field
-      // via the coordinated-release policy
-      // (ADR 2026-04-16-coordinated-rust-npm-releases.md).
-      let answererP2PCrypto = null;
-      if (inviteContent.mxdx_session_key) {
-        answererP2PCrypto = await createP2PCrypto(inviteContent.mxdx_session_key);
-      }
-
-      const channel = new NodeWebRTCChannel({ iceServers, turnOnly });
-      const signaling = new P2PSignaling(
-        {
-          sendEvent: (roomId, type, content) => this.#client.sendEvent(roomId, type, content),
-          onRoomEvent: (roomId, cb) => this.#client.onRoomEvent(roomId, cb),
-        },
-        signalingRoomId,
-        this.#client.userId(),
-      );
-
-      const partyId = P2PSignaling.generatePartyId();
-      wireIceBatching(channel, signaling, callId, partyId);
-
-      const answer = await channel.acceptOffer({ sdp: inviteContent.offer.sdp, type: 'offer' });
-      this.#log.info('P2P answerer: sending answer', { call_id: callId });
-      await signaling.sendAnswer({ callId, partyId, sdp: answer.sdp });
-
-      // Log ICE state changes for debugging
-      channel.onStateChange((state) => this.#log.debug('P2P answerer ICE state', { state, call_id: callId }));
-
-      // Poll candidates in background
-      pollCandidates(channel, callId, partyId).catch(() => {});
-
-      // Wait for data channel with timeout (30s)
-      await Promise.race([
-        channel.waitForDataChannel(),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Data channel open timeout (30s)')), 30_000)),
-      ]);
-      settle(channel, callId, 'answerer', answererP2PCrypto);
-    };
-
-    // Race both paths — first to succeed wins
-    await Promise.any([
-      offerPath().catch((err) => { throw err; }),
-      answererPath().catch((err) => { throw err; }),
-    ]).catch((err) => {
-      // AggregateError if both failed
-      const msg = err instanceof AggregateError
-        ? err.errors.map(e => e.message).join('; ')
-        : err.message;
-      throw new Error(msg);
-    });
+    if (!entry) { this.#log.debug('P2P: no entry for room', { room_id: dmRoomId }); return Promise.resolve(); }
+    // Rust equivalent: packages/launcher/src/p2p-bridge.js::attemptP2PConnection (OS-bound: node-datachannel)
+    return attemptP2PConnection({ transport: entry.transport, transportMgr: this.#transportManager, dmRoomId, signalingRoomId: this.#topology.exec_room_id, matrixClient: this.#client, config: this.#config, log: this.#log });
   }
 
   #getInternalIps() {
-    const nets = os.networkInterfaces();
-    const ips = [];
-    for (const name of Object.keys(nets)) {
-      for (const net of nets[name]) {
-        if (net.family === 'IPv4' && !net.internal) ips.push(net.address);
-      }
-    }
+    const nets = os.networkInterfaces(); const ips = [];
+    for (const name of Object.keys(nets)) for (const net of nets[name]) if (net.family === 'IPv4' && !net.internal) ips.push(net.address);
     return ips;
-  }
-}
-
-/**
- * Track the last N lines of output for the tail field of SESSION_RESULT.
- * @param {string[]} tailLines - Mutable array of tail lines
- * @param {string} line - New output line
- * @param {number} maxLines - Maximum lines to retain
- */
-function trackTail(tailLines, line, maxLines) {
-  tailLines.push(line);
-  if (tailLines.length > maxLines) {
-    tailLines.shift();
   }
 }
