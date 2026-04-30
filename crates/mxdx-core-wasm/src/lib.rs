@@ -527,8 +527,25 @@ impl WasmMatrixClient {
             .to_string();
 
         // Space room. The launcher_id + role marker are embedded in
-        // `m.room.create` content (never encrypted) so discovery works even
-        // when every other state event is encrypted via MSC4362.
+        // `m.room.create` content (never encrypted by Matrix spec) so
+        // discovery works even when every other state event — including
+        // `m.space.child` linking the exec/logs rooms below — is encrypted
+        // via MSC4362.
+        //
+        // Security (CLAUDE.md): every Matrix event in this project MUST be
+        // E2EE on the wire, including state events like `m.space.child`.
+        // The space room therefore needs:
+        //   1. `m.room.encryption` (algorithm `m.megolm.v1.aes-sha2`) so
+        //      timeline events are encrypted by Megolm.
+        //   2. `with_encrypted_state()` (MSC4362
+        //      `experimental-encrypted-state-events`) so state events such
+        //      as `m.space.child` are encrypted on the wire.
+        // Both are set the same way `create_named_encrypted_mxdx_room`
+        // sets them for the exec/logs rooms.
+        let space_encryption = InitialStateEvent::new(
+            EmptyStateKey,
+            RoomEncryptionEventContent::with_recommended_defaults().with_encrypted_state(),
+        );
         let space_topic = InitialStateEvent::new(
             EmptyStateKey,
             RoomTopicEventContent::new(format!("org.mxdx.launcher.space:{launcher_id}")),
@@ -537,7 +554,8 @@ impl WasmMatrixClient {
         space_request.name = Some(format!("mxdx: {launcher_id}"));
         space_request.creation_content =
             Some(mxdx_creation_content_raw(launcher_id, "space", true));
-        space_request.initial_state = vec![space_topic.to_raw_any()];
+        space_request.initial_state =
+            vec![space_encryption.to_raw_any(), space_topic.to_raw_any()];
 
         let space = self
             .client
