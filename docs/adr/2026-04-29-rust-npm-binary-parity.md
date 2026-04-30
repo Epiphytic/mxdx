@@ -56,6 +56,7 @@ Features that cannot run in WASM remain as JS thin wrappers; each such wrapper M
 | P2P socket creation via `node-datachannel` | Native libdatachannel binding | `crates/mxdx-p2p` (datachannel-rs vendored binding) |
 | Inquirer onboarding wizard | Interactive prompt requires Node TTY | None — onboarding is intentionally npm-only (Pillar 4) |
 | Subprocess spawning for `mxdx-exec` | `child_process` for Node, `std::process` for Rust | `crates/mxdx-worker/src/bin/mxdx_exec.rs` |
+| `packages/launcher/src/session-mux.js` (PTY I/O mux) | `node-pty` data-event subscription is per-session and OS-bound | None — PTY I/O routing is `node-pty`-bound; no WASM equivalent (session *state* tracking lives in `crates/mxdx-core-wasm/src/lib.rs::WasmSessionManager` / `SessionTransportManager`) |
 
 ### Pillar 4 — Two-tier feature classification
 

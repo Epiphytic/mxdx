@@ -3,7 +3,17 @@ import { TerminalDataEvent, processTerminalInput } from '@mxdx/core';
 
 /**
  * Multiplexes terminal I/O across sessions sharing a single DM room.
- * Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::SessionTransportManager (state tracking)
+ *
+ * Rust equivalent: none — PTY I/O multiplexing is OS-bound via node-pty
+ * (see ADR docs/adr/2026-04-29-rust-npm-binary-parity.md Pillar 3 OS-bound
+ * wrapper table). Session-routing logic that does NOT touch PTY I/O lives
+ * in `crates/mxdx-core-wasm/src/lib.rs::WasmSessionManager`; the transport
+ * connection lifecycle lives in
+ * `crates/mxdx-core-wasm/src/lib.rs::SessionTransportManager`. This file
+ * fans incoming `org.mxdx.terminal.data` events out to the right `PtyBridge`
+ * (a node-pty wrapper) and forwards local PTY output to per-session
+ * `WasmBatchedSender` instances — both of those endpoints are inherently
+ * Node/native-bound.
  */
 export class SessionMux {
   #transport; #roomId; #launcherUserId; #sessions = new Map(); #senders = new Map();
