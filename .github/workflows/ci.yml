@@ -321,6 +321,21 @@ jobs:
       - name: Run local E2E tests (commands)
         run: node --test packages/e2e-tests/tests/launcher-commands.test.js
 
+  # Warn-only for 5 business days from 2026-04-30; T-2.8 flips to blocking
+  # (removes continue-on-error) after the false-positive window closes.
+  # ADR: docs/adr/2026-04-29-rust-npm-binary-parity.md req 28
+  e2e-subprocess-lint:
+    needs: preflight
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Lint E2E tests for subprocess discipline
+        run: node scripts/lint-e2e-subprocess.mjs
+
   npm-pack:
     needs: npm-e2e
     runs-on: ubuntu-latest
