@@ -13,7 +13,6 @@ import {
   loadBetaCredentials,
   skipIfNoFederatedCredentials,
   spawnRustBinary,
-  sleep,
 } from '../src/beta.js';
 
 const skipReason = skipIfNoFederatedCredentials();

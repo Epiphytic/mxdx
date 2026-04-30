@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// Lint: verify every describe/it block in packages/e2e-tests/tests/ spawns a subprocess.
+// Lint: verify every file in packages/e2e-tests/tests/ contains at least one subprocess call.
 //
-// Per ADR 2026-04-29 req 28: tests under e2e-tests/ that do not spawn at least
-// one binary subprocess are misclassified integration tests. This script runs in
-// warn-only mode (exit 0) for 5 business days after introduction; T-2.8 flips it
-// to blocking by removing the force-exit-0 override.
+// File-level heuristic: if no spawn/execFile/spawnRustBinary token appears anywhere in the
+// file, the file is flagged as a likely misclassified integration test.
+// Per ADR 2026-04-29 req 28. Runs warn-only (exit 0) for 5 business days after introduction;
+// T-2.8 flips to blocking by removing continue-on-error from CI and passing --blocking here.
 //
 // Usage: node scripts/lint-e2e-subprocess.mjs [--blocking]
 //   --blocking  Exit non-zero on violations (used by T-2.8 to flip mode)
@@ -19,12 +19,11 @@ const testDir = path.join(repoRoot, 'packages', 'e2e-tests', 'tests');
 
 const BLOCKING = process.argv.includes('--blocking');
 
-const SUBPROCESS_PATTERN = /\bspawn\b|\bexecFile\b|\bspawnSync\b|\bexec\b|\bspawnRustBinary\b/;
-const BLOCK_START = /^\s*(describe|it)\s*\(/;
+// Anchor on call syntax to reduce false positives from comments and strings.
+const SUBPROCESS_PATTERN = /\bspawn\s*\(|\bexecFile\s*\(|\bspawnSync\s*\(|\bexec\s*\(|\bspawnRustBinary\s*\(/;
 
 let violations = [];
 let totalFiles = 0;
-let totalBlocks = 0;
 
 for (const file of fs.readdirSync(testDir).sort()) {
   if (!file.endsWith('.test.js')) continue;
@@ -34,21 +33,7 @@ for (const file of fs.readdirSync(testDir).sort()) {
   const content = fs.readFileSync(filePath, 'utf8');
 
   if (!SUBPROCESS_PATTERN.test(content)) {
-    violations.push({ file, block: '(entire file)', line: 1 });
-    totalBlocks++;
-    continue;
-  }
-
-  // Simple heuristic: find describe/it blocks and check if the surrounding
-  // file section contains a subprocess call. For warn-only mode, file-level
-  // detection is sufficient to surface the known violators.
-  const lines = content.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    if (BLOCK_START.test(lines[i])) {
-      totalBlocks++;
-      // Check if there's any subprocess call in the file (already checked above).
-      // For more precise block-level detection, flag files with NO subprocess calls.
-    }
+    violations.push({ file, line: 1 });
   }
 }
 
@@ -59,7 +44,7 @@ if (violations.length === 0) {
 
 console.log(`e2e-subprocess-lint: ${violations.length} file(s) lack subprocess calls (misclassified as E2E):`);
 for (const v of violations) {
-  console.log(`  WARN  ${v.file}:${v.line}  ${v.block}  — no spawn/execFile/spawnSync found`);
+  console.log(`  WARN  ${v.file}:${v.line}  — no spawn/execFile/spawnSync call found`);
 }
 console.log('');
 console.log('These files should be in packages/integration-tests/ not packages/e2e-tests/.');

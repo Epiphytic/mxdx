@@ -1,7 +1,11 @@
 /**
- * E2E tests for launcher command execution.
- * Tests multiple commands, stderr, deduplication, and listLauncherSpaces.
- * Runs against a local Tuwunel instance.
+ * Integration tests: WASM launcher command execution against local Tuwunel.
+ *
+ * Tests multiple commands, stderr, deduplication, and listLauncherSpaces
+ * by calling WasmMatrixClient directly (no binary subprocess).
+ * These are integration tests per CLAUDE.md policy, not E2E tests.
+ *
+ * Moved from packages/e2e-tests/ — subprocess-spawning tests remain there.
  */
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert';

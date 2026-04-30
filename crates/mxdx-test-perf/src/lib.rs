@@ -23,7 +23,8 @@ pub struct PerfEntry {
 
 /// Write a single JSONL performance entry to TEST_PERF_OUTPUT.
 ///
-/// No-ops silently if TEST_PERF_OUTPUT is unset or the file cannot be opened.
+/// No-ops silently if TEST_PERF_OUTPUT is unset. Returns an error if the file
+/// cannot be opened or written — callers should log and continue.
 pub fn write_perf_entry(entry: &PerfEntry) -> anyhow::Result<()> {
     let path = match std::env::var("TEST_PERF_OUTPUT") {
         Ok(p) if !p.is_empty() => p,
@@ -46,9 +47,14 @@ pub fn write_perf_entry(entry: &PerfEntry) -> anyhow::Result<()> {
 mod tests {
     use super::*;
     use std::io::BufRead as _;
+    use std::sync::Mutex;
+
+    // Serialize all tests that touch TEST_PERF_OUTPUT to prevent parallel env-var races.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn writes_jsonl_to_output_file() {
+        let _lock = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("perf.jsonl");
         std::env::set_var("TEST_PERF_OUTPUT", path.to_str().unwrap());
@@ -80,6 +86,7 @@ mod tests {
 
     #[test]
     fn noop_when_env_unset() {
+        let _lock = ENV_LOCK.lock().unwrap();
         std::env::remove_var("TEST_PERF_OUTPUT");
         let entry = PerfEntry {
             suite: "noop".into(),
@@ -94,6 +101,7 @@ mod tests {
 
     #[test]
     fn rss_max_omitted_when_none() {
+        let _lock = ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("perf2.jsonl");
         std::env::set_var("TEST_PERF_OUTPUT", path.to_str().unwrap());
