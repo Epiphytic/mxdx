@@ -15,6 +15,7 @@ members = [
     "crates/mxdx-p2p",
     "xtask",
     "tests/helpers",
+    "crates/mxdx-test-perf",   # dev/test-only perf helper; publish = false; no WASM targets
 ]
 resolver = "2"
 
