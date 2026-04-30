@@ -73,16 +73,20 @@ describe('Rust ↔ npm Interop Beta', {
           'start', '--homeserver', workerServer,
           '--username', creds.account1.username,
           '--password', creds.account1.password,
+          '--allowed-command', 'echo',
+          '--allowed-command', 'date',
+          '--allowed-command', 'uname',
+          '--allowed-cwd', '/tmp',
         ]);
 
         try {
-          await worker.waitForOutput('worker ready', 30_000);
+          await worker.waitForOutput('MXDX_WORKER_READY', 30_000);
 
           const client = spawnRustBinary('mxdx-client', [
             '--homeserver', clientServer,
             '--username', creds.account2.username,
             '--password', creds.account2.password,
-            'exec', 'echo', `interop-${id}`,
+            'exec', '--cwd', '/tmp', 'echo', `interop-${id}`,
           ]);
 
           try {
@@ -104,10 +108,14 @@ describe('Rust ↔ npm Interop Beta', {
           'start', '--homeserver', workerServer,
           '--username', creds.account1.username,
           '--password', creds.account1.password,
+          '--allowed-command', 'echo',
+          '--allowed-command', 'date',
+          '--allowed-command', 'uname',
+          '--allowed-cwd', '/tmp',
         ]);
 
         try {
-          await worker.waitForOutput('worker ready', 30_000);
+          await worker.waitForOutput('MXDX_WORKER_READY', 30_000);
 
           const client = spawnNpmBinary('client', [
             '--server', clientServer,
@@ -135,16 +143,18 @@ describe('Rust ↔ npm Interop Beta', {
           '--servers', workerServer,
           '--username', creds.account1.username,
           '--password', creds.account1.password,
+          '--allowed-commands', 'echo,date,uname',
+          '--allowed-cwd', '/tmp',
         ]);
 
         try {
-          await launcher.waitForOutput('worker ready', 30_000);
+          await launcher.waitForOutput('Listening for commands', 30_000);
 
           const client = spawnRustBinary('mxdx-client', [
             '--homeserver', clientServer,
             '--username', creds.account2.username,
             '--password', creds.account2.password,
-            'exec', 'echo', `interop-${id}`,
+            'exec', '--cwd', '/tmp', 'echo', `interop-${id}`,
           ]);
 
           try {
@@ -168,10 +178,12 @@ describe('Rust ↔ npm Interop Beta', {
           '--servers', workerServer,
           '--username', creds.account1.username,
           '--password', creds.account1.password,
+          '--allowed-commands', 'echo,date,uname',
+          '--allowed-cwd', '/tmp',
         ]);
 
         try {
-          await launcher.waitForOutput('worker ready', 30_000);
+          await launcher.waitForOutput('Listening for commands', 30_000);
 
           const client = spawnNpmBinary('client', [
             '--server', clientServer,
