@@ -77,6 +77,12 @@ pub fn sdk_version() -> String {
 }
 
 /// Room IDs for a launcher space topology, serialized to/from JS.
+///
+/// Internal only — serialized as a JSON string via `serde_json`.
+/// Never use `serde_wasm_bindgen::to_value` for this type: it returns
+/// empty `{}` for nested `serde_json::Value` and arbitrary serde shapes
+/// (project memory). Callers in JS must `JSON.parse(<await>)` the
+/// returned string.
 #[derive(Serialize, Deserialize)]
 pub struct LauncherTopology {
     pub space_id: String,
@@ -506,7 +512,11 @@ impl WasmMatrixClient {
     }
 
     /// Create a launcher space with exec and logs child rooms (both E2EE + MSC4362).
-    /// Returns JSON: { space_id, exec_room_id, logs_room_id }
+    ///
+    /// Returns a JSON string `{ space_id, exec_room_id, logs_room_id }`.
+    /// JS callers MUST `JSON.parse(...)` the returned value — the WASM layer
+    /// returns a string, not a JS object, because `serde_wasm_bindgen::to_value`
+    /// produces empty `{}` for `serde_json::Value`-shaped types (project memory).
     #[wasm_bindgen(js_name = "createLauncherSpace")]
     pub async fn create_launcher_space(&self, launcher_id: &str) -> Result<JsValue, JsValue> {
         let server_name = self
@@ -573,7 +583,12 @@ impl WasmMatrixClient {
             exec_room_id,
             logs_room_id,
         };
-        serde_wasm_bindgen::to_value(&topology).map_err(to_js_err)
+        // Return a JSON string. JS must JSON.parse() it. See LauncherTopology
+        // doc comment — serde_wasm_bindgen::to_value drops nested serde_json::Value
+        // shapes silently.
+        serde_json::to_string(&topology)
+            .map_err(to_js_err)
+            .map(|s| JsValue::from_str(&s))
     }
 
     /// Find an existing launcher space by scanning joined rooms for matching
@@ -582,7 +597,9 @@ impl WasmMatrixClient {
     /// other state event is MSC4362-encrypted and the client has not yet
     /// received the room keys needed to decrypt the topic.
     ///
-    /// Returns JSON topology or null.
+    /// Returns a JSON-string topology `{space_id, exec_room_id, logs_room_id}`
+    /// or JS `null` if no matching space exists.
+    /// JS callers MUST `JSON.parse(...)` non-null returns.
     #[wasm_bindgen(js_name = "findLauncherSpace")]
     pub async fn find_launcher_space(&self, launcher_id: &str) -> Result<JsValue, JsValue> {
         self.sync_once().await?;
@@ -638,13 +655,21 @@ impl WasmMatrixClient {
                     exec_room_id: e.clone(),
                     logs_room_id: logs_room_id.unwrap_or_else(|| e),
                 };
-                serde_wasm_bindgen::to_value(&topology).map_err(to_js_err)
+                // Return a JSON string. JS must JSON.parse() it. See
+                // LauncherTopology doc comment.
+                serde_json::to_string(&topology)
+                    .map_err(to_js_err)
+                    .map(|s| JsValue::from_str(&s))
             }
             None => Ok(JsValue::NULL),
         }
     }
 
     /// Find or create a launcher space (idempotent).
+    ///
+    /// Returns a JSON string `{ space_id, exec_room_id, logs_room_id }`.
+    /// JS callers MUST `JSON.parse(...)` the returned value (see
+    /// `LauncherTopology` doc comment).
     #[wasm_bindgen(js_name = "getOrCreateLauncherSpace")]
     pub async fn get_or_create_launcher_space(
         &self,
@@ -2551,6 +2576,7 @@ impl WasmSessionManager {
                     self.handle_session_signal(&content, &mut actions);
                 }
                 "org.mxdx.command" => {
+                    if sender == self.user_id { continue; }
                     self.handle_legacy_command(&content, event_id, sender, &mut actions);
                 }
                 _ => {}
@@ -3027,9 +3053,9 @@ impl WasmSessionManager {
                     cols, rows, env, negotiated_batch_ms, actions);
             }
             "list_sessions" => {
+                // dm_room_id intentionally omitted — it's private session metadata
                 let sessions = self.sessions.values().map(|s| serde_json::json!({
                     "session_id": s.session_id,
-                    "room_id": s.dm_room_id,
                     "persistent": s.persistent,
                     "tmux_name": s.tmux_name,
                     "alive": s.alive,

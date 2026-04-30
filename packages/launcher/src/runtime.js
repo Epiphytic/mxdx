@@ -12,7 +12,8 @@ import {
   SessionTransportManager,
   WasmSessionManager,
 } from '@mxdx/core';
-// Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::WasmBatchedSender + compress_terminal_data
+// Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::WasmBatchedSender (rate-limit-aware
+// batching) + compress_terminal_data_wasm (exposed to JS as `compressTerminalData`)
 import { executeCommand } from './process-bridge.js';
 // Rust equivalent: crates/mxdx-worker/src/bin/mxdx_exec.rs::main (subprocess execution via mxdx-exec binary)
 import { PtyBridge } from './pty-bridge.js';
@@ -80,7 +81,11 @@ export class LauncherRuntime {
       if (freshLogin && this.#config.password && this.#config.configPath) { this.#config.password = undefined; this.#config._password = undefined; try { this.#config.save(this.#config.configPath); log('Password removed from config file (now in keyring)'); } catch { /* Non-fatal */ } }
     }
     log(`Setting up rooms for ${username}...`);
-    this.#topology = await this.#client.getOrCreateLauncherSpace(username);
+    // getOrCreateLauncherSpace returns a JSON string (see
+    // crates/mxdx-core-wasm/src/lib.rs::LauncherTopology — serde_wasm_bindgen
+    // would silently drop nested values, so the WASM layer hands us a string).
+    const topologyRaw = await this.#client.getOrCreateLauncherSpace(username);
+    this.#topology = typeof topologyRaw === 'string' ? JSON.parse(topologyRaw) : topologyRaw;
     log(`Rooms ready: space=${this.#topology.space_id} exec=${this.#topology.exec_room_id}`);
     this.#stateRoomId = await this.#client.getOrCreateStateRoom(os.hostname(), os.userInfo().username, username);
     log(`State room ready: ${this.#stateRoomId}`);
