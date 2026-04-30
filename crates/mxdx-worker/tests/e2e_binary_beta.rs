@@ -12,7 +12,9 @@
 //! Run with: `cargo test -p mxdx-worker --test e2e_binary_beta -- --ignored --nocapture`
 
 use std::process::{Child, Command, Output, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+use mxdx_test_perf::{PerfEntry, write_perf_entry};
 
 // ---------------------------------------------------------------------------
 // Credential loading
@@ -141,6 +143,7 @@ async fn wait_for_worker_ready() {
 #[tokio::test]
 #[ignore = "requires test-credentials.toml and beta server access"]
 async fn e2e_beta_echo_command_lifecycle() {
+    let test_start = Instant::now();
     let creds = load_test_credentials().expect("test-credentials.toml required");
     let room_name = format!("e2e-beta-echo-{}", std::process::id());
 
@@ -180,6 +183,14 @@ async fn e2e_beta_echo_command_lifecycle() {
         "client should exit 0 for echo, got: {:?}",
         output.status.code(),
     );
+
+    let _ = write_perf_entry(&PerfEntry {
+        suite: "e2e_binary_beta/echo_command_lifecycle".to_string(),
+        transport: "same-hs".to_string(),
+        runtime: "rust".to_string(),
+        duration_ms: test_start.elapsed().as_millis() as u64,
+        rss_max: None,
+    });
 
     let _ = worker.kill();
     let _ = worker.wait();

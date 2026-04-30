@@ -112,6 +112,7 @@ fn cli_args_override_toml() {
         allowed_commands: vec![],
         allowed_cwd: vec![],
         authorized_users: vec![],
+        p2p: false,
     };
     let cfg = cfg.with_cli_overrides(&args);
 
@@ -146,8 +147,7 @@ fn output_batching_chunks_large_payloads() {
     let router = mxdx_worker::output::OutputRouter::new(false).with_batch_settings(200, 100);
 
     let data = vec![b'A'; 350]; // 350 bytes -> 4 chunks (100, 100, 100, 50)
-    let events =
-        router.create_chunked_output("sess-1", "worker-1", OutputStream::Stdout, &data);
+    let events = router.create_chunked_output("sess-1", "worker-1", OutputStream::Stdout, &data);
 
     assert_eq!(events.len(), 4);
 
