@@ -316,6 +316,8 @@ jobs:
         run: npm install
       - name: Run launcher unit tests
         run: node --test packages/launcher/tests/runtime-unit.test.js
+      - name: Run launcher config tests (flat-key schema, migration)
+        run: node --test packages/launcher/src/config.test.js
       - name: Run local E2E tests (onboarding)
         run: node --test packages/e2e-tests/tests/launcher-onboarding.test.js
       - name: Run integration tests (launcher commands — WASM-direct)

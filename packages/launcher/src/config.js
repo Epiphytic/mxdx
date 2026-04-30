@@ -3,6 +3,14 @@ import os from 'node:os';
 import path from 'node:path';
 import * as TOML from 'smol-toml';
 
+// Fields this runtime owns — used by save() to merge without clobbering unrelated keys.
+const LAUNCHER_OWNED_KEYS = [
+  'username', 'servers', 'allowed_commands', 'allowed_cwd', 'telemetry',
+  'max_sessions', 'admin_users', 'use_tmux', 'batch_ms', 'p2p_enabled',
+  'p2p_batch_ms', 'p2p_idle_timeout_s', 'p2p_advertise_ips', 'p2p_turn_only',
+  'telemetry_interval_s', 'preferred_server', 'server_credentials',
+];
+
 export class LauncherConfig {
   constructor({
     username,
@@ -72,27 +80,51 @@ export class LauncherConfig {
   save(filePath) {
     const dir = path.dirname(filePath);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const toml = TOML.stringify({
-      launcher: {
-        username: this.username,
-        servers: this.servers,
-        allowed_commands: this.allowedCommands,
-        allowed_cwd: this.allowedCwd,
-        telemetry: this.telemetry,
-        max_sessions: this.maxSessions,
-        admin_users: this.adminUsers,
-        use_tmux: this.useTmux,
-        batch_ms: this.batchMs,
-        p2p_enabled: this.p2pEnabled,
-        p2p_batch_ms: this.p2pBatchMs,
-        p2p_idle_timeout_s: this.p2pIdleTimeoutS,
-        p2p_advertise_ips: this.p2pAdvertiseIps,
-        p2p_turn_only: this.p2pTurnOnly,
-        telemetry_interval_s: this.telemetryIntervalS,
-        ...(this.preferredServer ? { preferred_server: this.preferredServer } : {}),
-        ...(Object.keys(this.serverCredentials).length ? { server_credentials: this.serverCredentials } : {}),
-      },
-    });
+
+    // Read existing file and merge: only overwrite launcher-owned keys, preserve others.
+    let existing = {};
+    if (fs.existsSync(filePath)) {
+      try {
+        const raw = fs.readFileSync(filePath, 'utf8');
+        const parsed = TOML.parse(raw);
+        // If the existing file still has a legacy section, flatten it in-memory before merging.
+        if (parsed.launcher && typeof parsed.launcher === 'object') {
+          existing = { ...parsed.launcher };
+        } else {
+          existing = { ...parsed };
+        }
+      } catch (_) {
+        // Unreadable existing file — start fresh
+      }
+    }
+
+    const ownedFields = {
+      username: this.username,
+      servers: this.servers,
+      allowed_commands: this.allowedCommands,
+      allowed_cwd: this.allowedCwd,
+      telemetry: this.telemetry,
+      max_sessions: this.maxSessions,
+      admin_users: this.adminUsers,
+      use_tmux: this.useTmux,
+      batch_ms: this.batchMs,
+      p2p_enabled: this.p2pEnabled,
+      p2p_batch_ms: this.p2pBatchMs,
+      p2p_idle_timeout_s: this.p2pIdleTimeoutS,
+      p2p_advertise_ips: this.p2pAdvertiseIps,
+      p2p_turn_only: this.p2pTurnOnly,
+      telemetry_interval_s: this.telemetryIntervalS,
+      ...(this.preferredServer ? { preferred_server: this.preferredServer } : {}),
+      ...(Object.keys(this.serverCredentials).length ? { server_credentials: this.serverCredentials } : {}),
+    };
+
+    // Merge: preserve unknown keys from existing flat file, overwrite owned keys.
+    const merged = { ...existing };
+    // Remove any legacy section key if present
+    delete merged.launcher;
+    Object.assign(merged, ownedFields);
+
+    const toml = TOML.stringify(merged);
     fs.writeFileSync(filePath, toml, { mode: 0o600 });
   }
 
@@ -100,25 +132,46 @@ export class LauncherConfig {
     if (!fs.existsSync(filePath)) return null;
     const content = fs.readFileSync(filePath, 'utf8');
     const parsed = TOML.parse(content);
-    const l = parsed.launcher || {};
+
+    // ADR 2026-04-29 req 6a: detect legacy [launcher] section and migrate.
+    // The Rust binary will also perform this migration, but if npm runs first we
+    // handle it here so security-critical fields are never silently zero-fielded.
+    let flat;
+    if (parsed.launcher && typeof parsed.launcher === 'object') {
+      process.stderr.write(
+        `mxdx: WARNING: ${filePath} uses legacy [launcher] section wrapper. ` +
+        `Migrating to flat-key layout. Original saved to ${filePath}.legacy.bak\n`
+      );
+      try {
+        fs.writeFileSync(`${filePath}.legacy.bak`, content, { mode: 0o600 });
+      } catch (_) {}
+      flat = parsed.launcher;
+      // Rewrite file in flat format so subsequent reads (including Rust) get the migrated version.
+      try {
+        fs.writeFileSync(filePath, TOML.stringify(flat), { mode: 0o600 });
+      } catch (_) {}
+    } else {
+      flat = parsed;
+    }
+
     return new LauncherConfig({
-      username: l.username,
-      servers: l.servers || [],
-      allowedCommands: l.allowed_commands || [],
-      allowedCwd: l.allowed_cwd || ['/tmp'],
-      telemetry: l.telemetry || 'full',
-      maxSessions: l.max_sessions || 5,
-      adminUsers: l.admin_users || [],
-      useTmux: l.use_tmux || 'auto',
-      batchMs: l.batch_ms || 200,
-      p2pEnabled: l.p2p_enabled !== undefined ? l.p2p_enabled : true,
-      p2pBatchMs: l.p2p_batch_ms || 10,
-      p2pIdleTimeoutS: l.p2p_idle_timeout_s || 300,
-      p2pAdvertiseIps: l.p2p_advertise_ips === true,
-      p2pTurnOnly: l.p2p_turn_only === true,
-      telemetryIntervalS: l.telemetry_interval_s || 60,
-      preferredServer: l.preferred_server || null,
-      serverCredentials: l.server_credentials || {},
+      username: flat.username,
+      servers: flat.servers || [],
+      allowedCommands: flat.allowed_commands || [],
+      allowedCwd: flat.allowed_cwd || ['/tmp'],
+      telemetry: flat.telemetry || 'full',
+      maxSessions: flat.max_sessions || 5,
+      adminUsers: flat.admin_users || [],
+      useTmux: flat.use_tmux || 'auto',
+      batchMs: flat.batch_ms || 200,
+      p2pEnabled: flat.p2p_enabled !== undefined ? flat.p2p_enabled : true,
+      p2pBatchMs: flat.p2p_batch_ms || 10,
+      p2pIdleTimeoutS: flat.p2p_idle_timeout_s || 300,
+      p2pAdvertiseIps: flat.p2p_advertise_ips === true,
+      p2pTurnOnly: flat.p2p_turn_only === true,
+      telemetryIntervalS: flat.telemetry_interval_s || 60,
+      preferredServer: flat.preferred_server || null,
+      serverCredentials: flat.server_credentials || {},
     });
   }
 
