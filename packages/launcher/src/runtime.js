@@ -1,14 +1,14 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
-import { connectWithSession, TerminalDataEvent, saveIndexedDB, BatchedSender, fetchTurnCredentials, turnToIceServers, NodeWebRTCChannel, P2PSignaling, P2PTransport, generateSessionKey, createP2PCrypto } from '@mxdx/core';
+import { connectWithSession, TerminalDataEvent, saveIndexedDB, BatchedSender, fetchTurnCredentials, turnToIceServers, NodeWebRTCChannel, P2PSignaling, P2PTransport, generateSessionKey, createP2PCrypto, processTerminalInput } from '@mxdx/core';
+// Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::WasmBatchedSender + compress_terminal_data
 import { executeCommand } from './process-bridge.js';
+// Rust equivalent: crates/mxdx-worker/src/bin/mxdx_exec.rs::execute_command
 import { PtyBridge } from './pty-bridge.js';
-import { inflateSync } from 'node:zlib';
+// Rust equivalent: crates/mxdx-worker/src/bin/mxdx_exec.rs::main (tmux + Unix-socket exit-code channel)
 
 const DEFAULT_SESSION_DIR = path.join(os.homedir(), '.mxdx');
-
-const MAX_DECOMPRESSED_SIZE = 1024 * 1024; // 1MB zlib bomb protection
 
 /**
  * Unified session event type constants.
@@ -166,15 +166,12 @@ class SessionMux {
     const parsed = TerminalDataEvent.safeParse(content);
     if (!parsed.success) return;
     const { data, encoding } = parsed.data;
-    const raw = Buffer.from(data, 'base64');
-    if (encoding === 'zlib+base64') {
-      try {
-        const decompressed = inflateSync(raw, { maxOutputLength: MAX_DECOMPRESSED_SIZE });
-        pty.write(new Uint8Array(decompressed));
-      } catch { /* zlib bomb protection */ }
-    } else {
-      pty.write(new Uint8Array(raw));
-    }
+    try {
+      // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::process_terminal_input
+      // Handles base64 decode + zlib inflate with 1MB bomb protection in Rust.
+      const bytes = processTerminalInput(data, encoding || 'base64');
+      pty.write(bytes);
+    } catch { /* zlib bomb protection — WASM throws on oversized decompression */ }
   }
 }
 

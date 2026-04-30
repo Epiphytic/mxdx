@@ -30,6 +30,7 @@ console_error_panic_hook = "0.1"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 web-time = "1.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+flate2 = { version = "1", features = ["rust_backend"] }
 
 matrix-sdk = { version = "0.16", default-features = false, features = ["e2e-encryption", "js", "indexeddb", "rustls-tls"] }
 matrix-sdk-base = { version = "0.16", default-features = false, features = ["experimental-encrypted-state-events"] }

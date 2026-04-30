@@ -1848,3 +1848,237 @@ pub fn turn_to_ice_servers(turn_response_json: &str) -> Result<String, JsValue> 
     }]);
     serde_json::to_string(&result).map_err(|e| to_js_err(format!("serialize: {e}")))
 }
+
+// ── Batched terminal sender ──────────────────────────────────────────────────
+
+use flate2::{write::ZlibEncoder, Compression};
+use std::io::Write as _;
+
+const COMPRESSION_THRESHOLD: usize = 32;
+// Zlib bomb protection — 1MB max decompressed size, matching JS MAX_DECOMPRESSED_SIZE.
+// JS equivalent: packages/launcher/src/runtime.js MAX_DECOMPRESSED_SIZE = 1048576
+const MAX_DECOMPRESSED_SIZE: usize = 1024 * 1024;
+
+/// Compress data for a terminal.data Matrix event payload.
+///
+/// Returns `(encoded_base64, encoding_str)` where `encoding_str` is either
+/// `"zlib+base64"` (for payloads >= 32 bytes) or `"base64"` (for smaller payloads).
+///
+/// Rust equivalent: packages/core/batched-sender.js::defaultCompress
+fn compress_terminal_data(data: &[u8]) -> (String, &'static str) {
+    if data.len() < COMPRESSION_THRESHOLD {
+        return (base64_encode(data), "base64");
+    }
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    if encoder.write_all(data).is_ok() {
+        if let Ok(compressed) = encoder.finish() {
+            return (base64_encode(&compressed), "zlib+base64");
+        }
+    }
+    // Fallback to uncompressed if zlib fails
+    (base64_encode(data), "base64")
+}
+
+fn base64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = Vec::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as usize;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as usize;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as usize;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        result.push(CHARS[(n >> 18) & 63]);
+        result.push(CHARS[(n >> 12) & 63]);
+        result.push(if chunk.len() > 1 { CHARS[(n >> 6) & 63] } else { b'=' });
+        result.push(if chunk.len() > 2 { CHARS[n & 63] } else { b'=' });
+    }
+    String::from_utf8(result).expect("base64 is always valid utf8")
+}
+
+fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
+    const TABLE: [i8; 256] = {
+        let mut t = [-1i8; 256];
+        let chars = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut i = 0usize;
+        while i < 64 {
+            t[chars[i] as usize] = i as i8;
+            i += 1;
+        }
+        t
+    };
+    let s = s.trim_end_matches('=');
+    let mut out = Vec::with_capacity(s.len() * 3 / 4);
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i + 3 < bytes.len() {
+        let (a, b, c, d) = (TABLE[bytes[i] as usize], TABLE[bytes[i+1] as usize], TABLE[bytes[i+2] as usize], TABLE[bytes[i+3] as usize]);
+        if a < 0 || b < 0 || c < 0 || d < 0 { return Err("invalid base64".to_string()); }
+        let n = ((a as u32) << 18) | ((b as u32) << 12) | ((c as u32) << 6) | (d as u32);
+        out.push((n >> 16) as u8);
+        out.push((n >> 8) as u8);
+        out.push(n as u8);
+        i += 4;
+    }
+    match bytes.len() - i {
+        2 => {
+            let (a, b) = (TABLE[bytes[i] as usize], TABLE[bytes[i+1] as usize]);
+            if a < 0 || b < 0 { return Err("invalid base64".to_string()); }
+            let n = ((a as u32) << 2) | ((b as u32) >> 4);
+            out.push(n as u8);
+        }
+        3 => {
+            let (a, b, c) = (TABLE[bytes[i] as usize], TABLE[bytes[i+1] as usize], TABLE[bytes[i+2] as usize]);
+            if a < 0 || b < 0 || c < 0 { return Err("invalid base64".to_string()); }
+            let n = ((a as u32) << 10) | ((b as u32) << 4) | ((c as u32) >> 2);
+            out.push((n >> 8) as u8);
+            out.push(n as u8);
+        }
+        _ => {}
+    }
+    Ok(out)
+}
+
+/// Process incoming terminal input data from a Matrix terminal.data event.
+///
+/// Accepts the base64-encoded data string and encoding type from the event content.
+/// Returns the decoded raw bytes as a Uint8Array, applying zlib decompression
+/// when encoding is "zlib+base64". Enforces 1MB decompression limit (zlib bomb protection).
+///
+/// Rust equivalent: packages/launcher/src/runtime.js::SessionMux.#processInput
+#[wasm_bindgen(js_name = "processTerminalInput")]
+pub fn process_terminal_input(data_b64: &str, encoding: &str) -> Result<Box<[u8]>, JsValue> {
+    let raw = base64_decode(data_b64)
+        .map_err(|e| to_js_err(format!("base64 decode: {e}")))?;
+
+    if encoding == "zlib+base64" {
+        use flate2::read::ZlibDecoder;
+        use std::io::Read;
+        let decoder = ZlibDecoder::new(raw.as_slice());
+        let mut decompressed = Vec::new();
+        // Read with limit to prevent zlib bomb — stop at MAX_DECOMPRESSED_SIZE + 1
+        let mut limited = decoder.take((MAX_DECOMPRESSED_SIZE + 1) as u64);
+        limited.read_to_end(&mut decompressed)
+            .map_err(|e| to_js_err(format!("zlib decompress: {e}")))?;
+        if decompressed.len() > MAX_DECOMPRESSED_SIZE {
+            return Err(to_js_err("decompressed data exceeds 1MB limit"));
+        }
+        Ok(decompressed.into_boxed_slice())
+    } else {
+        Ok(raw.into_boxed_slice())
+    }
+}
+
+/// Compress terminal PTY data for a Matrix terminal.data event.
+///
+/// Accepts raw byte data and returns a JSON string:
+/// `{"data": "<base64>", "encoding": "zlib+base64"|"base64"}`.
+///
+/// Payloads >= 32 bytes are zlib-compressed. Smaller payloads are sent as plain base64.
+///
+/// Rust equivalent: packages/core/batched-sender.js::defaultCompress
+#[wasm_bindgen(js_name = "compressTerminalData")]
+pub fn compress_terminal_data_wasm(data: &[u8]) -> Result<String, JsValue> {
+    let (encoded, encoding) = compress_terminal_data(data);
+    serde_json::to_string(&serde_json::json!({ "data": encoded, "encoding": encoding }))
+        .map_err(|e| to_js_err(format!("serialize: {e}")))
+}
+
+/// WASM-side batched terminal sender.
+///
+/// Manages a buffer of raw PTY byte chunks, concatenates them, compresses,
+/// and emits the payload as a serialized event content JSON string for the
+/// JS caller to send via Matrix.
+///
+/// The JS caller is responsible for the actual Matrix `sendEvent` call — this
+/// keeps the E2EE send path in JS (through WasmMatrixClient) while moving the
+/// compression, sequencing, and batching logic into Rust.
+///
+/// Rust equivalent: packages/core/batched-sender.js::BatchedSender
+#[wasm_bindgen]
+pub struct WasmBatchedSender {
+    room_id: String,
+    event_type: String,
+    session_id: Option<String>,
+    seq: u32,
+    buffer: Vec<Vec<u8>>,
+}
+
+#[wasm_bindgen]
+impl WasmBatchedSender {
+    /// Create a new WasmBatchedSender.
+    ///
+    /// # Arguments
+    /// - `room_id`: Matrix room ID for the terminal session
+    /// - `event_type`: Matrix event type (default: `org.mxdx.terminal.data`)
+    /// - `session_id`: Optional session ID for room multiplexing
+    #[wasm_bindgen(constructor)]
+    pub fn new(room_id: &str, event_type: Option<String>, session_id: Option<String>) -> Self {
+        WasmBatchedSender {
+            room_id: room_id.to_string(),
+            event_type: event_type.unwrap_or_else(|| "org.mxdx.terminal.data".to_string()),
+            session_id,
+            seq: 0,
+            buffer: Vec::new(),
+        }
+    }
+
+    /// Push raw PTY bytes into the buffer.
+    #[wasm_bindgen]
+    pub fn push(&mut self, data: &[u8]) {
+        self.buffer.push(data.to_vec());
+    }
+
+    /// Flush the buffer: concatenate all buffered bytes, compress, and return
+    /// a JSON string suitable for passing to `WasmMatrixClient.sendEvent`.
+    ///
+    /// Returns `null` (JS null) if the buffer is empty.
+    /// Returns a JSON string `{"data":"...","encoding":"...","seq":N,"session_id":"..."}` on success.
+    /// The room_id and event_type are available via `roomId()` and `eventType()` getters.
+    #[wasm_bindgen]
+    pub fn flush(&mut self) -> Result<JsValue, JsValue> {
+        if self.buffer.is_empty() {
+            return Ok(JsValue::NULL);
+        }
+        let combined: Vec<u8> = self.buffer.iter().flatten().copied().collect();
+        self.buffer.clear();
+        let seq = self.seq;
+        self.seq += 1;
+
+        let (encoded, encoding) = compress_terminal_data(&combined);
+        let mut payload = serde_json::json!({
+            "data": encoded,
+            "encoding": encoding,
+            "seq": seq,
+        });
+        if let Some(sid) = &self.session_id {
+            payload["session_id"] = serde_json::Value::String(sid.clone());
+        }
+        let json = serde_json::to_string(&payload)
+            .map_err(|e| to_js_err(format!("serialize payload: {e}")))?;
+        Ok(JsValue::from_str(&json))
+    }
+
+    /// Room ID this sender targets.
+    #[wasm_bindgen(getter, js_name = "roomId")]
+    pub fn room_id(&self) -> String {
+        self.room_id.clone()
+    }
+
+    /// Event type this sender emits.
+    #[wasm_bindgen(getter, js_name = "eventType")]
+    pub fn event_type(&self) -> String {
+        self.event_type.clone()
+    }
+
+    /// Current sequence number (next seq that will be used on flush).
+    #[wasm_bindgen(getter)]
+    pub fn seq(&self) -> u32 {
+        self.seq
+    }
+
+    /// Number of buffered byte chunks awaiting flush.
+    #[wasm_bindgen(getter, js_name = "bufferLength")]
+    pub fn buffer_length(&self) -> usize {
+        self.buffer.len()
+    }
+}

@@ -315,6 +315,11 @@ jobs:
         run: |
           rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/web/.gitignore
           echo '{"type": "commonjs"}' > packages/core/wasm/nodejs/package.json
+      # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md req 18: fail if either WASM target missing
+      - name: Verify WASM artifacts present
+        run: |
+          test -f packages/core/wasm/nodejs/mxdx_core_wasm.js || (echo "ERROR: nodejs WASM target missing" && exit 1)
+          test -f packages/core/wasm/web/mxdx_core_wasm.js || (echo "ERROR: web WASM target missing" && exit 1)
       - name: Install npm dependencies
         run: npm install
       - name: Run launcher unit tests
@@ -368,6 +373,11 @@ jobs:
         run: |
           rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/web/.gitignore
           echo '{"type": "commonjs"}' > packages/core/wasm/nodejs/package.json
+      # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md req 18: fail if either WASM target missing
+      - name: Verify WASM artifacts present
+        run: |
+          test -f packages/core/wasm/nodejs/mxdx_core_wasm.js || (echo "ERROR: nodejs WASM target missing" && exit 1)
+          test -f packages/core/wasm/web/mxdx_core_wasm.js || (echo "ERROR: web WASM target missing" && exit 1)
       - name: Install npm deps
         run: npm install
       - name: Build web-console
@@ -421,6 +431,11 @@ jobs:
         run: |
           rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/web/.gitignore
           echo '{"type": "commonjs"}' > packages/core/wasm/nodejs/package.json
+      # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md req 18: fail if either WASM target missing
+      - name: Verify WASM artifacts present
+        run: |
+          test -f packages/core/wasm/nodejs/mxdx_core_wasm.js || (echo "ERROR: nodejs WASM target missing" && exit 1)
+          test -f packages/core/wasm/web/mxdx_core_wasm.js || (echo "ERROR: web WASM target missing" && exit 1)
       - name: Install npm dependencies
         run: npm install
       - name: Write test credentials
@@ -480,6 +495,11 @@ jobs:
         run: |
           rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/web/.gitignore
           echo '{"type": "commonjs"}' > packages/core/wasm/nodejs/package.json
+      # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md req 18: fail if either WASM target missing
+      - name: Verify WASM artifacts present
+        run: |
+          test -f packages/core/wasm/nodejs/mxdx_core_wasm.js || (echo "ERROR: nodejs WASM target missing" && exit 1)
+          test -f packages/core/wasm/web/mxdx_core_wasm.js || (echo "ERROR: web WASM target missing" && exit 1)
       - name: Install npm dependencies
         run: npm install
       - name: Write test credentials
