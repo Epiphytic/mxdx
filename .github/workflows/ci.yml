@@ -318,8 +318,8 @@ jobs:
         run: node --test packages/launcher/tests/runtime-unit.test.js
       - name: Run local E2E tests (onboarding)
         run: node --test packages/e2e-tests/tests/launcher-onboarding.test.js
-      - name: Run local E2E tests (commands)
-        run: node --test packages/e2e-tests/tests/launcher-commands.test.js
+      - name: Run integration tests (launcher commands — WASM-direct)
+        run: node --test packages/integration-tests/tests/launcher-commands.test.js
 
   # Warn-only for 5 business days from 2026-04-30; T-2.8 flips to blocking
   # (removes continue-on-error) after the false-positive window closes.

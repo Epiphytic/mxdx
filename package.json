@@ -7,7 +7,8 @@
     "packages/web-console",
     "packages/mxdx",
     "packages/coordinator",
-    "packages/e2e-tests"
+    "packages/e2e-tests",
+    "packages/integration-tests"
   ],
   "devDependencies": {
     "@playwright/test": "^1.59.1",
