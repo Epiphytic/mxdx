@@ -47,10 +47,13 @@ const FIXED_LAUNCHER_ID = 'pub-e2e-stable';
 function writePerfEntry(name, transport, durationMs, exitCode, stdoutLines) {
   const perfPath = process.env.TEST_PERF_OUTPUT;
   if (!perfPath) return;
+  // Schema matches mxdx_test_perf::PerfEntry (Rust) per ADR req 25/27.
   const entry = JSON.stringify({
-    name,
+    suite: name,
     transport,
+    runtime: 'npm',
     duration_ms: durationMs,
+    rss_max: null,
     exit_code: exitCode,
     stdout_lines: stdoutLines,
     status: exitCode === 0 ? 'pass' : 'fail',
