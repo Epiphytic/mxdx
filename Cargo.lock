@@ -3191,6 +3191,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxdx-test-perf"
+version = "1.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "mxdx-types"
 version = "1.1.0"
 dependencies = [
@@ -3244,6 +3254,7 @@ dependencies = [
  "mxdx-matrix",
  "mxdx-p2p",
  "mxdx-test-helpers",
+ "mxdx-test-perf",
  "mxdx-types",
  "reqwest",
  "serde",
