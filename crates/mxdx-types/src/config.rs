@@ -382,10 +382,22 @@ pub fn migrate_legacy_section_if_needed(path: &std::path::Path) -> anyhow::Resul
                 path.display(),
                 section_name
             )
-        })?;
+        })?
+        .clone();
 
-    // Build flat top-level TOML from the section's fields
-    let flat_value = toml::Value::Table(section_table.clone());
+    // Build flat top-level document: take the full parsed doc, remove the section key,
+    // then merge the section's fields into the top level.
+    // This preserves any unrelated top-level keys that existed alongside the section.
+    let mut merged_table = if let toml::Value::Table(t) = doc {
+        t
+    } else {
+        toml::map::Map::new()
+    };
+    merged_table.remove(section_name);
+    for (k, v) in section_table.iter() {
+        merged_table.insert(k.clone(), v.clone());
+    }
+    let flat_value = toml::Value::Table(merged_table);
     let migrated = toml::to_string_pretty(&flat_value)
         .map_err(|e| anyhow::anyhow!("Failed to serialize migrated config: {}", e))?;
 
@@ -1003,6 +1015,40 @@ future_field = "x"
 "#;
         let cfg: ClientConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(cfg.default_worker_room, Some("!abc:example.com".into()));
+    }
+
+    /// Star-chamber consensus finding: migration must not drop top-level keys that exist
+    /// outside the legacy section (e.g., a future_field written by a newer runtime).
+    #[test]
+    fn migrate_preserves_unrelated_top_level_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worker.toml");
+        let legacy = r#"
+future_field = "preserve_me"
+
+[launcher]
+max_sessions = 3
+allowed_commands = ["echo"]
+"#;
+        std::fs::write(&path, legacy).unwrap();
+
+        let migrated = migrate_legacy_section_if_needed(&path).unwrap();
+        let parsed: toml::Value = toml::from_str(&migrated).unwrap();
+        let table = parsed.as_table().unwrap();
+
+        assert_eq!(
+            table.get("future_field").and_then(|v| v.as_str()),
+            Some("preserve_me"),
+            "top-level keys outside legacy section must survive migration"
+        );
+        assert!(
+            table.get("launcher").is_none(),
+            "legacy section key must be removed from migrated file"
+        );
+        assert_eq!(
+            table.get("max_sessions").and_then(|v| v.as_integer()),
+            Some(3)
+        );
     }
 
     #[test]

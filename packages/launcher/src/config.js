@@ -4,12 +4,12 @@ import path from 'node:path';
 import * as TOML from 'smol-toml';
 
 // Fields this runtime owns — used by save() to merge without clobbering unrelated keys.
-const LAUNCHER_OWNED_KEYS = [
+const LAUNCHER_OWNED_KEYS = new Set([
   'username', 'servers', 'allowed_commands', 'allowed_cwd', 'telemetry',
-  'max_sessions', 'admin_users', 'use_tmux', 'batch_ms', 'p2p_enabled',
-  'p2p_batch_ms', 'p2p_idle_timeout_s', 'p2p_advertise_ips', 'p2p_turn_only',
-  'telemetry_interval_s', 'preferred_server', 'server_credentials',
-];
+  'max_sessions', 'admin_users', 'registration_token', 'use_tmux', 'batch_ms',
+  'p2p_enabled', 'p2p_batch_ms', 'p2p_idle_timeout_s', 'p2p_advertise_ips',
+  'p2p_turn_only', 'telemetry_interval_s', 'preferred_server', 'server_credentials',
+]);
 
 export class LauncherConfig {
   constructor({
@@ -89,7 +89,8 @@ export class LauncherConfig {
         const parsed = TOML.parse(raw);
         // If the existing file still has a legacy section, flatten it in-memory before merging.
         if (parsed.launcher && typeof parsed.launcher === 'object') {
-          existing = { ...parsed.launcher };
+          const { launcher, ...rest } = parsed;
+          existing = { ...rest, ...launcher };
         } else {
           existing = { ...parsed };
         }
@@ -114,6 +115,7 @@ export class LauncherConfig {
       p2p_advertise_ips: this.p2pAdvertiseIps,
       p2p_turn_only: this.p2pTurnOnly,
       telemetry_interval_s: this.telemetryIntervalS,
+      ...(this.registrationToken != null ? { registration_token: this.registrationToken } : {}),
       ...(this.preferredServer ? { preferred_server: this.preferredServer } : {}),
       ...(Object.keys(this.serverCredentials).length ? { server_credentials: this.serverCredentials } : {}),
     };
@@ -145,7 +147,9 @@ export class LauncherConfig {
       try {
         fs.writeFileSync(`${filePath}.legacy.bak`, content, { mode: 0o600 });
       } catch (_) {}
-      flat = parsed.launcher;
+      // Merge section into full doc and remove section key — preserves any unrelated top-level keys.
+      const { launcher, ...rest } = parsed;
+      flat = { ...rest, ...launcher };
       // Rewrite file in flat format so subsequent reads (including Rust) get the migrated version.
       try {
         fs.writeFileSync(filePath, TOML.stringify(flat), { mode: 0o600 });
@@ -156,22 +160,23 @@ export class LauncherConfig {
 
     return new LauncherConfig({
       username: flat.username,
-      servers: flat.servers || [],
-      allowedCommands: flat.allowed_commands || [],
-      allowedCwd: flat.allowed_cwd || ['/tmp'],
-      telemetry: flat.telemetry || 'full',
-      maxSessions: flat.max_sessions || 5,
-      adminUsers: flat.admin_users || [],
-      useTmux: flat.use_tmux || 'auto',
-      batchMs: flat.batch_ms || 200,
-      p2pEnabled: flat.p2p_enabled !== undefined ? flat.p2p_enabled : true,
-      p2pBatchMs: flat.p2p_batch_ms || 10,
-      p2pIdleTimeoutS: flat.p2p_idle_timeout_s || 300,
+      servers: flat.servers ?? [],
+      allowedCommands: flat.allowed_commands ?? [],
+      allowedCwd: flat.allowed_cwd ?? ['/tmp'],
+      telemetry: flat.telemetry ?? 'full',
+      maxSessions: flat.max_sessions ?? 5,
+      adminUsers: flat.admin_users ?? [],
+      registrationToken: flat.registration_token ?? null,
+      useTmux: flat.use_tmux ?? 'auto',
+      batchMs: flat.batch_ms ?? 200,
+      p2pEnabled: flat.p2p_enabled ?? true,
+      p2pBatchMs: flat.p2p_batch_ms ?? 10,
+      p2pIdleTimeoutS: flat.p2p_idle_timeout_s ?? 300,
       p2pAdvertiseIps: flat.p2p_advertise_ips === true,
       p2pTurnOnly: flat.p2p_turn_only === true,
-      telemetryIntervalS: flat.telemetry_interval_s || 60,
-      preferredServer: flat.preferred_server || null,
-      serverCredentials: flat.server_credentials || {},
+      telemetryIntervalS: flat.telemetry_interval_s ?? 60,
+      preferredServer: flat.preferred_server ?? null,
+      serverCredentials: flat.server_credentials ?? {},
     });
   }
 

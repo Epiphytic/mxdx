@@ -45,7 +45,8 @@ export class ClientConfig {
         const parsed = TOML.parse(raw);
         // Flatten legacy [client] section if still present
         if (parsed.client && typeof parsed.client === 'object') {
-          existing = { ...parsed.client };
+          const { client, ...rest } = parsed;
+          existing = { ...rest, ...client };
         } else {
           existing = { ...parsed };
         }
@@ -86,7 +87,9 @@ export class ClientConfig {
       try {
         fs.writeFileSync(`${filePath}.legacy.bak`, content, { mode: 0o600 });
       } catch (_) {}
-      flat = parsed.client;
+      // Merge section into full doc and remove section key — preserves any unrelated top-level keys.
+      const { client, ...rest } = parsed;
+      flat = { ...rest, ...client };
       try {
         fs.writeFileSync(filePath, TOML.stringify(flat), { mode: 0o600 });
       } catch (_) {}
@@ -96,17 +99,17 @@ export class ClientConfig {
 
     return new ClientConfig({
       username: flat.username,
-      servers: flat.servers || (flat.server ? [flat.server] : []),
-      preferredServer: flat.preferred_server || null,
-      serverCredentials: flat.server_credentials || {},
-      batchMs: flat.batch_ms || 200,
-      p2pEnabled: flat.p2p_enabled !== undefined ? flat.p2p_enabled : true,
-      p2pBatchMs: flat.p2p_batch_ms || 10,
-      p2pIdleTimeoutS: flat.p2p_idle_timeout_s || 300,
+      servers: flat.servers ?? (flat.server ? [flat.server] : []),
+      preferredServer: flat.preferred_server ?? null,
+      serverCredentials: flat.server_credentials ?? {},
+      batchMs: flat.batch_ms ?? 200,
+      p2pEnabled: flat.p2p_enabled ?? true,
+      p2pBatchMs: flat.p2p_batch_ms ?? 10,
+      p2pIdleTimeoutS: flat.p2p_idle_timeout_s ?? 300,
     });
   }
 
   static defaultPath() {
-    return path.join(os.homedir(), '.config', 'mxdx', 'client.toml');
+    return path.join(os.homedir(), '.mxdx', 'client.toml');
   }
 }
