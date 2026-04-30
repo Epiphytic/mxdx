@@ -42,6 +42,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context as _, Result};
+use mxdx_test_perf::{PerfEntry, write_perf_entry};
 
 // ---------------------------------------------------------------------------
 // Test context — owned by orchestrator, passed to phase functions
@@ -866,28 +867,15 @@ fn report(test: &str, transport: &str, elapsed: Duration, exit_code: Option<i32>
         stdout_lines,
     );
 
-    if let Ok(path) = std::env::var("TEST_PERF_OUTPUT") {
-        let status = match exit_code {
-            Some(0) => "pass",
-            Some(_) => "fail",
-            None => "fail",
-        };
-        let entry = serde_json::json!({
-            "name": test,
-            "transport": transport,
-            "duration_ms": elapsed.as_millis() as u64,
-            "exit_code": exit_code,
-            "stdout_lines": stdout_lines,
-            "status": status,
-        });
-
-        use std::io::Write;
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .expect("failed to open TEST_PERF_OUTPUT file");
-        writeln!(file, "{}", entry).expect("failed to write perf entry");
+    let entry = PerfEntry {
+        suite: test.to_string(),
+        transport: transport.to_string(),
+        runtime: "rust".to_string(),
+        duration_ms: elapsed.as_millis() as u64,
+        rss_max: None,
+    };
+    if let Err(e) = write_perf_entry(&entry) {
+        eprintln!("warn: write_perf_entry failed: {e}");
     }
 }
 
