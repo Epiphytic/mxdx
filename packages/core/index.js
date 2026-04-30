@@ -1,5 +1,6 @@
 // Persistent IndexedDB polyfill for Node.js — must load before WASM.
 // In browser environments this module is not used (browser has real IndexedDB).
+// Rust equivalent: matrix-sdk SQLite crypto store in crates/mxdx-worker/src/lib.rs (OS-bound persistence)
 export { saveIndexedDB, restoreIndexedDB } from './persistent-indexeddb.js';
 
 // wasm-pack --target nodejs emits CommonJS (exports.X = X). When the parent

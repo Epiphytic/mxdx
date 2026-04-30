@@ -1,3 +1,4 @@
+// Rust equivalent: crates/mxdx-worker/src/bin/mxdx_exec.rs::main (PTY + tmux + Unix-socket exit-code channel, OS-bound)
 import { spawn, execFileSync } from 'node:child_process';
 import crypto from 'node:crypto';
 import path from 'node:path';

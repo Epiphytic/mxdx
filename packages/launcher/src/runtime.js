@@ -14,7 +14,7 @@ import {
 } from '@mxdx/core';
 // Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::WasmBatchedSender + compress_terminal_data
 import { executeCommand } from './process-bridge.js';
-// Rust equivalent: crates/mxdx-worker/src/bin/mxdx_exec.rs::execute_command
+// Rust equivalent: crates/mxdx-worker/src/bin/mxdx_exec.rs::main (subprocess execution via mxdx-exec binary)
 import { PtyBridge } from './pty-bridge.js';
 // Rust equivalent: crates/mxdx-worker/src/bin/mxdx_exec.rs::main (tmux + Unix-socket exit-code channel)
 import { SessionMux } from './session-mux.js';
