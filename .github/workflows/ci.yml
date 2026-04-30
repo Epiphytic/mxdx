@@ -375,6 +375,122 @@ jobs:
           node packages/mxdx/bin/mxdx.js launcher --help
           node packages/mxdx/bin/mxdx.js client --help
 
+  # Wire-format-parity gate: all 8 {rust|npm client} × {rust|npm worker} × {same-hs|federated}
+  # combinations must pass. P2P combinations (t4a/t4b) are advisory until 10 consecutive greens.
+  # ADR: docs/adr/2026-04-29-rust-npm-binary-parity.md reqs 7, 8, 11
+  # Override policy: docs/adr/overrides/README.md
+  # Flake/quarantine policy: docs/adr/overrides/wire-format-parity-gate-policy.md
+  wire-format-parity:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.full_e2e
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install system deps
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev tmux
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Build Rust binaries (release)
+        run: cargo build --release -p mxdx-worker -p mxdx-client
+      - name: Build WASM (nodejs)
+        run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
+      - name: Build WASM (web)
+        run: wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/core/wasm/web
+      - name: Fix WASM module type markers
+        run: |
+          rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/web/.gitignore
+          echo '{"type": "commonjs"}' > packages/core/wasm/nodejs/package.json
+      - name: Install npm dependencies
+        run: npm install
+      - name: Write test credentials
+        run: echo "$TEST_CREDENTIALS_TOML" > test-credentials.toml
+        env:
+          TEST_CREDENTIALS_TOML: ${{ secrets.TEST_CREDENTIALS_TOML }}
+      - name: Run wire-format-parity gate (t1a-t3b, blocking)
+        # SKIP_NPM_NPM=1 excludes advisory P2P combinations (t4a/t4b)
+        # Those run separately in wire-format-parity-p2p (continue-on-error: true)
+        run: |
+          mkdir -p test-results
+          node --test \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=junit --test-reporter-destination=test-results/wire-format-parity-junit.xml \
+            packages/e2e-tests/tests/rust-npm-interop-beta.test.js
+        env:
+          SKIP_NPM_NPM: "1"
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wire-format-parity-results
+          path: test-results/wire-format-parity-junit.xml
+          retention-days: 90
+
+  # Advisory P2P combinations (t4a/t4b): npm client → npm launcher, same-hs and federated.
+  # Non-blocking until 10 consecutive green runs across distinct CI runner environments.
+  # Security doc: docs/reviews/security/2026-04-29-p2p-cross-runtime-dtls-verification.md
+  # Gate policy: docs/adr/overrides/wire-format-parity-gate-policy.md §3
+  wire-format-parity-p2p:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.full_e2e
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install system deps
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev tmux
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Build WASM (nodejs)
+        run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
+      - name: Build WASM (web)
+        run: wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/core/wasm/web
+      - name: Fix WASM module type markers
+        run: |
+          rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/web/.gitignore
+          echo '{"type": "commonjs"}' > packages/core/wasm/nodejs/package.json
+      - name: Install npm dependencies
+        run: npm install
+      - name: Write test credentials
+        run: echo "$TEST_CREDENTIALS_TOML" > test-credentials.toml
+        env:
+          TEST_CREDENTIALS_TOML: ${{ secrets.TEST_CREDENTIALS_TOML }}
+      - name: Run wire-format-parity gate (t4a/t4b, advisory)
+        # Run only npm×npm combinations. SKIP_RUST_RUST + SKIP_NPM_RUST + SKIP_RUST_NPM
+        # leaves only t4a (npm client → npm launcher, same-hs) and t4b (federated).
+        run: |
+          mkdir -p test-results
+          node --test \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=junit --test-reporter-destination=test-results/wire-format-parity-p2p-junit.xml \
+            packages/e2e-tests/tests/rust-npm-interop-beta.test.js
+        env:
+          SKIP_RUST_RUST: "1"
+          SKIP_NPM_RUST: "1"
+          SKIP_RUST_NPM: "1"
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wire-format-parity-p2p-results
+          path: test-results/wire-format-parity-p2p-junit.xml
+          retention-days: 90
+
   npm-public-server:
     needs: preflight
     runs-on: ubuntu-latest
