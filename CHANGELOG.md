@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Canonical config schema (Phase 3 — ADR 2026-04-29 Pillar 1).** Both the
+  Rust binaries and the npm packages now read and write `worker.toml` /
+  `client.toml` in a flat top-level TOML key layout (no `[launcher]` or
+  `[client]` section wrappers). Key changes for users:
+  - **Automatic migration.** On first start after upgrade, a config file that
+    still uses the legacy `[launcher]`/`[client]` wrapper is auto-migrated to
+    the flat layout. The original is preserved as `<file>.legacy.bak` and a
+    warning is printed to stderr. No data is lost.
+  - **Security fields guaranteed to survive migration.** `authorized_users`,
+    `allowed_commands`, and `trust_anchor` are verified to be byte-for-byte
+    identical after migration. Silent loss of these fields is treated as a
+    security defect, not graceful degradation.
+  - **Forward compatibility.** Unknown TOML keys are silently ignored by both
+    runtimes (no `deny_unknown_fields`). Fields added in future releases do not
+    break older binaries reading the same config file.
+  - **Cross-runtime field preservation.** npm `save()` now merges only its own
+    fields; Rust-written fields (e.g. `authorized_users`) survive an npm
+    config-writer round-trip unchanged.
+  - **New fields in Rust types.** `WorkerConfig` gains `telemetry`, `use_tmux`,
+    `batch_ms`, `p2p_batch_ms`, `p2p_advertise_ips`, `p2p_turn_only`,
+    `registration_token`, `admin_user`. `ClientConfig` gains `batch_ms`,
+    `p2p_batch_ms`, `registration_token`. All are `Option<T>` with serde
+    defaults so existing configs remain valid.
+
 - **P2P transport enabled by default.** Interactive terminal sessions now use
   peer-to-peer WebRTC data channels (with AES-256-GCM encryption over
   Megolm-authenticated keys) for dramatically lower latency. The P2P path is
