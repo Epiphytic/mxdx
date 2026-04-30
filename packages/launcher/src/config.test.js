@@ -88,6 +88,19 @@ describe('LauncherConfig', () => {
     assert.ok(!onDisk.includes('[launcher]'), 'migrated file must not contain [launcher]');
   });
 
+  it('tolerates unknown TOML keys without error (T-3.6, ADR req 5)', () => {
+    const configPath = path.join(tmpDir, 'worker.toml');
+    // File contains an unrecognized future_field that neither runtime currently knows about
+    const content = `max_sessions = 4\nallowed_commands = ["echo"]\nfuture_field = "x"\n`;
+    fs.writeFileSync(configPath, content);
+
+    // Must load without throwing
+    const loaded = LauncherConfig.load(configPath);
+    assert.ok(loaded !== null, 'should load without error despite unknown key');
+    assert.strictEqual(loaded.maxSessions, 4);
+    assert.deepStrictEqual(loaded.allowedCommands, ['echo']);
+  });
+
   it('save preserves Rust-written unrelated fields (authorized_users)', () => {
     // Simulate a Rust-written file containing authorized_users (a field npm does not own)
     const configPath = path.join(tmpDir, 'worker.toml');

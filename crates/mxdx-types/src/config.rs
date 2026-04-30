@@ -981,6 +981,30 @@ max_sessions = 5
         assert_eq!(bak, legacy, ".legacy.bak must be byte-for-byte original");
     }
 
+    /// T-3.6: Unknown TOML keys must not cause a parse error (ADR req 5).
+    #[test]
+    fn worker_config_tolerates_unknown_keys() {
+        let toml_str = r#"
+max_sessions = 3
+allowed_commands = ["echo"]
+future_field = "x"
+another_future = 42
+"#;
+        let cfg: WorkerConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.max_sessions, 3);
+        assert_eq!(cfg.allowed_commands, vec!["echo"]);
+    }
+
+    #[test]
+    fn client_config_tolerates_unknown_keys() {
+        let toml_str = r#"
+default_worker_room = "!abc:example.com"
+future_field = "x"
+"#;
+        let cfg: ClientConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.default_worker_room, Some("!abc:example.com".into()));
+    }
+
     #[test]
     fn load_config_from_dir_migrates_legacy_on_load() {
         let dir = tempfile::tempdir().unwrap();
