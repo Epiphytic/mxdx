@@ -3028,6 +3028,7 @@ dependencies = [
  "hostname",
  "mxdx-matrix",
  "mxdx-test-helpers",
+ "mxdx-test-perf",
  "mxdx-types",
  "reqwest",
  "serde",
