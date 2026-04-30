@@ -241,12 +241,12 @@ jobs:
           sudo dpkg -i /tmp/tuwunel.deb
       - run: cargo test -p mxdx-test-helpers
       - run: cargo test -p mxdx-matrix
-      - run: cargo test -p mxdx-launcher --test e2e_command
+      - run: cargo test -p mxdx-launcher --test integration_command
       - run: cargo test -p mxdx-launcher --test e2e_terminal_session
       - run: cargo test -p mxdx-policy --test appservice_registration
       - run: cargo test -p mxdx-policy --test policy_enforcement
-      - run: cargo test -p mxdx-secrets --test e2e_secret_request
-      - run: cargo test -p mxdx-launcher --test e2e_full_system
+      - run: cargo test -p mxdx-secrets --test integration_secret_request
+      - run: cargo test -p mxdx-launcher --test integration_full_system
       - run: cargo test -p mxdx-launcher --lib -- --include-ignored
 
   federation:
