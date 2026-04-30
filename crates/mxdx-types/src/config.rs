@@ -102,6 +102,24 @@ pub struct WorkerConfig {
     /// P2P transport feature flag and tuning (Phase 6 wiring; default off per §4.7).
     #[serde(default)]
     pub p2p: P2pConfig,
+    // npm-only fields (ADR 2026-04-29 Pillar 1, req 3) — Option<T> with serde(default)
+    // so existing Rust configs without these keys continue to deserialize correctly.
+    #[serde(default)]
+    pub telemetry: Option<String>,
+    #[serde(default)]
+    pub use_tmux: Option<String>,
+    #[serde(default)]
+    pub batch_ms: Option<u64>,
+    #[serde(default)]
+    pub p2p_batch_ms: Option<u64>,
+    #[serde(default)]
+    pub p2p_advertise_ips: Option<bool>,
+    #[serde(default)]
+    pub p2p_turn_only: Option<bool>,
+    #[serde(default)]
+    pub registration_token: Option<String>,
+    #[serde(default)]
+    pub admin_user: Option<String>,
 }
 
 impl Default for WorkerConfig {
@@ -117,6 +135,14 @@ impl Default for WorkerConfig {
             allowed_cwd: default_allowed_cwd(),
             authorized_users: Vec::new(),
             p2p: P2pConfig::default(),
+            telemetry: None,
+            use_tmux: None,
+            batch_ms: None,
+            p2p_batch_ms: None,
+            p2p_advertise_ips: None,
+            p2p_turn_only: None,
+            registration_token: None,
+            admin_user: None,
         }
     }
 }
@@ -188,6 +214,13 @@ pub struct ClientConfig {
     /// P2P transport feature flag and tuning (Phase 6 wiring; default off per §4.7).
     #[serde(default)]
     pub p2p: P2pConfig,
+    // npm-only fields (ADR 2026-04-29 Pillar 1, req 3)
+    #[serde(default)]
+    pub batch_ms: Option<u64>,
+    #[serde(default)]
+    pub p2p_batch_ms: Option<u64>,
+    #[serde(default)]
+    pub registration_token: Option<String>,
 }
 
 impl Default for ClientConfig {
@@ -198,6 +231,9 @@ impl Default for ClientConfig {
             session: SessionDefaults::default(),
             daemon: DaemonConfig::default(),
             p2p: P2pConfig::default(),
+            batch_ms: None,
+            p2p_batch_ms: None,
+            registration_token: None,
         }
     }
 }
