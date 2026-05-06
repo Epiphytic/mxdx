@@ -895,6 +895,7 @@ impl WasmMatrixClient {
 
     /// Create a direct message room with E2EE and history_visibility: joined.
     /// Used for interactive terminal sessions — only participants who join see messages.
+    /// MSC4362: state events MUST be encrypted (CLAUDE.md hard rule).
     #[wasm_bindgen(js_name = "createDmRoom")]
     pub async fn create_dm_room(&self, user_id: &str) -> Result<String, JsValue> {
         let uid: OwnedUserId = user_id
@@ -903,7 +904,7 @@ impl WasmMatrixClient {
 
         let encryption_event = InitialStateEvent::new(
             EmptyStateKey,
-            RoomEncryptionEventContent::with_recommended_defaults(),
+            RoomEncryptionEventContent::with_recommended_defaults().with_encrypted_state(),
         );
         let history_event = InitialStateEvent::new(
             EmptyStateKey,
@@ -921,6 +922,7 @@ impl WasmMatrixClient {
 
     /// Create a room with configurable options (topic, invites, preset).
     /// Always adds E2EE and history_visibility: joined.
+    /// MSC4362: state events MUST be encrypted (CLAUDE.md hard rule).
     /// config_json: { "invite": ["@user:server"], "topic": "...", "preset": "trusted_private_chat", "is_direct": false }
     #[wasm_bindgen(js_name = "createRoom")]
     pub async fn create_room(&self, config_json: &str) -> Result<String, JsValue> {
@@ -941,7 +943,7 @@ impl WasmMatrixClient {
 
         let encryption_event = InitialStateEvent::new(
             EmptyStateKey,
-            RoomEncryptionEventContent::with_recommended_defaults(),
+            RoomEncryptionEventContent::with_recommended_defaults().with_encrypted_state(),
         );
         let history_event = InitialStateEvent::new(
             EmptyStateKey,
@@ -1240,10 +1242,11 @@ impl WasmMatrixClient {
         }
 
         // Step 3: Create new E2EE state room with alias
+        // MSC4362: state events MUST be encrypted (CLAUDE.md hard rule).
         let topic = format!("org.mxdx.worker.state:{hostname}.{os_user}.{localpart}");
         let encryption_event = InitialStateEvent::new(
             EmptyStateKey,
-            RoomEncryptionEventContent::with_recommended_defaults(),
+            RoomEncryptionEventContent::with_recommended_defaults().with_encrypted_state(),
         );
         let history_event = InitialStateEvent::new(
             EmptyStateKey,

@@ -35,6 +35,22 @@ This document satisfies ADR req 13a. The three required confirmations (§1, §2,
 > `create_named_encrypted_mxdx_room` uses for exec/logs. This call has
 > been added to the table below; verdict ENCRYPTED via MSC4362.
 
+> **2026-05-05 update (F-1 fix).** Phase-4 secure review identified that the
+> per-worker state room (created by `WasmMatrixClient::getOrCreateStateRoom`,
+> the DM room (created by `WasmMatrixClient::create_dm_room`), and the
+> generic `WasmMatrixClient::create_room` were configured with
+> `RoomEncryptionEventContent::with_recommended_defaults()` but WITHOUT
+> `.with_encrypted_state()`. State events written into those rooms
+> (`writeSession`, `removeSession`, `writeRoom`, `writeStateRoomConfig`,
+> `writeTrustedEntity`, `writeTopology`) — including session metadata
+> with `dmRoomId` and `sender` (Matrix user IDs) — were transmitted as
+> cleartext state events on the wire. Same E2EE policy violation class
+> as P0-3 (CLAUDE.md: "EVERY MATRIX EVENT MUST BE END-TO-END ENCRYPTED
+> — NO EXCEPTIONS"). All three sites (lib.rs:907, lib.rs:946, lib.rs:1249)
+> now chain `.with_encrypted_state()`, ensuring MSC4362 encryption for
+> state events. Verified: `grep -n "with_recommended_defaults" lib.rs`
+> shows all 6 call sites correctly chained.
+
 Every `sendEvent` and `sendStateEvent` call in the session-loop migration path is enumerated below. Each is confirmed encrypted on the wire because:
 
 - `sendEvent` routes through `WasmMatrixClient::send_event` → `matrix-sdk Room::send_raw`, which encrypts for E2EE rooms via Megolm (matrix-sdk enforces encryption for rooms with `m.room.encryption` state).
@@ -65,8 +81,13 @@ All exec-room events go to `topology.exec_room_id` — an E2EE room created with
 | 1317 / 1345 | P2P signaling callbacks (transport setup) | exec_room_id | `sendEvent` | YES | Signaling via exec room (established E2EE) |
 | 1523 / 1632 | `m.call.invite` / `m.call.candidates` / `m.call.answer` (P2P signaling) | exec_room_id (signalingRoomId) | `sendEvent` | YES | Exec room E2EE; signaling room is not DM room specifically to ensure established Megolm keys |
 | `crates/mxdx-core-wasm/src/lib.rs::create_launcher_space` (line ~594) | `m.space.child` (state event) | space_id | `Room::send_state_event_raw` | YES | Space room is now created with `m.room.encryption` (algorithm `m.megolm.v1.aes-sha2`) AND `with_encrypted_state()` (MSC4362). Both are set in the `initial_state` of the create-room request at lines ~547–549. Without these flags, `m.space.child` would have been transmitted in cleartext on the wire — an E2EE policy violation. The fix mirrors the encryption pattern already used by `create_named_encrypted_mxdx_room` for the exec/logs rooms. |
+| `crates/mxdx-core-wasm/src/lib.rs::write_session` (line ~1307) | `org.mxdx.session.active` (state) | state_room_id | `send_state_event_raw` | YES (post F-1) | State room created at lib.rs:1249 with `.with_encrypted_state()` since 2026-05-05 fix. Prior to fix: cleartext on the wire. |
+| `crates/mxdx-core-wasm/src/lib.rs::remove_session` (line ~1325) | `org.mxdx.session.active` (clear) | state_room_id | `send_state_event_raw` | YES (post F-1) | Same as above. |
+| `crates/mxdx-core-wasm/src/lib.rs::write_room` (line ~1352) | `org.mxdx.room.metadata` (state) | state_room_id | `send_state_event_raw` | YES (post F-1) | Same as above. |
+| `crates/mxdx-core-wasm/src/lib.rs::write_state_room_config` (line ~1277) | `org.mxdx.state_room.config` (state) | state_room_id | `send_state_event_raw` | YES (post F-1) | Same as above. |
+| `crates/mxdx-core-wasm/src/lib.rs::write_trusted_entity` (line ~1385) | `org.mxdx.trust.entity` (state) | state_room_id | `send_state_event_raw` | YES (post F-1) | Same as above. |
 
-**Summary:** All 16+ send call sites route through E2EE-enforced rooms. State events use MSC4362, including the space-room `m.space.child` events that link the launcher topology together. No unencrypted send path exists in the session loop.
+**Summary:** All 21+ send call sites route through E2EE-enforced rooms. State events use MSC4362, including the space-room `m.space.child` events that link the launcher topology together AND the state-room metadata events. No unencrypted send path exists in the session loop after F-1 fix (2026-05-05).
 
 ### Key design note on P2P signaling room choice
 
