@@ -5,6 +5,9 @@ set -euo pipefail
 # Runs Rust and npm E2E tests against beta infrastructure.
 #
 # Usage: ./scripts/e2e-test-suite.sh --profile release|debug [--skip-build]
+#
+# Perf output: both Rust and npm tests append JSONL entries to the same
+# TEST_PERF_OUTPUT file. ADR req 27 (2026-04-29-rust-npm-binary-parity.md).
 
 PROFILE="release"
 SKIP_BUILD=false
@@ -78,13 +81,15 @@ mkdir -p test-results
 GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
+# Single unified JSONL perf file — both Rust and npm tests append to this path.
+# ADR req 27: both runtimes write to the same TEST_PERF_OUTPUT as raw JSONL.
+export TEST_PERF_OUTPUT="$(pwd)/test-results/e2e-perf-entries.jsonl"
+rm -f "$TEST_PERF_OUTPUT"
+
 # ── Rust E2E Tests ─────────────────────────────────────────────────────
 
 echo ""
 echo "=== Rust E2E Tests ==="
-
-export TEST_PERF_OUTPUT="$(pwd)/test-results/rust-e2e-perf-entries.jsonl"
-rm -f "$TEST_PERF_OUTPUT"
 
 # Run tests with --nocapture for stderr progress
 RUST_TEST_EXIT=0
@@ -100,24 +105,6 @@ else
   echo "Install with: cargo install cargo2junit"
 fi
 
-# Wrap perf entries in suite metadata
-if [[ -f "$TEST_PERF_OUTPUT" ]]; then
-  echo "--- Wrapping Rust perf entries ---"
-  ENTRIES=$(cat "$TEST_PERF_OUTPUT")
-  cat > test-results/rust-e2e-perf.json <<PERF_EOF
-{
-  "suite": "rust-e2e",
-  "profile": "${PROFILE}",
-  "timestamp": "${TIMESTAMP}",
-  "git_sha": "${GIT_SHA}",
-  "tests": [
-$(echo "$ENTRIES" | sed 's/^/    /' | paste -sd ',' - | sed 's/,/,\n/g')
-  ]
-}
-PERF_EOF
-  rm -f "$TEST_PERF_OUTPUT"
-fi
-
 if [[ $RUST_TEST_EXIT -ne 0 ]]; then
   echo "!!! Rust E2E tests FAILED (exit code: $RUST_TEST_EXIT) !!!"
   echo "Skipping npm tests and account purge (preserving state for debugging)."
@@ -129,38 +116,30 @@ fi
 echo ""
 echo "=== npm E2E Tests ==="
 
-export TEST_PERF_OUTPUT="$(pwd)/test-results/npm-e2e-perf-entries.jsonl"
-rm -f "$TEST_PERF_OUTPUT"
-
+# npm tests append to the same TEST_PERF_OUTPUT path (already set above).
 NPM_TEST_EXIT=0
 node --test \
   --test-reporter=spec --test-reporter-destination=stdout \
   --test-reporter=junit --test-reporter-destination=test-results/npm-e2e-junit.xml \
   packages/e2e-tests/tests/public-server.test.js \
+  packages/e2e-tests/tests/rust-npm-interop-beta.test.js \
   || NPM_TEST_EXIT=$?
-
-# Wrap npm perf entries in suite metadata
-if [[ -f "$TEST_PERF_OUTPUT" ]]; then
-  echo "--- Wrapping npm perf entries ---"
-  ENTRIES=$(cat "$TEST_PERF_OUTPUT")
-  cat > test-results/npm-e2e-perf.json <<PERF_EOF
-{
-  "suite": "npm-e2e",
-  "profile": "${PROFILE}",
-  "timestamp": "${TIMESTAMP}",
-  "git_sha": "${GIT_SHA}",
-  "tests": [
-$(echo "$ENTRIES" | sed 's/^/    /' | paste -sd ',' - | sed 's/,/,\n/g')
-  ]
-}
-PERF_EOF
-  rm -f "$TEST_PERF_OUTPUT"
-fi
 
 if [[ $NPM_TEST_EXIT -ne 0 ]]; then
   echo "!!! npm E2E tests FAILED (exit code: $NPM_TEST_EXIT) !!!"
   echo "Skipping account purge (preserving state for debugging)."
   exit $NPM_TEST_EXIT
+fi
+
+# ── Verify unified perf output ─────────────────────────────────────────
+
+if [[ -f "$TEST_PERF_OUTPUT" ]]; then
+  RUST_ENTRIES=$(jq -e 'select(.runtime == "rust")' "$TEST_PERF_OUTPUT" 2>/dev/null | wc -l || echo "0")
+  NPM_ENTRIES=$(jq -e 'select(.runtime == "npm")' "$TEST_PERF_OUTPUT" 2>/dev/null | wc -l || echo "0")
+  echo "--- Unified perf output: ${RUST_ENTRIES} Rust entries, ${NPM_ENTRIES} npm entries ---"
+  echo "    Path: $TEST_PERF_OUTPUT"
+else
+  echo "--- No perf output generated (TEST_PERF_OUTPUT not written) ---"
 fi
 
 # ── Account Purge (success only) ──────────────────────────────────────

@@ -64,6 +64,10 @@ enum Commands {
         /// Authorized Matrix user IDs (can be repeated)
         #[arg(long = "authorized-user")]
         authorized_users: Vec<String>,
+
+        /// Enable P2P transport (WebRTC/datachannel)
+        #[arg(long, default_value_t = false)]
+        p2p: bool,
     },
     /// Diagnose runtime state — emits a single JSON report on stdout.
     ///
@@ -118,6 +122,7 @@ async fn main() -> Result<()> {
             allowed_commands,
             allowed_cwd,
             authorized_users,
+            p2p,
         } => {
             let args = WorkerArgs {
                 trust_anchor,
@@ -133,6 +138,7 @@ async fn main() -> Result<()> {
                 allowed_commands,
                 allowed_cwd,
                 authorized_users,
+                p2p,
             };
             let config = WorkerRuntimeConfig::load()?.with_cli_overrides(&args);
             mxdx_worker::run_worker(config).await?;

@@ -1,0 +1,19 @@
+[package]
+name = "mxdx-test-perf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Dev/test-only helper crate: emits JSONL performance entries matching npm writePerfEntry() schema"
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

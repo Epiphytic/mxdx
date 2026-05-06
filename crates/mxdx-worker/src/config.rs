@@ -1,5 +1,5 @@
 use anyhow::Result;
-use mxdx_types::config::{DefaultsConfig, WorkerConfig, load_merged_config};
+use mxdx_types::config::{load_merged_config, DefaultsConfig, WorkerConfig};
 
 /// Matrix credentials for login (from CLI flags, env vars, or config).
 /// NOTE: The password field must NEVER be logged or included in tracing output.
@@ -31,6 +31,8 @@ pub struct WorkerArgs {
     pub allowed_cwd: Vec<String>,
     /// Authorized Matrix user IDs (collected from repeated --authorized-user flags).
     pub authorized_users: Vec<String>,
+    /// Enable P2P transport (WebRTC/datachannel). Advisory in Phase 2 — parsed but not yet acted on.
+    pub p2p: bool,
 }
 
 /// Runtime configuration for the worker, combining defaults + worker config + CLI overrides.
@@ -258,10 +260,14 @@ mod tests {
             allowed_commands: vec![],
             allowed_cwd: vec![],
             authorized_users: vec![],
+            p2p: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
 
-        assert_eq!(cfg.worker.trust_anchor, Some("@override:example.com".into()));
+        assert_eq!(
+            cfg.worker.trust_anchor,
+            Some("@override:example.com".into())
+        );
         assert_eq!(cfg.worker.history_retention, 7);
         assert_eq!(cfg.resolved_room_name, "cli-room");
     }
@@ -332,6 +338,7 @@ mod tests {
             allowed_commands: vec![],
             allowed_cwd: vec![],
             authorized_users: vec![],
+            p2p: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
 
@@ -363,6 +370,7 @@ mod tests {
             allowed_commands: vec![],
             allowed_cwd: vec![],
             authorized_users: vec![],
+            p2p: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
         // After CLI overrides, room name should use CLI username as localpart
@@ -400,10 +408,13 @@ mod tests {
             allowed_commands: vec![],
             allowed_cwd: vec![],
             authorized_users: vec![],
+            p2p: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
 
-        let creds = cfg.credentials.expect("credentials should be set from fallback");
+        let creds = cfg
+            .credentials
+            .expect("credentials should be set from fallback");
         assert_eq!(creds.homeserver, "https://fallback.com");
         assert_eq!(creds.username, "bot");
     }
@@ -429,9 +440,13 @@ mod tests {
             allowed_commands: vec![],
             allowed_cwd: vec![],
             authorized_users: vec![],
+            p2p: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
-        assert!(cfg.credentials.is_none(), "credentials should be None when incomplete");
+        assert!(
+            cfg.credentials.is_none(),
+            "credentials should be None when incomplete"
+        );
     }
 
     #[test]
@@ -472,6 +487,7 @@ extra = ["docker", "gpu"]
             allowed_commands: vec![],
             allowed_cwd: vec![],
             authorized_users: vec![],
+            p2p: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
         let accounts = cfg.resolve_accounts();
@@ -524,7 +540,10 @@ extra = ["docker", "gpu"]
         let cfg = WorkerRuntimeConfig::from_parts(defaults, worker);
         let accounts = cfg.resolve_accounts();
 
-        assert!(accounts.is_empty(), "accounts without password should be skipped");
+        assert!(
+            accounts.is_empty(),
+            "accounts without password should be skipped"
+        );
     }
 
     #[test]
@@ -562,6 +581,7 @@ extra = ["docker", "gpu"]
             allowed_commands: vec![],
             allowed_cwd: vec![],
             authorized_users: vec![],
+            p2p: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
         let accounts = cfg.resolve_accounts();
@@ -592,6 +612,7 @@ extra = ["docker", "gpu"]
             allowed_commands: vec![],
             allowed_cwd: vec![],
             authorized_users: vec![],
+            p2p: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
         assert_eq!(cfg.worker.max_sessions, 20);
@@ -618,6 +639,7 @@ extra = ["docker", "gpu"]
             allowed_commands: vec!["ls".into(), "cat".into()],
             allowed_cwd: vec![],
             authorized_users: vec![],
+            p2p: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
         assert_eq!(cfg.worker.allowed_commands, vec!["echo", "ls", "cat"]);
@@ -643,6 +665,7 @@ extra = ["docker", "gpu"]
             allowed_commands: vec![],
             allowed_cwd: vec!["/home/worker".into()],
             authorized_users: vec![],
+            p2p: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
         assert_eq!(cfg.worker.allowed_cwd, vec!["/tmp", "/home/worker"]);
@@ -669,6 +692,7 @@ extra = ["docker", "gpu"]
             allowed_commands: vec![],
             allowed_cwd: vec![],
             authorized_users: vec!["@ops:example.com".into()],
+            p2p: false,
         };
         let cfg = cfg.with_cli_overrides(&args);
         assert_eq!(

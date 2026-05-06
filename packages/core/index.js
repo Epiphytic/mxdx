@@ -1,5 +1,6 @@
 // Persistent IndexedDB polyfill for Node.js — must load before WASM.
 // In browser environments this module is not used (browser has real IndexedDB).
+// Rust equivalent: matrix-sdk SQLite crypto store in crates/mxdx-worker/src/lib.rs (OS-bound persistence)
 export { saveIndexedDB, restoreIndexedDB } from './persistent-indexeddb.js';
 
 // wasm-pack --target nodejs emits CommonJS (exports.X = X). When the parent
@@ -13,13 +14,19 @@ const _wasm = _require('./wasm/nodejs/mxdx_core_wasm.js');
 // Re-export WASM bindings. Callers import from '@mxdx/core'.
 export const {
   ShieldStateCode,
+  SessionTransportManager,
+  WasmBatchedSender,
   WasmMatrixClient,
+  WasmSessionManager,
+  buildTelemetryPayload,
+  compressTerminalData,
   create_session_task,
   init,
   parse_active_session,
   parse_completed_session,
   parse_session_result,
   parse_worker_info,
+  processTerminalInput,
   sdk_version,
   session_event_types,
 } = _wasm;

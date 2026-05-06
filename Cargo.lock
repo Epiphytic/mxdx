@@ -3002,6 +3002,7 @@ name = "mxdx-core-wasm"
 version = "1.1.0"
 dependencies = [
  "console_error_panic_hook",
+ "flate2",
  "getrandom 0.3.4",
  "js-sys",
  "matrix-sdk",
@@ -3028,6 +3029,7 @@ dependencies = [
  "hostname",
  "mxdx-matrix",
  "mxdx-test-helpers",
+ "mxdx-test-perf",
  "mxdx-types",
  "reqwest",
  "serde",
@@ -3191,6 +3193,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "mxdx-test-perf"
+version = "1.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "mxdx-types"
 version = "1.1.0"
 dependencies = [
@@ -3244,6 +3256,7 @@ dependencies = [
  "mxdx-matrix",
  "mxdx-p2p",
  "mxdx-test-helpers",
+ "mxdx-test-perf",
  "mxdx-types",
  "reqwest",
  "serde",

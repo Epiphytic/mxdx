@@ -22,6 +22,7 @@ hostname = "0.4"
 
 [dev-dependencies]
 mxdx-test-helpers = { path = "../../tests/helpers" }
+mxdx-test-perf = { path = "../mxdx-test-perf" }
 tokio = { workspace = true, features = ["test-util", "macros"] }
 serde_json = { workspace = true }
 uuid = { workspace = true }

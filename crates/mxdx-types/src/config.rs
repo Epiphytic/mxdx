@@ -102,6 +102,24 @@ pub struct WorkerConfig {
     /// P2P transport feature flag and tuning (Phase 6 wiring; default off per §4.7).
     #[serde(default)]
     pub p2p: P2pConfig,
+    // npm-only fields (ADR 2026-04-29 Pillar 1, req 3) — Option<T> with serde(default)
+    // so existing Rust configs without these keys continue to deserialize correctly.
+    #[serde(default)]
+    pub telemetry: Option<String>,
+    #[serde(default)]
+    pub use_tmux: Option<String>,
+    #[serde(default)]
+    pub batch_ms: Option<u64>,
+    #[serde(default)]
+    pub p2p_batch_ms: Option<u64>,
+    #[serde(default)]
+    pub p2p_advertise_ips: Option<bool>,
+    #[serde(default)]
+    pub p2p_turn_only: Option<bool>,
+    #[serde(default)]
+    pub registration_token: Option<String>,
+    #[serde(default)]
+    pub admin_user: Option<String>,
 }
 
 impl Default for WorkerConfig {
@@ -117,6 +135,14 @@ impl Default for WorkerConfig {
             allowed_cwd: default_allowed_cwd(),
             authorized_users: Vec::new(),
             p2p: P2pConfig::default(),
+            telemetry: None,
+            use_tmux: None,
+            batch_ms: None,
+            p2p_batch_ms: None,
+            p2p_advertise_ips: None,
+            p2p_turn_only: None,
+            registration_token: None,
+            admin_user: None,
         }
     }
 }
@@ -188,6 +214,13 @@ pub struct ClientConfig {
     /// P2P transport feature flag and tuning (Phase 6 wiring; default off per §4.7).
     #[serde(default)]
     pub p2p: P2pConfig,
+    // npm-only fields (ADR 2026-04-29 Pillar 1, req 3)
+    #[serde(default)]
+    pub batch_ms: Option<u64>,
+    #[serde(default)]
+    pub p2p_batch_ms: Option<u64>,
+    #[serde(default)]
+    pub registration_token: Option<String>,
 }
 
 impl Default for ClientConfig {
@@ -198,6 +231,9 @@ impl Default for ClientConfig {
             session: SessionDefaults::default(),
             daemon: DaemonConfig::default(),
             p2p: P2pConfig::default(),
+            batch_ms: None,
+            p2p_batch_ms: None,
+            registration_token: None,
         }
     }
 }
@@ -312,13 +348,114 @@ pub fn config_dir() -> PathBuf {
     dirs::home_dir().expect("no home directory").join(".mxdx")
 }
 
+/// Detect legacy `[launcher]` or `[client]` section wrappers in a config file.
+/// If detected: write `<path>.legacy.bak`, rewrite the file as flat top-level keys,
+/// log a warning to stderr, and return the migrated content.
+/// If not detected: return the original content unchanged.
+///
+/// This implements ADR 2026-04-29 req 6a: migration must occur before any
+/// security-critical field values are parsed, to prevent silent zero-fielding.
+pub fn migrate_legacy_section_if_needed(path: &std::path::Path) -> anyhow::Result<String> {
+    let content = std::fs::read_to_string(path)?;
+
+    // Fast path: check if any legacy section header exists
+    let has_launcher = content.lines().any(|l| l.trim() == "[launcher]");
+    let has_client = content.lines().any(|l| l.trim() == "[client]");
+
+    if !has_launcher && !has_client {
+        return Ok(content);
+    }
+
+    let section_name = if has_launcher { "launcher" } else { "client" };
+
+    // Parse TOML and extract the section table
+    let doc: toml::Value = toml::from_str(&content).map_err(|e| {
+        anyhow::anyhow!("Failed to parse legacy config at {}: {}", path.display(), e)
+    })?;
+
+    let section_table = doc
+        .get(section_name)
+        .and_then(|v| v.as_table())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Config at {} has [{}] header but could not extract section table",
+                path.display(),
+                section_name
+            )
+        })?
+        .clone();
+
+    // Build flat top-level document: take the full parsed doc, remove the section key,
+    // then merge the section's fields into the top level.
+    // This preserves any unrelated top-level keys that existed alongside the section.
+    let mut merged_table = if let toml::Value::Table(t) = doc {
+        t
+    } else {
+        toml::map::Map::new()
+    };
+    merged_table.remove(section_name);
+    for (k, v) in section_table.iter() {
+        merged_table.insert(k.clone(), v.clone());
+    }
+    let flat_value = toml::Value::Table(merged_table);
+    let migrated = toml::to_string_pretty(&flat_value)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize migrated config: {}", e))?;
+
+    // Write the legacy backup before modifying anything
+    let bak_path = {
+        let mut p = path.to_path_buf();
+        let name = p
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("config")
+            .to_string();
+        p.set_file_name(format!("{}.legacy.bak", name));
+        p
+    };
+    std::fs::write(&bak_path, &content)?;
+    #[cfg(unix)]
+    {
+        // Preserve original file permissions on the backup
+        if let Ok(meta) = std::fs::metadata(path) {
+            let _ = std::fs::set_permissions(&bak_path, meta.permissions());
+        }
+    }
+
+    // Overwrite the original file with flat-key layout
+    std::fs::write(path, &migrated)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    eprintln!(
+        "mxdx: WARNING: config file {} used legacy [{}] section wrapper. \
+         Migrated to flat-key layout. Original saved to {}. \
+         See ADR docs/adr/2026-04-29-rust-npm-binary-parity.md for details.",
+        path.display(),
+        section_name,
+        bak_path.display()
+    );
+
+    Ok(migrated)
+}
+
 /// Load config from $HOME/.mxdx/{filename}, returns default if file doesn't exist
 pub fn load_config<T: DeserializeOwned + Default>(filename: &str) -> anyhow::Result<T> {
-    let path = config_dir().join(filename);
+    load_config_from_dir(filename, &config_dir())
+}
+
+/// Load config from a specific directory (testable variant).
+pub fn load_config_from_dir<T: DeserializeOwned + Default>(
+    filename: &str,
+    dir: &std::path::Path,
+) -> anyhow::Result<T> {
+    let path = dir.join(filename);
     if !path.exists() {
         return Ok(T::default());
     }
-    let content = std::fs::read_to_string(&path)?;
+    let content = migrate_legacy_section_if_needed(&path)?;
     Ok(toml::from_str(&content)?)
 }
 
@@ -736,5 +873,211 @@ telemetry_refresh_seconds = 60
         assert_eq!(final_retention, 7);
         assert_eq!(final_telemetry, 60);
         assert_eq!(*final_cross_signing, CrossSigningMode::Auto);
+    }
+
+    // T-3.2: legacy-section migration tests
+
+    #[test]
+    fn migrate_legacy_launcher_section_rewrites_flat_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worker.toml");
+        let legacy = r#"
+[launcher]
+username = "belthanior"
+allowed_commands = ["echo", "ls"]
+allowed_cwd = ["/tmp"]
+max_sessions = 3
+"#;
+        std::fs::write(&path, legacy).unwrap();
+
+        let migrated = migrate_legacy_section_if_needed(&path).unwrap();
+
+        // Flat-key TOML parses as WorkerConfig without error
+        let cfg: WorkerConfig = toml::from_str(&migrated).unwrap();
+        assert_eq!(cfg.max_sessions, 3);
+        assert_eq!(cfg.allowed_commands, vec!["echo", "ls"]);
+        assert_eq!(cfg.allowed_cwd, vec!["/tmp"]);
+
+        // .legacy.bak preserves original content byte-for-byte
+        let bak = std::fs::read_to_string(dir.path().join("worker.toml.legacy.bak")).unwrap();
+        assert_eq!(bak, legacy);
+
+        // File on disk is now the flat-key version
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(on_disk, migrated);
+    }
+
+    #[test]
+    fn migrate_legacy_client_section_rewrites_flat_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("client.toml");
+        let legacy = r#"
+[client]
+username = "liamhelmer"
+servers = ["https://matrix.org"]
+batch_ms = 100
+"#;
+        std::fs::write(&path, legacy).unwrap();
+
+        let migrated = migrate_legacy_section_if_needed(&path).unwrap();
+
+        let cfg: ClientConfig = toml::from_str(&migrated).unwrap();
+        assert_eq!(cfg.batch_ms, Some(100));
+
+        let bak = std::fs::read_to_string(dir.path().join("client.toml.legacy.bak")).unwrap();
+        assert_eq!(bak, legacy);
+    }
+
+    #[test]
+    fn migrate_legacy_no_section_passthrough() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worker.toml");
+        let flat = r#"max_sessions = 7
+allowed_commands = ["cat"]
+"#;
+        std::fs::write(&path, flat).unwrap();
+
+        let result = migrate_legacy_section_if_needed(&path).unwrap();
+        assert_eq!(result, flat);
+
+        // No .legacy.bak written
+        assert!(!dir.path().join("worker.toml.legacy.bak").exists());
+    }
+
+    /// Security-critical field survival test (ADR 2026-04-29 req 6a, T-3.2 blocker):
+    /// authorized_users, allowed_commands, and trust_anchor MUST be byte-for-byte
+    /// identical in the migrated flat-key output. Silent loss of any field is a
+    /// security defect — it would silently open authorization to all users.
+    #[test]
+    fn migrate_security_critical_fields_survive_migration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worker.toml");
+
+        // Representative legacy [launcher]-wrapped config containing all three
+        // security-critical fields from ADR req 6a.
+        let legacy = r#"
+[launcher]
+authorized_users = ["@alice:example.com", "@bob:example.com"]
+allowed_commands = ["echo", "ls", "cat"]
+trust_anchor = "@admin:example.com"
+max_sessions = 5
+"#;
+        std::fs::write(&path, legacy).unwrap();
+
+        let migrated = migrate_legacy_section_if_needed(&path).unwrap();
+        let cfg: WorkerConfig = toml::from_str(&migrated).unwrap();
+
+        // authorized_users: byte-for-byte identical values
+        assert_eq!(
+            cfg.authorized_users,
+            vec!["@alice:example.com", "@bob:example.com"],
+            "authorized_users must survive migration intact"
+        );
+
+        // allowed_commands: byte-for-byte identical values
+        assert_eq!(
+            cfg.allowed_commands,
+            vec!["echo", "ls", "cat"],
+            "allowed_commands must survive migration intact"
+        );
+
+        // trust_anchor: byte-for-byte identical value
+        assert_eq!(
+            cfg.trust_anchor,
+            Some("@admin:example.com".to_string()),
+            "trust_anchor must survive migration intact"
+        );
+
+        // Confirm the .legacy.bak contains the original content
+        let bak = std::fs::read_to_string(dir.path().join("worker.toml.legacy.bak")).unwrap();
+        assert_eq!(bak, legacy, ".legacy.bak must be byte-for-byte original");
+    }
+
+    /// T-3.6: Unknown TOML keys must not cause a parse error (ADR req 5).
+    #[test]
+    fn worker_config_tolerates_unknown_keys() {
+        let toml_str = r#"
+max_sessions = 3
+allowed_commands = ["echo"]
+future_field = "x"
+another_future = 42
+"#;
+        let cfg: WorkerConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.max_sessions, 3);
+        assert_eq!(cfg.allowed_commands, vec!["echo"]);
+    }
+
+    #[test]
+    fn client_config_tolerates_unknown_keys() {
+        let toml_str = r#"
+default_worker_room = "!abc:example.com"
+future_field = "x"
+"#;
+        let cfg: ClientConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.default_worker_room, Some("!abc:example.com".into()));
+    }
+
+    /// Star-chamber consensus finding: migration must not drop top-level keys that exist
+    /// outside the legacy section (e.g., a future_field written by a newer runtime).
+    #[test]
+    fn migrate_preserves_unrelated_top_level_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worker.toml");
+        let legacy = r#"
+future_field = "preserve_me"
+
+[launcher]
+max_sessions = 3
+allowed_commands = ["echo"]
+"#;
+        std::fs::write(&path, legacy).unwrap();
+
+        let migrated = migrate_legacy_section_if_needed(&path).unwrap();
+        let parsed: toml::Value = toml::from_str(&migrated).unwrap();
+        let table = parsed.as_table().unwrap();
+
+        assert_eq!(
+            table.get("future_field").and_then(|v| v.as_str()),
+            Some("preserve_me"),
+            "top-level keys outside legacy section must survive migration"
+        );
+        assert!(
+            table.get("launcher").is_none(),
+            "legacy section key must be removed from migrated file"
+        );
+        assert_eq!(
+            table.get("max_sessions").and_then(|v| v.as_integer()),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn load_config_from_dir_migrates_legacy_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("worker.toml");
+
+        let legacy = r#"
+[launcher]
+authorized_users = ["@ops:example.com"]
+allowed_commands = ["echo"]
+trust_anchor = "@trust:example.com"
+max_sessions = 2
+"#;
+        std::fs::write(&path, legacy).unwrap();
+
+        let cfg: WorkerConfig = load_config_from_dir("worker.toml", dir.path()).unwrap();
+
+        assert_eq!(cfg.authorized_users, vec!["@ops:example.com"]);
+        assert_eq!(cfg.allowed_commands, vec!["echo"]);
+        assert_eq!(cfg.trust_anchor, Some("@trust:example.com".to_string()));
+        assert_eq!(cfg.max_sessions, 2);
+
+        // After load, file should be in flat format, bak should exist
+        assert!(dir.path().join("worker.toml.legacy.bak").exists());
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !on_disk.contains("[launcher]"),
+            "migrated file must not contain [launcher]"
+        );
     }
 }

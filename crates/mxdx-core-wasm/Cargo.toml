@@ -15,11 +15,14 @@ description = "WASM bindings for mxdx Matrix operations"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-wasm-bindgen = "0.2"
-wasm-bindgen-futures = "0.4"
+# ADR docs/adr/2026-04-29-rust-npm-binary-parity.md Assumed Versions: wasm-bindgen MUST be
+# pinned to an exact version. wasm-bindgen-cli and wasm-pack versions in CI MUST match this pin.
+# Mismatch produces a runtime panic at WASM instantiation. ADR amendment required to upgrade.
+wasm-bindgen = "=0.2.114"
+wasm-bindgen-futures = "=0.4.64"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde-wasm-bindgen = "0.6"
+serde-wasm-bindgen = "=0.6.5"
 js-sys = "0.3"
 web-sys = { version = "0.3", features = ["IdbFactory", "IdbOpenDbRequest"] }
 console_error_panic_hook = "0.1"
@@ -27,6 +30,7 @@ console_error_panic_hook = "0.1"
 getrandom = { version = "0.3", features = ["wasm_js"] }
 web-time = "1.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+flate2 = { version = "1", features = ["rust_backend"] }
 
 matrix-sdk = { version = "0.16", default-features = false, features = ["e2e-encryption", "js", "indexeddb", "rustls-tls"] }
 matrix-sdk-base = { version = "0.16", default-features = false, features = ["experimental-encrypted-state-events"] }
@@ -36,4 +40,6 @@ mxdx-p2p = { path = "../mxdx-p2p", version = "1.1.0" }
 uuid = { version = "1", features = ["v4", "js"] }
 
 [dev-dependencies]
-wasm-bindgen-test = "0.3"
+# Must match wasm-bindgen pin above — ADR docs/adr/2026-04-29-rust-npm-binary-parity.md
+# wasm-bindgen-test 0.3.X tracks wasm-bindgen 0.2.X; 0.3.64 == 0.2.114 test crate.
+wasm-bindgen-test = "=0.3.64"

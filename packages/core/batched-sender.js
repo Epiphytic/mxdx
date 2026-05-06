@@ -1,3 +1,15 @@
+// Rust equivalent: crates/mxdx-core-wasm/src/lib.rs::WasmBatchedSender
+//                  (full rate-limit-aware replacement; identical semantics)
+//
+// The launcher hot path now uses `packages/launcher/src/batched-sender-wasm.js`
+// (which delegates to `WasmBatchedSender`). This legacy JS implementation is
+// retained ONLY for callers that have not yet migrated:
+//   - packages/core/terminal-socket.js
+//   - packages/web-console/src/terminal-socket.js
+// Both are tracked as `brains:cleanup` follow-ups for migration to
+// `WasmBatchedSender`. Do not add new callers to this file — use
+// `WasmBatchedSender` (Node + browser) directly via @mxdx/core.
+
 const COMPRESSION_THRESHOLD = 32;
 
 const textEncoder = new TextEncoder();

@@ -11,9 +11,10 @@
 //! Run with: `cargo test -p mxdx-worker --test e2e_binary -- --ignored --nocapture`
 
 use std::process::{Child, Command, Output, Stdio};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mxdx_test_helpers::tuwunel::TuwunelInstance;
+use mxdx_test_perf::{PerfEntry, write_perf_entry};
 
 // E2E test for session restore / device reuse is after the concurrent sessions test.
 
@@ -167,6 +168,7 @@ async fn wait_for_worker_ready() {
 #[tokio::test]
 #[ignore = "local-dev: requires tuwunel binary and compiled mxdx-worker/mxdx-client"]
 async fn e2e_echo_command_lifecycle() {
+    let test_start = Instant::now();
     let mut hs = TuwunelInstance::start().await.unwrap();
     let base_url = format!("http://127.0.0.1:{}", hs.port);
 
@@ -221,6 +223,14 @@ async fn e2e_echo_command_lifecycle() {
         "output should show successful completion, got:\nstdout: {}\nstderr: {}",
         stdout, stderr,
     );
+
+    let _ = write_perf_entry(&PerfEntry {
+        suite: "e2e_binary/echo_command_lifecycle".to_string(),
+        transport: "same-hs".to_string(),
+        runtime: "rust".to_string(),
+        duration_ms: test_start.elapsed().as_millis() as u64,
+        rss_max: None,
+    });
 
     hs.stop().await;
 }

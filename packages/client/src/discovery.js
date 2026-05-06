@@ -23,8 +23,13 @@ export async function findLauncher(client, launcherName) {
     await client.syncOnce();
   }
 
-  const topology = await client.findLauncherSpace(launcherName);
-  if (!topology) return null;
+  // findLauncherSpace returns either JS null or a JSON string. The WASM
+  // boundary forces JSON-string returns for serde_json::Value-shaped types
+  // (serde_wasm_bindgen::to_value silently drops nested values). See
+  // crates/mxdx-core-wasm/src/lib.rs::LauncherTopology.
+  const topologyRaw = await client.findLauncherSpace(launcherName);
+  if (!topologyRaw) return null;
+  const topology = typeof topologyRaw === 'string' ? JSON.parse(topologyRaw) : topologyRaw;
   return {
     name: launcherName,
     ...topology,

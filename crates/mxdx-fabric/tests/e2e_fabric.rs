@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mxdx_fabric::coordinator::CoordinatorBot;
 use mxdx_fabric::process_worker::ProcessWorker;
@@ -12,6 +12,7 @@ use mxdx_fabric::{
 };
 use mxdx_matrix::MatrixClient;
 use mxdx_test_helpers::tuwunel::TuwunelInstance;
+use mxdx_test_perf::{PerfEntry, write_perf_entry};
 use mxdx_types::events::capability::{
     CapabilityAdvertisement, InputSchema, SchemaProperty, WorkerTool,
 };
@@ -35,6 +36,7 @@ fn make_task(uuid: &str, sender_id: &str) -> TaskEvent {
 
 #[tokio::test]
 async fn fabric_happy_path_e2e() {
+    let test_start = Instant::now();
     let mut hs = TuwunelInstance::start().await.unwrap();
     let base_url = format!("http://127.0.0.1:{}", hs.port);
 
@@ -250,6 +252,14 @@ async fn fabric_happy_path_e2e() {
         0,
         "watchlist should be empty after result"
     );
+
+    let _ = write_perf_entry(&PerfEntry {
+        suite: "e2e_fabric/fabric_happy_path".to_string(),
+        transport: "same-hs".to_string(),
+        runtime: "rust".to_string(),
+        duration_ms: test_start.elapsed().as_millis() as u64,
+        rss_max: None,
+    });
 
     hs.stop().await;
 }

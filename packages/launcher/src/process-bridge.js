@@ -1,3 +1,4 @@
+// Rust equivalent: crates/mxdx-worker/src/bin/mxdx_exec.rs::main (subprocess execution via mxdx-exec binary, OS-bound)
 import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 

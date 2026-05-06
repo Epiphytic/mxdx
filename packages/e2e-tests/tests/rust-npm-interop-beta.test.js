@@ -1,12 +1,17 @@
 /**
  * Rust ↔ npm Interop Beta E2E: 8-combination test matrix.
  *
- * {Rust client, npm client} × {Rust worker, npm launcher} × {single-HS, federated}
+ * {rust|npm client} × {rust worker|npm launcher} × {same-hs|federated}
  *
- * Per storm §5.4: 100 keystrokes, assert decrypted echoes in order,
- * ≥95% P2P transport where both sides support P2P.
+ * Parameterized via combinations.forEach to prevent N×M drift.
+ * Per ADR 2026-04-29 Pillar 2, req 7/10: all 8 combinations must run.
  *
- * Bead: mxdx-awe.34 (T-73)
+ * MSC4362 traceability: every Matrix event in these tests (exec commands,
+ * session output) MUST be encrypted on the wire under the
+ * experimental-encrypted-state-events extension. Both Rust (matrix-sdk
+ * with msrv 0.16 + experimental-encrypted-state-events feature) and npm
+ * (WasmMatrixClient via mxdx-core-wasm with MSC4362 enabled) enforce this.
+ * See: docs/adr/2026-04-29-rust-npm-binary-parity.md Pillar 2 + CLAUDE.md.
  */
 import { describe, it, before } from 'node:test';
 import assert from 'node:assert/strict';
@@ -14,16 +19,34 @@ import {
   loadBetaCredentials,
   skipIfNoFederatedCredentials,
   spawnRustBinary,
-  sleep,
+  spawnNpmBinary,
 } from '../src/beta.js';
 
 const skipReason = skipIfNoFederatedCredentials();
 
-// Skip individual combinations via env vars for debugging
-const SKIP_NPM_NPM = process.env.SKIP_NPM_NPM === '1';
-const SKIP_RUST_NPM = process.env.SKIP_RUST_NPM === '1';
-const SKIP_NPM_RUST = process.env.SKIP_NPM_RUST === '1';
-const SKIP_RUST_RUST = process.env.SKIP_RUST_RUST === '1';
+/** All 8 {client_runtime × worker_runtime × hs_topology} combinations. */
+const COMBINATIONS = [
+  { id: 't1a', client_runtime: 'rust', worker_runtime: 'rust', hs_topology: 'same-hs' },
+  { id: 't1b', client_runtime: 'rust', worker_runtime: 'rust', hs_topology: 'federated' },
+  { id: 't2a', client_runtime: 'npm', worker_runtime: 'rust', hs_topology: 'same-hs' },
+  { id: 't2b', client_runtime: 'npm', worker_runtime: 'rust', hs_topology: 'federated' },
+  { id: 't3a', client_runtime: 'rust', worker_runtime: 'npm', hs_topology: 'same-hs' },
+  { id: 't3b', client_runtime: 'rust', worker_runtime: 'npm', hs_topology: 'federated' },
+  // advisory: not yet blocking (P2P quarantine — see wire-format-parity-gate-policy.md)
+  // Security doc: docs/reviews/security/2026-04-29-p2p-cross-runtime-dtls-verification.md
+  { id: 't4a', client_runtime: 'npm', worker_runtime: 'npm', hs_topology: 'same-hs', advisory: true },
+  { id: 't4b', client_runtime: 'npm', worker_runtime: 'npm', hs_topology: 'federated', advisory: true },
+];
+
+// Per-combination env-var overrides for debugging
+function isEnvSkipped({ client_runtime, worker_runtime }) {
+  const key = `SKIP_${client_runtime.toUpperCase()}_${worker_runtime.toUpperCase()}`;
+  return process.env[key] === '1' ? `${key}=1` : null;
+}
+
+function skipFor(combo) {
+  return isEnvSkipped(combo) ?? (skipReason || undefined);
+}
 
 describe('Rust ↔ npm Interop Beta', {
   skip: skipReason,
@@ -35,116 +58,154 @@ describe('Rust ↔ npm Interop Beta', {
     creds = loadBetaCredentials();
   });
 
-  // --- t1a: Rust client → Rust worker (same HS) ---
-  it('t1a: Rust client → Rust worker (ca1, same-HS)', {
-    skip: SKIP_RUST_RUST && 'SKIP_RUST_RUST=1',
-  }, async () => {
-    const worker = spawnRustBinary('mxdx-worker', [
-      'start', '--homeserver', creds.server.url,
-      '--username', creds.account1.username,
-      '--password', creds.account1.password,
-      '--p2p',
-    ]);
+  COMBINATIONS.forEach(({ id, client_runtime, worker_runtime, hs_topology, advisory }) => {
+    const label = `${id}: ${client_runtime} client → ${worker_runtime} worker (${hs_topology})${advisory ? ' [advisory]' : ''}`;
+    const skipMsg = skipFor({ client_runtime, worker_runtime });
 
-    try {
-      await worker.waitForOutput('worker ready', 30_000);
+    it(label, { skip: skipMsg }, async () => {
+      const workerServer = hs_topology === 'federated' ? creds.server2.url : creds.server.url;
+      const clientServer = creds.server.url;
+      const timeout = hs_topology === 'federated' ? 90_000 : 60_000;
 
-      const client = spawnRustBinary('mxdx-client', [
-        '--homeserver', creds.server.url,
-        '--username', creds.account2.username,
-        '--password', creds.account2.password,
-        '--p2p',
-        'exec', 'echo', 'interop-t1a',
-      ]);
+      // -- Rust worker, Rust client (t1a / t1b) --
+      if (worker_runtime === 'rust' && client_runtime === 'rust') {
+        const worker = spawnRustBinary('mxdx-worker', [
+          'start', '--homeserver', workerServer,
+          '--username', creds.account1.username,
+          '--password', creds.account1.password,
+          '--allowed-command', 'echo',
+          '--allowed-command', 'date',
+          '--allowed-command', 'uname',
+          '--allowed-cwd', '/tmp',
+        ]);
 
-      try {
-        const { code, stdout } = await client.waitForExit(60_000);
-        assert.equal(code, 0);
-        assert.ok(stdout.includes('interop-t1a'));
-      } finally {
-        client.kill();
+        try {
+          await worker.waitForOutput('MXDX_WORKER_READY', 30_000);
+
+          const client = spawnRustBinary('mxdx-client', [
+            '--homeserver', clientServer,
+            '--username', creds.account2.username,
+            '--password', creds.account2.password,
+            'exec', '--cwd', '/tmp', 'echo', `interop-${id}`,
+          ]);
+
+          try {
+            const { code, stdout } = await client.waitForExit(timeout);
+            assert.equal(code, 0);
+            assert.ok(stdout.includes(`interop-${id}`));
+          } finally {
+            client.kill();
+          }
+        } finally {
+          worker.kill();
+        }
+        return;
       }
-    } finally {
-      worker.kill();
-    }
-  });
 
-  // --- t1b: Rust client → Rust worker (federated) ---
-  it('t1b: Rust client → Rust worker (ca1↔ca2, federated)', {
-    skip: SKIP_RUST_RUST && 'SKIP_RUST_RUST=1',
-  }, async () => {
-    const worker = spawnRustBinary('mxdx-worker', [
-      'start', '--homeserver', creds.server2.url,
-      '--username', creds.account1.username,
-      '--password', creds.account1.password,
-      '--p2p',
-    ]);
+      // -- npm client → Rust worker (t2a / t2b) --
+      if (worker_runtime === 'rust' && client_runtime === 'npm') {
+        const worker = spawnRustBinary('mxdx-worker', [
+          'start', '--homeserver', workerServer,
+          '--username', creds.account1.username,
+          '--password', creds.account1.password,
+          '--allowed-command', 'echo',
+          '--allowed-command', 'date',
+          '--allowed-command', 'uname',
+          '--allowed-cwd', '/tmp',
+        ]);
 
-    try {
-      await worker.waitForOutput('worker ready', 30_000);
+        try {
+          await worker.waitForOutput('MXDX_WORKER_READY', 30_000);
 
-      const client = spawnRustBinary('mxdx-client', [
-        '--homeserver', creds.server.url,
-        '--username', creds.account2.username,
-        '--password', creds.account2.password,
-        '--p2p',
-        'exec', 'echo', 'interop-t1b',
-      ]);
+          const client = spawnNpmBinary('client', [
+            '--server', clientServer,
+            '--username', creds.account2.username,
+            '--password', creds.account2.password,
+            'exec', creds.account1.username, 'echo', `interop-${id}`,
+          ]);
 
-      try {
-        const { code, stdout } = await client.waitForExit(90_000);
-        assert.equal(code, 0);
-        assert.ok(stdout.includes('interop-t1b'));
-      } finally {
-        client.kill();
+          try {
+            const { code, stdout } = await client.waitForExit(timeout);
+            assert.equal(code, 0, `npm client should exit 0, got ${code}\nstdout: ${stdout}\nstderr: ${client.stderr}`);
+            assert.ok(stdout.includes(`interop-${id}`), `stdout should contain interop-${id}, got: ${stdout}`);
+          } finally {
+            client.kill();
+          }
+        } finally {
+          worker.kill();
+        }
+        return;
       }
-    } finally {
-      worker.kill();
-    }
-  });
 
-  // --- Placeholder: npm-involving combinations ---
-  // t2a/t2b: npm client → Rust worker (requires @mxdx/client npm binary)
-  // t3a/t3b: Rust client → npm launcher (requires @mxdx/launcher npm process)
-  // t4a/t4b: npm client → npm launcher (npm regression check)
-  //
-  // These require the npm launcher and client to be runnable as subprocesses.
-  // Full implementation pending npm binary availability in the test environment.
+      // -- Rust client → npm launcher (t3a / t3b) --
+      if (worker_runtime === 'npm' && client_runtime === 'rust') {
+        const launcher = spawnNpmBinary('launcher', [
+          '--servers', workerServer,
+          '--username', creds.account1.username,
+          '--password', creds.account1.password,
+          '--allowed-commands', 'echo,date,uname',
+          '--allowed-cwd', '/tmp',
+        ]);
 
-  it('t2a: npm client → Rust worker (ca1, same-HS)', {
-    skip: SKIP_NPM_RUST ? 'SKIP_NPM_RUST=1' : 'npm client subprocess not yet wired',
-  }, async () => {
-    // TODO: Wire npm client subprocess
-    assert.ok(true, 'placeholder');
-  });
+        try {
+          await launcher.waitForOutput('Listening for commands', 30_000);
 
-  it('t2b: npm client → Rust worker (ca1↔ca2, federated)', {
-    skip: SKIP_NPM_RUST ? 'SKIP_NPM_RUST=1' : 'npm client subprocess not yet wired',
-  }, async () => {
-    assert.ok(true, 'placeholder');
-  });
+          const client = spawnRustBinary('mxdx-client', [
+            '--homeserver', clientServer,
+            '--username', creds.account2.username,
+            '--password', creds.account2.password,
+            'exec', '--cwd', '/tmp', 'echo', `interop-${id}`,
+          ]);
 
-  it('t3a: Rust client → npm launcher (ca1, same-HS)', {
-    skip: SKIP_RUST_NPM ? 'SKIP_RUST_NPM=1' : 'npm launcher subprocess not yet wired',
-  }, async () => {
-    assert.ok(true, 'placeholder');
-  });
+          try {
+            const { code, stdout } = await client.waitForExit(timeout);
+            assert.equal(code, 0, `Rust client should exit 0, got ${code}\nstdout: ${stdout}\nstderr: ${client.stderr}`);
+            assert.ok(stdout.includes(`interop-${id}`), `stdout should contain interop-${id}, got: ${stdout}`);
+          } finally {
+            client.kill();
+          }
+        } finally {
+          launcher.kill();
+        }
+        return;
+      }
 
-  it('t3b: Rust client → npm launcher (ca1↔ca2, federated)', {
-    skip: SKIP_RUST_NPM ? 'SKIP_RUST_NPM=1' : 'npm launcher subprocess not yet wired',
-  }, async () => {
-    assert.ok(true, 'placeholder');
-  });
+      // -- npm client → npm launcher (t4a / t4b) --
+      // advisory: not yet blocking — P2P combinations pending security verification
+      // Security doc: docs/reviews/security/2026-04-29-p2p-cross-runtime-dtls-verification.md
+      if (worker_runtime === 'npm' && client_runtime === 'npm') {
+        const launcher = spawnNpmBinary('launcher', [
+          '--servers', workerServer,
+          '--username', creds.account1.username,
+          '--password', creds.account1.password,
+          '--allowed-commands', 'echo,date,uname',
+          '--allowed-cwd', '/tmp',
+        ]);
 
-  it('t4a: npm client → npm launcher (ca1, same-HS, regression)', {
-    skip: SKIP_NPM_NPM ? 'SKIP_NPM_NPM=1' : 'npm launcher subprocess not yet wired',
-  }, async () => {
-    assert.ok(true, 'placeholder');
-  });
+        try {
+          await launcher.waitForOutput('Listening for commands', 30_000);
 
-  it('t4b: npm client → npm launcher (ca1↔ca2, federated, regression)', {
-    skip: SKIP_NPM_NPM ? 'SKIP_NPM_NPM=1' : 'npm launcher subprocess not yet wired',
-  }, async () => {
-    assert.ok(true, 'placeholder');
+          const client = spawnNpmBinary('client', [
+            '--server', clientServer,
+            '--username', creds.account2.username,
+            '--password', creds.account2.password,
+            'exec', creds.account1.username, 'echo', `interop-${id}`,
+          ]);
+
+          try {
+            const { code, stdout } = await client.waitForExit(timeout);
+            assert.equal(code, 0, `npm client should exit 0, got ${code}\nstdout: ${stdout}\nstderr: ${client.stderr}`);
+            assert.ok(stdout.includes(`interop-${id}`), `stdout should contain interop-${id}, got: ${stdout}`);
+          } finally {
+            client.kill();
+          }
+        } finally {
+          launcher.kill();
+        }
+        return;
+      }
+
+      assert.fail(`Combination ${id} has unhandled runtime combination: client=${client_runtime} worker=${worker_runtime}`);
+    });
   });
 });

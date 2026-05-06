@@ -241,12 +241,12 @@ jobs:
           sudo dpkg -i /tmp/tuwunel.deb
       - run: cargo test -p mxdx-test-helpers
       - run: cargo test -p mxdx-matrix
-      - run: cargo test -p mxdx-launcher --test e2e_command
+      - run: cargo test -p mxdx-launcher --test integration_command
       - run: cargo test -p mxdx-launcher --test e2e_terminal_session
       - run: cargo test -p mxdx-policy --test appservice_registration
       - run: cargo test -p mxdx-policy --test policy_enforcement
-      - run: cargo test -p mxdx-secrets --test e2e_secret_request
-      - run: cargo test -p mxdx-launcher --test e2e_full_system
+      - run: cargo test -p mxdx-secrets --test integration_secret_request
+      - run: cargo test -p mxdx-launcher --test integration_full_system
       - run: cargo test -p mxdx-launcher --lib -- --include-ignored
 
   federation:
@@ -302,7 +302,10 @@ jobs:
         with:
           node-version: "22"
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md: wasm-pack MUST be pinned to a
+        # specific version matching the wasm-bindgen pin (=0.2.114) in mxdx-core-wasm/Cargo.toml.
+        # ADR amendment required to upgrade either version.
+        run: cargo install wasm-pack --version 0.14.0 --locked
       # Tuwunel not installed — npm E2E tests that need it will skip gracefully
       - name: Build WASM (nodejs)
         run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
@@ -312,14 +315,38 @@ jobs:
         run: |
           rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/web/.gitignore
           echo '{"type": "commonjs"}' > packages/core/wasm/nodejs/package.json
+      # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md req 18: fail if either WASM target missing
+      - name: Verify WASM artifacts present
+        run: |
+          test -f packages/core/wasm/nodejs/mxdx_core_wasm.js || (echo "ERROR: nodejs WASM target missing" && exit 1)
+          test -f packages/core/wasm/web/mxdx_core_wasm.js || (echo "ERROR: web WASM target missing" && exit 1)
       - name: Install npm dependencies
         run: npm install
       - name: Run launcher unit tests
         run: node --test packages/launcher/tests/runtime-unit.test.js
+      - name: Run launcher config tests (flat-key schema, migration)
+        run: node --test packages/launcher/src/config.test.js
+      - name: Run client config tests (flat-key schema, migration)
+        run: node --test packages/client/src/config.test.js
       - name: Run local E2E tests (onboarding)
         run: node --test packages/e2e-tests/tests/launcher-onboarding.test.js
-      - name: Run local E2E tests (commands)
-        run: node --test packages/e2e-tests/tests/launcher-commands.test.js
+      - name: Run integration tests (launcher commands — WASM-direct)
+        run: node --test packages/integration-tests/tests/launcher-commands.test.js
+
+  # Warn-only for 5 business days from 2026-04-30; T-2.8 flips to blocking
+  # (removes continue-on-error) after the false-positive window closes.
+  # ADR: docs/adr/2026-04-29-rust-npm-binary-parity.md req 28
+  e2e-subprocess-lint:
+    needs: preflight
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Lint E2E tests for subprocess discipline
+        run: node scripts/lint-e2e-subprocess.mjs
 
   npm-pack:
     needs: npm-e2e
@@ -334,7 +361,10 @@ jobs:
         with:
           node-version: "22"
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md: wasm-pack MUST be pinned to a
+        # specific version matching the wasm-bindgen pin (=0.2.114) in mxdx-core-wasm/Cargo.toml.
+        # ADR amendment required to upgrade either version.
+        run: cargo install wasm-pack --version 0.14.0 --locked
       - name: Build WASM (nodejs)
         run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
       - name: Build WASM (web)
@@ -343,6 +373,11 @@ jobs:
         run: |
           rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/web/.gitignore
           echo '{"type": "commonjs"}' > packages/core/wasm/nodejs/package.json
+      # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md req 18: fail if either WASM target missing
+      - name: Verify WASM artifacts present
+        run: |
+          test -f packages/core/wasm/nodejs/mxdx_core_wasm.js || (echo "ERROR: nodejs WASM target missing" && exit 1)
+          test -f packages/core/wasm/web/mxdx_core_wasm.js || (echo "ERROR: web WASM target missing" && exit 1)
       - name: Install npm deps
         run: npm install
       - name: Build web-console
@@ -360,6 +395,138 @@ jobs:
           node packages/mxdx/bin/mxdx.js launcher --help
           node packages/mxdx/bin/mxdx.js client --help
 
+  # Wire-format-parity gate: all 8 {rust|npm client} × {rust|npm worker} × {same-hs|federated}
+  # combinations must pass. P2P combinations (t4a/t4b) are advisory until 10 consecutive greens.
+  # ADR: docs/adr/2026-04-29-rust-npm-binary-parity.md reqs 7, 8, 11
+  # Override policy: docs/adr/overrides/README.md
+  # Flake/quarantine policy: docs/adr/overrides/wire-format-parity-gate-policy.md
+  wire-format-parity:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.full_e2e
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install system deps
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev tmux
+      - name: Install wasm-pack
+        # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md: wasm-pack MUST be pinned to a
+        # specific version matching the wasm-bindgen pin (=0.2.114) in mxdx-core-wasm/Cargo.toml.
+        # ADR amendment required to upgrade either version.
+        run: cargo install wasm-pack --version 0.14.0 --locked
+      - name: Build Rust binaries (release)
+        run: cargo build --release -p mxdx-worker -p mxdx-client
+      - name: Build WASM (nodejs)
+        run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
+      - name: Build WASM (web)
+        run: wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/core/wasm/web
+      - name: Fix WASM module type markers
+        run: |
+          rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/web/.gitignore
+          echo '{"type": "commonjs"}' > packages/core/wasm/nodejs/package.json
+      # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md req 18: fail if either WASM target missing
+      - name: Verify WASM artifacts present
+        run: |
+          test -f packages/core/wasm/nodejs/mxdx_core_wasm.js || (echo "ERROR: nodejs WASM target missing" && exit 1)
+          test -f packages/core/wasm/web/mxdx_core_wasm.js || (echo "ERROR: web WASM target missing" && exit 1)
+      - name: Install npm dependencies
+        run: npm install
+      - name: Write test credentials
+        run: echo "$TEST_CREDENTIALS_TOML" > test-credentials.toml
+        env:
+          TEST_CREDENTIALS_TOML: ${{ secrets.TEST_CREDENTIALS_TOML }}
+      - name: Run wire-format-parity gate (t1a-t3b, blocking)
+        # SKIP_NPM_NPM=1 excludes advisory P2P combinations (t4a/t4b)
+        # Those run separately in wire-format-parity-p2p (continue-on-error: true)
+        run: |
+          mkdir -p test-results
+          node --test \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=junit --test-reporter-destination=test-results/wire-format-parity-junit.xml \
+            packages/e2e-tests/tests/rust-npm-interop-beta.test.js
+        env:
+          SKIP_NPM_NPM: "1"
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wire-format-parity-results
+          path: test-results/wire-format-parity-junit.xml
+          retention-days: 90
+
+  # Advisory P2P combinations (t4a/t4b): npm client → npm launcher, same-hs and federated.
+  # Non-blocking until 10 consecutive green runs across distinct CI runner environments.
+  # Security doc: docs/reviews/security/2026-04-29-p2p-cross-runtime-dtls-verification.md
+  # Gate policy: docs/adr/overrides/wire-format-parity-gate-policy.md §3
+  wire-format-parity-p2p:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch' && inputs.full_e2e
+    continue-on-error: true
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.93.1
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install system deps
+        run: sudo apt-get install -y libsqlite3-dev libssl-dev tmux
+      - name: Install wasm-pack
+        # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md: wasm-pack MUST be pinned to a
+        # specific version matching the wasm-bindgen pin (=0.2.114) in mxdx-core-wasm/Cargo.toml.
+        # ADR amendment required to upgrade either version.
+        run: cargo install wasm-pack --version 0.14.0 --locked
+      - name: Build WASM (nodejs)
+        run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
+      - name: Build WASM (web)
+        run: wasm-pack build crates/mxdx-core-wasm --target web --out-dir ../../packages/core/wasm/web
+      - name: Fix WASM module type markers
+        run: |
+          rm -f packages/core/wasm/nodejs/.gitignore packages/core/wasm/web/.gitignore
+          echo '{"type": "commonjs"}' > packages/core/wasm/nodejs/package.json
+      # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md req 18: fail if either WASM target missing
+      - name: Verify WASM artifacts present
+        run: |
+          test -f packages/core/wasm/nodejs/mxdx_core_wasm.js || (echo "ERROR: nodejs WASM target missing" && exit 1)
+          test -f packages/core/wasm/web/mxdx_core_wasm.js || (echo "ERROR: web WASM target missing" && exit 1)
+      - name: Install npm dependencies
+        run: npm install
+      - name: Write test credentials
+        run: echo "$TEST_CREDENTIALS_TOML" > test-credentials.toml
+        env:
+          TEST_CREDENTIALS_TOML: ${{ secrets.TEST_CREDENTIALS_TOML }}
+      - name: Run wire-format-parity gate (t4a/t4b, advisory)
+        # Run only npm×npm combinations. SKIP_RUST_RUST + SKIP_NPM_RUST + SKIP_RUST_NPM
+        # leaves only t4a (npm client → npm launcher, same-hs) and t4b (federated).
+        run: |
+          mkdir -p test-results
+          node --test \
+            --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=junit --test-reporter-destination=test-results/wire-format-parity-p2p-junit.xml \
+            packages/e2e-tests/tests/rust-npm-interop-beta.test.js
+        env:
+          SKIP_RUST_RUST: "1"
+          SKIP_NPM_RUST: "1"
+          SKIP_RUST_NPM: "1"
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wire-format-parity-p2p-results
+          path: test-results/wire-format-parity-p2p-junit.xml
+          retention-days: 90
+
   npm-public-server:
     needs: preflight
     runs-on: ubuntu-latest
@@ -374,7 +541,10 @@ jobs:
         with:
           node-version: "22"
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md: wasm-pack MUST be pinned to a
+        # specific version matching the wasm-bindgen pin (=0.2.114) in mxdx-core-wasm/Cargo.toml.
+        # ADR amendment required to upgrade either version.
+        run: cargo install wasm-pack --version 0.14.0 --locked
       - name: Build WASM (nodejs)
         run: wasm-pack build crates/mxdx-core-wasm --target nodejs --out-dir ../../packages/core/wasm/nodejs
       - name: Fix WASM module type marker
@@ -415,7 +585,10 @@ jobs:
         run: sudo apt-get install -y libsqlite3-dev libssl-dev tmux
 
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        # ADR docs/adr/2026-04-29-rust-npm-binary-parity.md: wasm-pack MUST be pinned to a
+        # specific version matching the wasm-bindgen pin (=0.2.114) in mxdx-core-wasm/Cargo.toml.
+        # ADR amendment required to upgrade either version.
+        run: cargo install wasm-pack --version 0.14.0 --locked
 
       - name: Write test credentials
         run: echo "$TEST_CREDENTIALS_TOML" > test-credentials.toml
